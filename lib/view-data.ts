@@ -77,7 +77,8 @@ const MODEL_CARD_COLUMNS = `
   reproducibility_summary, provenance_summary, comparability_summary,
   top_scores, source_urls, detail_urls,
   model_url, release_date,
-  architecture, params, inference_engine, inference_platform
+  architecture, params, inference_engine, inference_platform,
+  open_weights
 `
 
 // The composite/family/slice taxonomy replaced the legacy

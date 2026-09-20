@@ -1641,3 +1641,83 @@
   line-height: 1.5;
   color: var(--fg-subtle);
 }
+
+/* ---------------------------------------------------------------------------
+   Weights (open / closed / unknown) filter
+   Mirrors the param-range picker's checkbox idiom so the two filter rails
+   read as one control surface.
+--------------------------------------------------------------------------- */
+.ow-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+.ow-filter-headline {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+}
+.ow-filter-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.ow-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 2px 4px;
+  white-space: nowrap;
+  transition: color var(--transition);
+}
+.ow-toggle.on {
+  color: var(--fg);
+}
+.ow-toggle:hover {
+  color: var(--accent);
+}
+.ow-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.ow-toggle-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  font-size: 10px;
+  line-height: 1;
+}
+.ow-toggle.on .ow-toggle-box {
+  background: var(--fg);
+  color: var(--bg);
+}
+.ow-toggle-count {
+  color: var(--fg-subtle);
+  font-variant-numeric: tabular-nums;
+}
+.ow-toggle.on .ow-toggle-count {
+  color: var(--fg-muted);
+}
+.ow-filter-empty {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}

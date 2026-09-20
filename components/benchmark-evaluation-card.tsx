@@ -55,6 +55,7 @@ export type BenchmarkEvaluationCardData = {
   }>
   latest_source_name?: string
   params_billions?: number | null
+  open_weights?: boolean | null
   benchmark_names?: string[]
   score_summary?: {
     count: number

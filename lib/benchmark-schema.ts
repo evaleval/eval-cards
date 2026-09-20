@@ -88,6 +88,8 @@ export interface ModelInfo {
   parameter_count?: string
   release_date?: string
   model_url?: string
+  // Same tri-state as EvaluationCardData.open_weights.
+  open_weights?: boolean | null
   additional_details?: {
     precision?: string
     architecture?: string
@@ -334,6 +336,9 @@ export interface EvaluationCardData {
   }>
   latest_source_name?: string
   params_billions?: number | null
+  // TRUE = weights published, FALSE = registry-curated closed, null/absent =
+  // unknown. See `lib/model-openness.ts` — null is NOT closed.
+  open_weights?: boolean | null
   benchmark_names?: string[]
   score_summary?: {
     count: number
