@@ -425,31 +425,13 @@ export function FamilyTable({
         if (overview) description = overview.length > 140 ? overview.slice(0, 137) + "…" : overview
       }
 
-      // "Reported results" approximates the unique models tested in the
-      // family. provenance_summary.total_results counts every (model,
-      // metric) report row, so families that publish many metrics inflate
-      // the number — agentharm's 4 declared metrics turned 18 unique
-      // models into 72 result rows. Normalise by the family's metric
-      // count (sum of bench-level metric entries; clamp to 1 to avoid
-      // div-by-zero on families whose metrics array is empty).
-      const totalResults =
+      // Same definition as the home page and benchmark cards: one per
+      // (model, benchmark, metric).
+      const reportedResults =
         fam.provenance_summary?.total_results ??
         fam.reproducibility_summary?.results_total ??
         fam.evals_count ??
         metricCount
-      const allBenchesForMetricCount: HierarchyBenchmark[] = [
-        ...(fam.benchmarks ?? []),
-        ...(fam.standalone_benchmarks ?? []),
-        ...(fam.composites ?? []).flatMap((c) => c.benchmarks ?? []),
-      ]
-      const familyMetricCount = allBenchesForMetricCount.reduce(
-        (n, b) => n + Math.max((b.metrics ?? []).length, 1),
-        0,
-      )
-      const reportedResults =
-        familyMetricCount > 0
-          ? Math.round(totalResults / familyMetricCount)
-          : totalResults
       out.push({
         key: fam.key,
         name: displayName,
