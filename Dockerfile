@@ -47,8 +47,12 @@ COPY . ./
 # fall back to the latest published snapshot. Bake the resolved value to a file
 # so the runtime stage serves the exact snapshot we prerendered against. Fails
 # the build (test -n) rather than shipping an empty/guessed snapshot.
+# Strip whitespace first: a Space "Variable" pasted with a trailing newline
+# arrives here verbatim and would otherwise be spliced into every snapshot URL
+# (`.../<snapshot>\n/eval_results_view.parquet` -> 404 -> failed build).
 RUN set -e; \
-    if [ -z "${SNAPSHOT_URL:-}" ]; then SNAPSHOT_URL="$(node scripts/resolve-latest-snapshot.mjs)"; fi; \
+    SNAPSHOT_URL="$(printf '%s' "${SNAPSHOT_URL:-}" | tr -d '[:space:]')"; \
+    if [ -z "$SNAPSHOT_URL" ]; then SNAPSHOT_URL="$(node scripts/resolve-latest-snapshot.mjs | tr -d '[:space:]')"; fi; \
     test -n "$SNAPSHOT_URL"; \
     printf '%s' "$SNAPSHOT_URL" > /app/.resolved-snapshot-url; \
     echo "[docker] building against snapshot: $SNAPSHOT_URL"; \
@@ -94,4 +98,4 @@ EXPOSE 3000
 # server in the background, warm the high-traffic data endpoints against the
 # local instance so `/data/sidecars` and Next route caches are hot, then keep
 # the server process in the foreground.
-ENTRYPOINT ["sh", "-c", "export SNAPSHOT_URL=\"${SNAPSHOT_URL:-$(cat /app/.resolved-snapshot-url)}\"; echo \"[docker] serving snapshot: $SNAPSHOT_URL\"; npm run start -- -p ${PORT:-3000} & server_pid=$!; node scripts/warm-startup-cache.mjs http://127.0.0.1:${PORT:-3000}; wait $server_pid"]
+ENTRYPOINT ["sh", "-c", "export SNAPSHOT_URL=\"$(printf '%s' \"${SNAPSHOT_URL:-$(cat /app/.resolved-snapshot-url)}\" | tr -d '[:space:]')\"; echo \"[docker] serving snapshot: $SNAPSHOT_URL\"; npm run start -- -p ${PORT:-3000} & server_pid=$!; node scripts/warm-startup-cache.mjs http://127.0.0.1:${PORT:-3000}; wait $server_pid"]
