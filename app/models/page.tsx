@@ -15,6 +15,13 @@ import { fetchCorpusAggregates, fetchDevelopers, fetchModelCards, fetchBenchmark
 import type { BenchmarkCard } from "@/lib/benchmark-schema"
 import { isOfficialDeveloper } from "@/lib/known-developers"
 import { PARAM_RANGE_MAX_INDEX, paramStepToNumeric } from "@/lib/param-range"
+import { OpennessFilter } from "@/components/openness-filter"
+import {
+  MODEL_OPENNESS_ORDER,
+  matchesOpenness,
+  modelOpenness,
+  type ModelOpenness,
+} from "@/lib/model-openness"
 
 const PAGE_SIZE = 40
 const MAX_COMPARE_MODELS = 4
@@ -96,6 +103,8 @@ export default function ModelsPage() {
   const [minParamStep, setMinParamStep] = useState(0)
   const [maxParamStep, setMaxParamStep] = useState(PARAM_RANGE_MAX_INDEX)
   const [showUnknownSize, setShowUnknownSize] = useState(true)
+  // All three on by default: the filter narrows, it never hides by surprise.
+  const [openness, setOpenness] = useState<ModelOpenness[]>([...MODEL_OPENNESS_ORDER])
   const deferredSearchQuery = useDeferredValue(searchQuery)
   const numericMinParams = useMemo(() => paramStepToNumeric(minParamStep, "min"), [minParamStep])
   const numericMaxParams = useMemo(() => paramStepToNumeric(maxParamStep, "max"), [maxParamStep])
@@ -176,6 +185,8 @@ export default function ModelsPage() {
     const query = deferredSearchQuery.trim().toLowerCase()
     let filtered = evaluations
 
+    filtered = filtered.filter((row) => matchesOpenness(row.open_weights, openness))
+
     filtered = filtered.filter((row) => {
       if (row.params_billions == null) return showUnknownSize
       if (numericMinParams != null && row.params_billions < numericMinParams) return false
@@ -220,7 +231,34 @@ export default function ModelsPage() {
       if (cmp === 0) return nameOf(a).localeCompare(nameOf(b))
       return cmp * dirMul
     })
-  }, [evaluations, deferredSearchQuery, modelSortBy, modelSortDir, numericMinParams, numericMaxParams, showUnknownSize])
+  }, [evaluations, deferredSearchQuery, modelSortBy, modelSortDir, numericMinParams, numericMaxParams, showUnknownSize, openness])
+
+  // Counts for the weights filter. Computed with every OTHER filter applied
+  // but not this one, so the numbers describe what ticking a box would add
+  // rather than collapsing to zero as boxes come off.
+  const opennessCounts = useMemo(() => {
+    const query = deferredSearchQuery.trim().toLowerCase()
+    const tally: Partial<Record<ModelOpenness, number>> = {}
+    for (const row of evaluations) {
+      if (row.params_billions == null) {
+        if (!showUnknownSize) continue
+      } else {
+        if (numericMinParams != null && row.params_billions < numericMinParams) continue
+        if (numericMaxParams != null && row.params_billions > numericMaxParams) continue
+      }
+      if (query) {
+        const hit =
+          (row.model_name ?? "").toLowerCase().includes(query) ||
+          (row.canonical_model_name ?? "").toLowerCase().includes(query) ||
+          (row.developer ?? "").toLowerCase().includes(query) ||
+          (row.benchmark_names ?? []).some((b) => (b ?? "").toLowerCase().includes(query))
+        if (!hit) continue
+      }
+      const bucket = modelOpenness(row.open_weights)
+      tally[bucket] = (tally[bucket] ?? 0) + 1
+    }
+    return tally
+  }, [evaluations, deferredSearchQuery, numericMinParams, numericMaxParams, showUnknownSize])
 
   // Developers — filter + sort
   const sortedDevelopers = useMemo(() => {
@@ -269,7 +307,7 @@ export default function ModelsPage() {
   // Reset visible window when filter/sort changes
   useEffect(() => {
     setVisibleCount(PAGE_SIZE)
-  }, [groupByDeveloper, modelSortBy, modelSortDir, developerSortBy, developerSortDir, developerScope, deferredSearchQuery, minParamStep, maxParamStep, showUnknownSize])
+  }, [groupByDeveloper, modelSortBy, modelSortDir, developerSortBy, developerSortDir, developerScope, deferredSearchQuery, minParamStep, maxParamStep, showUnknownSize, openness])
 
   const totalCount = groupByDeveloper ? sortedDevelopers.length : sortedEvaluations.length
   const visibleEvaluations = useMemo(
@@ -430,6 +468,13 @@ export default function ModelsPage() {
               showUnknownSize={showUnknownSize}
               onShowUnknownSizeChange={setShowUnknownSize}
             />
+            <div className="mt-3">
+              <OpennessFilter
+                selected={openness}
+                onChange={setOpenness}
+                counts={opennessCounts}
+              />
+            </div>
           </div>
         )}
 

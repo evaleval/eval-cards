@@ -112,6 +112,9 @@ async function writeSyntheticStageJSnapshot(
         [struct_pack(benchmark := 'MMLU', benchmarkKey := 'mmlu', score := 0.8, metric := 'accuracy')] AS top_scores,
         ['https://example.test/source']::VARCHAR[] AS source_urls,
         []::VARCHAR[] AS detail_urls,
+        -- Tri-state weights verdict: TRUE published, FALSE registry-curated
+        -- closed, NULL unknown. The fixture model is a closed API model.
+        FALSE AS open_weights,
         [struct_pack(
           variant_id := 'default',
           variant_key := 'default',

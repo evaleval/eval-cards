@@ -77,6 +77,13 @@ import { getKnownIssues, type KnownIssue } from "@/lib/known-issues"
 import { ApplesToApplesBanner } from "@/components/apples-to-apples-banner"
 import { ComparabilityPanel } from "@/components/signals/comparability-panel"
 import { FlagScoreButton } from "@/components/flag-score-button"
+import { OpennessFilter } from "@/components/openness-filter"
+import {
+  MODEL_OPENNESS_ORDER,
+  matchesOpenness,
+  modelOpenness,
+  type ModelOpenness,
+} from "@/lib/model-openness"
 
 interface SplitOption {
   id: string
@@ -1073,16 +1080,39 @@ export function EvalDetail({
     { key: "default", dir: "desc" },
   )
 
+  const [openness, setOpenness] = useState<ModelOpenness[]>([...MODEL_OPENNESS_ORDER])
+
+  // Weights filter narrows which standings are DISPLAYED; it deliberately
+  // does not re-rank. A model's rank is its position in the full standings,
+  // so filtering to open weights shows "best open model is #4 overall"
+  // rather than renumbering it to #1 and losing that.
+  const opennessVisibleRows = useMemo(
+    () =>
+      leaderboardRows.filter((row) =>
+        matchesOpenness(row.modelResult.model_info?.open_weights, openness)
+      ),
+    [leaderboardRows, openness]
+  )
+
+  const opennessCounts = useMemo(() => {
+    const tally: Partial<Record<ModelOpenness, number>> = {}
+    for (const row of leaderboardRows) {
+      const bucket = modelOpenness(row.modelResult.model_info?.open_weights)
+      tally[bucket] = (tally[bucket] ?? 0) + 1
+    }
+    return tally
+  }, [leaderboardRows])
+
   // A model and the judge / protocol readings sitting beneath it move
   // together. Sorting the flattened row list would immediately break that:
   // reversing it alone puts every secondary row ABOVE its own headline.
   const leaderboardGroups = useMemo(
-    () => groupByHeadlineModel(leaderboardRows, (row) => row.modelResult),
-    [leaderboardRows]
+    () => groupByHeadlineModel(opennessVisibleRows, (row) => row.modelResult),
+    [opennessVisibleRows]
   )
 
   const orderedLeaderboardRows = useMemo(() => {
-    if (userRowSort.key === "default") return leaderboardRows
+    if (userRowSort.key === "default") return opennessVisibleRows
     // `leaderboardGroups` is already "best first" — descending for
     // higher-is-better metrics, ascending for lower-is-better. Sorting
     // by score just toggles that order verbatim, group by group.
@@ -1155,7 +1185,7 @@ export function EvalDetail({
       if (cmp === 0) cmp = (ma.model_info.name ?? "").localeCompare(mb.model_info.name ?? "")
       return cmp * dirSign
     }).flat()
-  }, [leaderboardGroups, leaderboardRows, userRowSort, lb.metric_config.lower_is_better])
+  }, [leaderboardGroups, opennessVisibleRows, userRowSort, lb.metric_config.lower_is_better])
 
   const LEADERBOARD_PAGE_SIZE = 50
   const pagedLeaderboardRows = useMemo(
@@ -1748,6 +1778,18 @@ export function EvalDetail({
 
           {splitConfig && (
             <SplitPicker config={splitConfig} className="mb-4" />
+          )}
+
+          {/* Weights filter. Hidden when every model on the page falls in
+              one bucket — a filter with a single option filters nothing. */}
+          {Object.keys(opennessCounts).length > 1 && (
+            <OpennessFilter
+              className="mb-4"
+              selected={openness}
+              onChange={setOpenness}
+              counts={opennessCounts}
+              hideEmpty
+            />
           )}
 
           {/* Subtask split picker for evals like Global MMLU Lite where
