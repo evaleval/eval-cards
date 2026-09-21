@@ -158,6 +158,42 @@ describe("EvalDetail leaderboard — protocol condition columns", () => {
     expect(html).toContain("Assisted run (answer feedback) — shown, not ranked")
   })
 
+  it("subordinates the extra runs to their model's ranked row", () => {
+    const html = render(summaryWith(OPUS_PAGE))
+
+    // A dash reads as "ranked nowhere". These rows are readings of the
+    // row above them, so they get a branch glyph and an indent instead.
+    expect(html).toContain("\u21b3")
+    expect(html.match(/&#x2014;<\/span>/g) ?? []).toHaveLength(0)
+    // The reason is on the element, not only in a hover tooltip.
+    expect(html).toContain('aria-label="Another run of the same model — shown, not ranked"')
+    expect(html).toContain('aria-label="Rank 1"')
+  })
+
+  it("drops the score sort arrow while the rows are grouped, not sorted", () => {
+    // The grouped order reads 0.96, 0.60, 0.73 … 1.00; a descending
+    // arrow over that column promises a descent it does not make.
+    const grouped = render(summaryWith(OPUS_PAGE))
+    expect(grouped).toContain("Grouped by model")
+    expect(grouped).not.toContain("Score↓")
+    expect(grouped).not.toContain("accuracy↓")
+  })
+
+  it("keeps the score arrow on a page where every row is ranked", () => {
+    const flat = render(
+      summaryWith([
+        run(0.96, { feedback: "none", reasoning_effort: "high" }, { is_headline: true }),
+        run(0.7, { feedback: "none", reasoning_effort: "high" }, {
+          model_info: { name: "GPT-5.4", id: "openai/gpt-5.4" },
+          model_route_id: "openai%2Fgpt-5.4",
+          is_headline: true,
+        }),
+      ]),
+    )
+    expect(flat).not.toContain("Grouped by model")
+    expect(flat).toContain("↓")
+  })
+
   it("adds no columns when the page's runs share one condition", () => {
     const html = render(
       summaryWith([
