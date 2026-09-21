@@ -11,8 +11,19 @@ import { MergedBenchmarkView } from "@/components/merged-benchmark-view"
 import { ParamRangePicker } from "@/components/param-range-picker"
 import { useAudienceMode } from "@/components/audience-mode-provider"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
+import {
+  buildCrossSourceContext,
+  crossSourceRowsFromMerged,
+  mergedPayloadIsComparable,
+} from "@/lib/cross-source-context"
 import { compositeScoresByModel } from "@/lib/eval-processing"
-import { fetchComparisonIndex, fetchEvalHierarchy, fetchEvalSummary } from "@/lib/dashboard-data-client"
+import { isMergedBenchmarkSummary } from "@/lib/merged-adapter"
+import {
+  fetchComparisonIndex,
+  fetchEvalHierarchy,
+  fetchEvalSummary,
+  fetchMergedBenchmarkSummary,
+} from "@/lib/dashboard-data-client"
 import { humanizeEvaluationId, isMergedEvalId, routeIdFromSegments, routeIdToPath } from "@/lib/utils"
 import { PARAM_RANGE_MAX_INDEX, parseParamsBillionsFromModelName, paramStepToNumeric } from "@/lib/param-range"
 import type { ComparisonIndex, EvalHierarchy } from "@/lib/backend-artifacts"
@@ -54,6 +65,44 @@ export default function EvalDetailPage() {
   const [splitIds, setSplitIds] = useState<string[]>([])
   const [splitSummaries, setSplitSummaries] = useState<Map<string, BenchmarkEvalSummary>>(new Map())
   const [activeSplitId, setActiveSplitId] = useState<string | null>(null)
+  // Other sources' measurements of the same (model, benchmark), so a
+  // reader can see whether THIS source's number is an outlier. The merged
+  // endpoint is already the producer's cross-source join on a canonical
+  // scale, so nothing is re-derived here.
+  //
+  // Deferred on purpose. The merged payload is every source's rows for the
+  // whole benchmark and reaches ~9.8 MB on a well-covered one, which is
+  // far too much to spend on deciding whether to offer a view nobody has
+  // asked for. The page can tell from what it already has whether a second
+  // source exists, so it offers the view on that and downloads only if the
+  // reader opens it. Only ~250 of 1,218 benchmarks qualify at all.
+  //
+  // The curated study sidecar, where one exists, is richer and already on
+  // the summary, so those pages never come here.
+  const crossSourceContextLoader = useMemo(() => {
+    const benchmarkId = summary?.benchmark_id
+    const metricId = summary?.primary_metric_id
+    if (!summary || !benchmarkId || !metricId || summary.collection?.context) return undefined
+    // Nothing to ask for when this benchmark has no sibling source, which
+    // is most of them, or when the page reports one slice rather than the
+    // benchmark the merged payload pools.
+    if ((summary.source_options?.sources.length ?? 0) < 2 || summary.is_slice) return undefined
+    const subjectSourceSlug = summary.composite_benchmark_key
+    const benchmarkLabel = summary.evaluation_name
+    const sourceLabel = summary.composite_benchmark_name
+    return async (signal: AbortSignal) => {
+      const payload = await fetchMergedBenchmarkSummary(benchmarkId, { metricId, signal })
+      if (!isMergedBenchmarkSummary(payload)) return null
+      if (!mergedPayloadIsComparable(payload, { benchmarkId, metricId })) return null
+      return buildCrossSourceContext(crossSourceRowsFromMerged(payload), {
+        subjectSourceSlug,
+        subjectLabel: "This source",
+        benchmarkLabel,
+        sourceLabel,
+      })
+    }
+  }, [summary])
+
   const returnTo = searchParams.get("from")
   // Single URL segment = merged all-sources benchmark page (spec F2);
   // two segments = per-source eval page (unchanged).
@@ -301,6 +350,7 @@ export default function EvalDetailPage() {
             evalHierarchy={hierarchy}
             comparisonIndex={comparisonIndex}
             activeSummary={activeSplitSummary ?? summary}
+            crossSourceContextLoader={crossSourceContextLoader}
             splitConfig={
               splitOptions.length > 1
                 ? {

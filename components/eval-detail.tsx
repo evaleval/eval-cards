@@ -80,6 +80,7 @@ import {
   unionProtocolAxes,
   type ProtocolAxisReading,
   type ProtocolColumn,
+  type ScaffoldContextPayload,
   type StudyRef,
 } from "@/lib/collections"
 import { useProtocolFilters } from "@/lib/use-protocol-filters"
@@ -126,6 +127,19 @@ interface SplitConfig {
 
 interface EvalDetailProps {
   summary: BenchmarkEvalSummary
+  /**
+   * Builds the cross-source context from other sources' measurements of
+   * the same (model, benchmark) — the same strip the curated study
+   * sidecar drives, for the ~250 benchmarks that have more than one
+   * source but no sidecar entry.
+   *
+   * A function rather than a payload because the payload costs a large
+   * download: its presence is what offers the view, and it runs only when
+   * the reader opens it. Resolving to null means nothing comparable came
+   * back, which is an answer, not a failure. Omitted where a curated
+   * payload already exists, and ignored on a merged page.
+   */
+  crossSourceContextLoader?: (signal: AbortSignal) => Promise<ScaffoldContextPayload | null>
   hierarchyLocation?: HierarchyEvalLocation | null
   /** Full eval hierarchy — used by the signals strip to find sibling
    *  appearances of the same canonical benchmark across other suites. */
@@ -762,6 +776,7 @@ export function EvalDetail({
   splitConfig,
   rowHighlight,
   studySourceHref,
+  crossSourceContextLoader,
 }: EvalDetailProps) {
   const { mode } = useAudienceMode()
   const isResearchView = mode === "research"
@@ -1152,7 +1167,30 @@ export function EvalDetail({
   // community's published measurements. Server-built and pre-joined by
   // the producer; null unless this exact (collection, benchmark) pair
   // passed the bake gates.
-  const scaffoldContext = summary.collection?.context ?? undefined
+  // The curated study sidecar, which arrives on the summary and is the
+  // richer payload: it carries scaffold names, harvest dates and the
+  // with-oracle companion that a derived one cannot. Where there is none,
+  // the loader below offers the same view at a download's notice.
+  //
+  // A merged page gets neither. Its rows are already one per model and
+  // source, so every reading the strip would draw is a row the reader can
+  // see, and the strip would only redraw the table above it.
+  const scaffoldContext = summary.merged_view
+    ? undefined
+    : (summary.collection?.context ?? undefined)
+  const contextLoader = summary.merged_view || scaffoldContext
+    ? undefined
+    : crossSourceContextLoader
+  // The derived payload is the whole benchmark at this page's own grain.
+  // A sibling split or a subtask selection replaces the scores beside it
+  // while the strip would go on showing the benchmark's, and the
+  // multi-metric branch renders no distribution panel to carry it at all.
+  // The curated payload is the page's own either way.
+  const contextApplies =
+    scaffoldContext != null ||
+    (!hasMultiMetricLeaderboard &&
+      lb.evaluation_id === summary.evaluation_id &&
+      activeSlice === ALL_SLICE_KEY)
 
   // Optional user-driven sort. `default` keeps the score-ordered rows
   // the ranker already produced. The rank label is always by score
@@ -1475,6 +1513,11 @@ export function EvalDetail({
       lb.metric_config.lower_is_better
         ? a.modelResult.score - b.modelResult.score
         : b.modelResult.score - a.modelResult.score
+    )
+
+  const foldUnassistedRows = (fold: LeaderboardFold) =>
+    foldMemberRows(fold).filter(
+      (member) => !isAssistedResult(member.modelResult.protocol_condition)
     )
 
   /** The axis summary a folded row shows in place of one run's value:
@@ -2406,6 +2449,8 @@ export function EvalDetail({
                   })),
                 }]}
                 context={scaffoldContext}
+                contextLoader={contextLoader}
+                contextApplies={contextApplies}
               />
             </div>
           )}
@@ -3096,6 +3141,87 @@ export function EvalDetail({
                                   >
                                     {foldHasSources ? "Sources on this page" : "Runs on this page"}
                                   </div>
+                                  {/* One line showing where the readings
+                                      fall relative to each other. The table
+                                      below has the numbers; the strip is
+                                      what makes "these two sources disagree
+                                      by a lot" visible without arithmetic.
+                                      Only drawn when they actually differ —
+                                      a strip of coincident marks says
+                                      nothing and reads as a bug. */}
+                                  {fold.maxScore > fold.minScore && (
+                                    <div className="pb-1 pt-0.5">
+                                      <div
+                                        style={{
+                                          position: "relative",
+                                          height: 18,
+                                          marginLeft: 4,
+                                          marginRight: 4,
+                                        }}
+                                      >
+                                        <div
+                                          style={{
+                                            position: "absolute",
+                                            top: 8,
+                                            left: 0,
+                                            right: 0,
+                                            height: 1,
+                                            background: "var(--border-soft)",
+                                          }}
+                                        />
+                                        {/* The range this strip spans is the
+                                            unassisted runs', so those are the
+                                            runs it ticks: a score reached with
+                                            the answer oracle is not one of the
+                                            readings being compared. */}
+                                        {foldUnassistedRows(fold).map((member) => {
+                                          const span = fold.maxScore - fold.minScore
+                                          const pct =
+                                            ((member.modelResult.score - fold.minScore) / span) * 100
+                                          const label = foldHasSources
+                                            ? (foldSourceOf(member) ?? "source")
+                                            : "run"
+                                          return (
+                                            <div
+                                              key={`strip-${member.key}`}
+                                              title={`${label}: ${formatRawScore(member.modelResult.score)}`}
+                                              style={{
+                                                position: "absolute",
+                                                top: 3,
+                                                left: `${pct}%`,
+                                                width: 2,
+                                                height: 11,
+                                                marginLeft: -1,
+                                                background: "var(--fg-muted)",
+                                              }}
+                                            />
+                                          )
+                                        })}
+                                        {/* The number the row reports, so the
+                                            strip and the row agree on screen. */}
+                                        <div
+                                          title={`Reported ${formatRawScore(fold.score)}`}
+                                          style={{
+                                            position: "absolute",
+                                            top: 0,
+                                            left: `${((fold.score - fold.minScore) / (fold.maxScore - fold.minScore)) * 100}%`,
+                                            width: 2,
+                                            height: 17,
+                                            marginLeft: -1,
+                                            background: "var(--accent)",
+                                          }}
+                                        />
+                                      </div>
+                                      <div
+                                        className="flex justify-between font-mono"
+                                        style={{ fontSize: 9, color: "var(--fg-subtle)" }}
+                                      >
+                                        <span>{formatRawScore(fold.minScore)}</span>
+                                        <span>{formatRawScore(fold.maxScore)}</span>
+                                      </div>
+                                    </div>
+                                  )}
+
                                   {/* No commentary: each run's own
                                       conditions and its own score, read
                                       and formatted exactly as the main

@@ -49,8 +49,8 @@ export interface DeveloperSummaryResponse {
   models: BenchmarkEvaluationCardData[]
 }
 
-async function fetchJson<T>(input: string): Promise<T> {
-  const response = await fetch(input)
+async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(input, init)
 
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`)
@@ -93,16 +93,22 @@ export function fetchEvalSummary(evalId: string) {
  * observation table server-side. A non-merged payload comes back when
  * the snapshot predates merged_evals_view — callers should treat that
  * as "no merged page".
+ *
+ * `signal` is worth passing: this payload is every source's rows for the
+ * whole benchmark and runs to megabytes on a well-covered one, so a
+ * caller that navigates away should stop the transfer rather than just
+ * drop the result.
  */
 export function fetchMergedBenchmarkSummary(
   benchmarkId: string,
-  query: { metricId?: string; sliceId?: string } = {},
+  query: { metricId?: string; sliceId?: string; signal?: AbortSignal } = {},
 ) {
   const params = new URLSearchParams({ id: benchmarkId })
   if (query.metricId) params.set("metric", query.metricId)
   if (query.sliceId) params.set("slice", query.sliceId)
   return fetchJson<MergedBenchmarkSummary | BenchmarkEvalSummary | { error: string }>(
-    `/api/eval-summary?${params.toString()}`
+    `/api/eval-summary?${params.toString()}`,
+    query.signal ? { signal: query.signal } : undefined,
   )
 }
 
