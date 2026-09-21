@@ -6,6 +6,8 @@ import { AudienceModeProvider } from "@/components/audience-mode-provider"
 import { EvalDetail } from "@/components/eval-detail"
 import type { BenchmarkEvalSummary, ModelResultForBenchmark } from "@/lib/eval-processing"
 
+import { setSearchParams } from "./next-navigation-stub"
+
 vi.mock("next/navigation", () => import("./next-navigation-stub"))
 
 // A protocol-varied study (the AISI inference-scaling shape) repeats one
@@ -127,7 +129,7 @@ const OPUS_PAGE = [
 ]
 
 describe("EvalDetail leaderboard — folded model rows", () => {
-  it("shows one row per model, reporting the mean of its runs", () => {
+  it("shows the study's axes, with units, on the rows it folds", () => {
     const html = render(summaryWith(OPUS_PAGE))
 
     // Headers for the budgets the study declares a unit for, and for the
@@ -136,10 +138,11 @@ describe("EvalDetail leaderboard — folded model rows", () => {
     expect(html).toContain("Compaction")
     expect(html).toContain("Thinking tokens")
     expect(html).toContain("Effort")
-    // A constant scaffold explains nothing; feedback is already carried
-    // by the assisted badge.
+    // The answer oracle is an axis the study varied, so it earns a
+    // column of its own rather than living on a badge.
+    expect(html).toContain("Feedback")
+    // A constant scaffold explains nothing.
     expect(html).not.toContain("Scaffold")
-    expect(html).not.toContain(">Feedback<")
 
     // Cell values carry the declared unit, and the effort words are
     // humanised.
@@ -255,6 +258,111 @@ describe("EvalDetail leaderboard — folded model rows", () => {
     )
     expect(html).toContain("Thinking tokens")
     expect(html).toContain("Effort")
+  })
+
+  it("reports the headline run's score and standing, never a statistic across the runs", () => {
+    const html = render(summaryWith(OPUS_PAGE))
+
+    // The producer picked the 0.964 run as this model's headline
+    // reading. The mean of the six readings is 0.80 and the assisted run
+    // reached 1.00; the row reports neither, because the six are
+    // different configurations rather than repeated samples.
+    expect(html).toContain("0.96")
+    expect(html).not.toContain("mean of")
+    expect(html).not.toContain("±")
+    expect(html).not.toContain("95%")
+    expect(html.match(/#1/g) ?? []).toHaveLength(1)
+  })
+
+  it("ranges over the unassisted runs and says how many assisted ones are listed", () => {
+    const html = render(summaryWith(OPUS_PAGE))
+
+    // 0.604 to 0.964 across the five unassisted runs. The assisted 1.00
+    // is listed with them but never widens the range or moves the score.
+    expect(html).toContain("0.60 to 0.96 across 5 runs")
+    expect(html).toContain("1 assisted run also listed")
+    expect(html).not.toContain("across 6 runs")
+  })
+
+  it("summarises a varied budget as a range and a constant one as itself", () => {
+    const html = render(summaryWith(OPUS_PAGE))
+
+    // Thinking tokens ran at 16k, 32k and 64k, and one run did not
+    // report the axis at all.
+    expect(html).toContain("16k to 64k tokens, some not reported")
+    // The token budget was the same for every run, so the row states it.
+    expect(html).toContain("10M tokens")
+  })
+
+  it("gives a model with one run its own score and standing", () => {
+    const html = render(
+      summaryWith([
+        ...OPUS_PAGE,
+        run(0.7, { feedback: "none", reasoning_effort: "high", reasoning_tokens: 32000 }, {
+          model_info: { name: "GPT-5.4", id: "openai/gpt-5.4" },
+          model_route_id: "openai%2Fgpt-5.4",
+          is_headline: true,
+        }),
+      ]),
+    )
+
+    expect(html.match(/#1/g) ?? []).toHaveLength(1)
+    expect(html.match(/#2/g) ?? []).toHaveLength(1)
+    // One run has no range to report.
+    expect(html).not.toContain("across 1 runs")
+  })
+
+  it("switches to every run when a protocol filter narrows the page, without renumbering", () => {
+    setSearchParams("protocol.reasoning_tokens=number%3A32000")
+    try {
+      const html = render(summaryWith(OPUS_PAGE))
+
+      // Three runs used a 32k thinking budget. The headline run keeps the
+      // standing it had in the full field; the other two never take one.
+      expect(html.match(/#1/g) ?? []).toHaveLength(1)
+      expect(html).not.toContain("#2")
+      expect(html).toContain("Another run of the same model — shown, not ranked")
+      expect(html).toContain("Assisted run (answer feedback) — shown, not ranked")
+      // A run list, not a folded row.
+      expect(html).not.toContain("across 5 runs")
+      expect(html).toContain("Show one row per model")
+    } finally {
+      setSearchParams()
+    }
+  })
+
+  it("keeps a merged page's sources on their own rows, each with its own score", () => {
+    // Two sources measured the same model. They share no protocol and no
+    // comparability contract, so there is nothing to collapse them to:
+    // each keeps its own score, standing and source.
+    const summary = summaryWith([
+      run(0.9, { feedback: "none", reasoning_tokens: 64000 }, {
+        is_headline: true,
+        collection_id: "uk-aisi-inference-scaling",
+      }),
+      result({
+        score: 0.41,
+        is_headline: true,
+        collection_id: "some-leaderboard",
+        protocol_condition: undefined,
+        merged_source_slug: "llm-stats",
+      }),
+    ])
+    const merged = {
+      ...summary,
+      collection: undefined,
+      merged_view: true,
+      protocol_axes_by_collection: { "uk-aisi-inference-scaling": PROTOCOL_AXES },
+    } as unknown as BenchmarkEvalSummary
+
+    const html = render(merged)
+    expect(html).toContain("0.90")
+    expect(html).toContain("0.41")
+    expect(html.match(/#1/g) ?? []).toHaveLength(1)
+    expect(html.match(/#2/g) ?? []).toHaveLength(1)
+    // Nothing folded, so nothing claims to stand for both readings.
+    expect(html).not.toContain("also listed")
+    expect(html).not.toContain("across 2 runs")
   })
 
   it("never turns a published curve's thresholds into protocol values", () => {

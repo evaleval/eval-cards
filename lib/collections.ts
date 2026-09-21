@@ -542,34 +542,61 @@ export function protocolValueId(reading: ProtocolAxisReading): string {
 /**
  * One axis across the several runs a folded leaderboard row stands for.
  *
- * A row standing for nine runs has no single token budget, so the axis
- * reads as the study's own smallest and largest value, with the unit
- * said once at the end. Runs that did not report the axis are counted
- * rather than dropped: "some of these ran without a stated budget" is a
- * different claim from "they all ran at 6M". Returns null only when the
- * axis applies to none of the runs, which is the one case with nothing
- * to say.
+ * A row standing for nine runs has no single token budget, so a
+ * unit-bearing axis reads as the study's own smallest and largest value,
+ * with the unit said once at the end. An axis with no magnitude has no
+ * range to speak of, so it lists the settings the runs used instead.
+ * Runs that did not report the axis are counted rather than dropped:
+ * "some of these ran without a stated budget" is a different claim from
+ * "they all ran at 6M". Returns null only when the axis applies to none
+ * of the runs, which is the one case with nothing to say.
  */
+export interface ProtocolAxisSummary {
+  text: string
+  /** The exact values behind the shortened text, as the per-run cells
+   *  carry them. */
+  title: string
+}
+
 export function summariseProtocolReadings(
   readings: ProtocolAxisReading[],
   column: ProtocolColumn,
-): string | null {
+): ProtocolAxisSummary | null {
   if (readings.length === 0) return null
   const values = readings.filter((reading) => reading.state === "value")
   const missing = readings.length - values.length
   if (values.length === 0) {
     return readings.every((reading) => reading.state === "not_applicable")
       ? null
-      : "Not reported"
+      : { text: "Not reported", title: "Not reported" }
   }
-  const sorted = [...values].sort((a, b) => compareProtocolReadings(a, b, column, "asc"))
+  const distinct = new Map<string, ProtocolAxisReading>()
+  for (const reading of values) {
+    const id = protocolValueId(reading)
+    if (!distinct.has(id)) distinct.set(id, reading)
+  }
+  const sorted = [...distinct.values()].sort((a, b) =>
+    compareProtocolReadings(a, b, column, "asc"),
+  )
   const low = sorted[0]
   const high = sorted[sorted.length - 1]
-  const body =
-    protocolValueId(low) === protocolValueId(high)
-      ? formatProtocolValue(low, column)
-      : `${protocolValueBody(low.raw, column)} to ${formatProtocolValue(high, column)}`
-  return missing > 0 ? `${body}, some not reported` : body
+  let text: string
+  let title: string
+  if (sorted.length === 1) {
+    text = formatProtocolValue(low, column)
+    title = protocolValueTitle(low, column)
+  } else if (isNumericAxis(column)) {
+    text = `${protocolValueBody(low.raw, column)} to ${formatProtocolValue(high, column)}`
+    title = `${protocolValueTitle(low, column)} to ${protocolValueTitle(high, column)}`
+  } else {
+    text = sorted.map((reading) => formatProtocolValue(reading, column)).join(", ")
+    title = sorted.map((reading) => protocolValueTitle(reading, column)).join(", ")
+  }
+  if (missing > 0) {
+    const tail = `${missing} of ${readings.length} runs did not report it`
+    return { text: `${text}, some not reported`, title: `${title} (${tail})` }
+  }
+  return { text, title }
 }
 
 export interface ProtocolFilterOption {

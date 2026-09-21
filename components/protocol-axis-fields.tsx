@@ -21,6 +21,7 @@ import {
   readProtocolAxis,
   type CollectionsSidecarEntry,
   type ProtocolAxisReading,
+  type ProtocolAxisSummary,
   type ProtocolColumn,
   type ProtocolFilterOption,
 } from "@/lib/collections"
@@ -141,17 +142,23 @@ export function ProtocolNarrowRanges({
   summaryFor,
 }: {
   columns: ProtocolColumn[]
-  summaryFor: (column: ProtocolColumn) => string | null
+  summaryFor: (column: ProtocolColumn) => ProtocolAxisSummary | null
 }) {
   const items = columns
-    .map((column) => ({ column, text: summaryFor(column) }))
-    .filter((item): item is { column: ProtocolColumn; text: string } => item.text != null)
+    .map((column) => ({ column, summary: summaryFor(column) }))
+    .filter(
+      (item): item is { column: ProtocolColumn; summary: ProtocolAxisSummary } =>
+        item.summary != null,
+    )
   if (items.length === 0) return null
   return (
     <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5" style={{ fontSize: 10 }}>
-      {items.map(({ column, text }) => (
+      {items.map(({ column, summary }) => (
         <span key={column.key} style={{ color: "var(--fg-subtle)" }}>
-          {column.label}: <span className="font-mono">{text}</span>
+          {column.label}:{" "}
+          <span className="font-mono" title={summary.title}>
+            {summary.text}
+          </span>
         </span>
       ))}
     </div>

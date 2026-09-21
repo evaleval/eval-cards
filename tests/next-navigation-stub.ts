@@ -11,12 +11,20 @@
 
 const noop = () => {}
 
+let searchParams = new URLSearchParams()
+
+/** Put a query string on the stubbed location for one render, so a test
+ *  can exercise the URL-backed filters. Call it with nothing to clear. */
+export function setSearchParams(query = "") {
+  searchParams = new URLSearchParams(query)
+}
+
 export function usePathname(): string {
   return "/evals/test"
 }
 
 export function useSearchParams(): URLSearchParams {
-  return new URLSearchParams()
+  return searchParams
 }
 
 export function useParams(): Record<string, string | string[]> {

@@ -63,7 +63,7 @@ import {
   primaryMetricColumnKey,
   scoreSortBaseDirection,
   scoreStandings,
-  summariseScores,
+  summariseScoreSpread,
 } from "@/lib/eval-processing"
 import type { BenchmarkEvalSummary, ModelResultForBenchmark } from "@/lib/eval-processing"
 import {
@@ -155,7 +155,7 @@ interface LeaderboardFold {
   /** The headline run's standing, assigned once on the readings. A fold
    *  never carries a rank of its own. */
   rank: number
-  /** The pipeline's designated reading for this model — the row whose
+  /** The pipeline's designated reading for this model: the row whose
    *  score, standing and metadata the folded row shows. The producer
    *  picks it (best non-assisted arm, or the preferred judge panel). */
   headlineRow: LeaderboardRow
@@ -1276,7 +1276,7 @@ export function EvalDetail({
     const unassisted = members.filter(
       (row) => !isAssistedResult(row.modelResult.protocol_condition)
     )
-    const spread = summariseScores(unassisted.map((row) => row.modelResult.score))
+    const spread = summariseScoreSpread(unassisted.map((row) => row.modelResult.score))
     const score = headlineRow.modelResult.score
     return {
       key: headlineRow.key,
@@ -1342,7 +1342,7 @@ export function EvalDetail({
         .sort((a, b) => compareProtocolRows(a, b, column, dir, protocolReading))
         .map(({ source }) => soloFold(source))
     }
-    // The rows are already "best first" — descending for higher-is-better
+    // The rows are already "best first": descending for higher-is-better
     // metrics, ascending for lower-is-better. Sorting by score just
     // toggles that order verbatim.
     if (userRowSort.key === "default") return foldedLeaderboardGroups
@@ -2877,8 +2877,11 @@ export function EvalDetail({
                               style={{ fontSize: 11, whiteSpace: "nowrap" }}
                             >
                               {isFolded ? (
-                                <span style={{ color: summary ? "var(--fg)" : "var(--fg-subtle)" }}>
-                                  {summary ?? "Not applicable"}
+                                <span
+                                  title={summary?.title ?? "Not applicable"}
+                                  style={{ color: summary ? "var(--fg)" : "var(--fg-subtle)" }}
+                                >
+                                  {summary?.text ?? "Not applicable"}
                                 </span>
                               ) : (
                                 <ProtocolValueText
@@ -3093,11 +3096,7 @@ export function EvalDetail({
                                                   >
                                                     assisted
                                                   </span>
-                                                ) : (
-                                                  <span className="font-mono text-[12px]" style={{ color: "var(--fg-subtle)" }}>
-                                                    —
-                                                  </span>
-                                                )}
+                                                ) : null}
                                               </td>
                                             )}
                                             {protocolColumns.map((column) => (

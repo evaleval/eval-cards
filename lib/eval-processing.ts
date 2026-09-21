@@ -51,48 +51,29 @@ export function isAssistedResult(protocolCondition: string | null | undefined): 
   }
 }
 
-/** Student's t critical values at 95% two-sided, df 1-30; the normal
- *  approximation takes over beyond that. A fold usually holds a handful
- *  of runs, where 1.96 would understate the interval badly. */
-const T_CRITICAL_95: readonly number[] = [
-  12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
-  2.201, 2.179, 2.16, 2.145, 2.131, 2.12, 2.11, 2.101, 2.093, 2.086,
-  2.08, 2.074, 2.069, 2.064, 2.06, 2.056, 2.052, 2.048, 2.045, 2.042,
-]
-
-export interface ScoreSummary {
-  mean: number
-  /** Half-width of the 95% interval, or null when a single run gives
-   *  nothing to spread. */
-  ci95: number | null
+export interface ScoreSpread {
+  /** How many scores the range spans. */
   n: number
   min: number
   max: number
 }
 
 /**
- * Mean and 95% interval across a model's runs on one page.
+ * Where a model's runs on one page landed: the smallest and the largest,
+ * and how many there were.
  *
- * NOTE ON WHAT THE INTERVAL MEANS: these runs are different
- * CONFIGURATIONS (token budgets, reasoning effort, feedback), not
- * repeated draws of one quantity. The spread is therefore systematic —
- * how much the setup moved the score — not sampling error around a true
- * value. Callers must label it as spread across runs and never as a
- * confidence interval on the model's ability.
+ * Descriptive only, and deliberately so. The runs are different
+ * CONFIGURATIONS (token budget, thinking tokens, effort, answer oracle),
+ * not repeated draws of one quantity, so there is no population to
+ * estimate and no sampling error to bound. An interval computed from
+ * them would narrow as the study added design points while the observed
+ * range stayed as wide, and would then be read as a claim about the
+ * model's ability. The observed endpoints make no such claim.
  */
-export function summariseScores(values: readonly number[]): ScoreSummary | null {
+export function summariseScoreSpread(values: readonly number[]): ScoreSpread | null {
   const finite = values.filter((value) => Number.isFinite(value))
   if (finite.length === 0) return null
-  const n = finite.length
-  const mean = finite.reduce((sum, value) => sum + value, 0) / n
-  const min = Math.min(...finite)
-  const max = Math.max(...finite)
-  if (n < 2) return { mean, ci95: null, n, min, max }
-  const variance =
-    finite.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (n - 1)
-  const standardError = Math.sqrt(variance) / Math.sqrt(n)
-  const t = T_CRITICAL_95[n - 2] ?? 1.96
-  return { mean, ci95: t * standardError, n, min, max }
+  return { n: finite.length, min: Math.min(...finite), max: Math.max(...finite) }
 }
 
 /** A parsed `judge_condition`. `judges` holds the canonical
@@ -437,6 +418,12 @@ export interface ModelResultForBenchmark {
   /** The source's own label for the published number (`gpt_score`).
    *  Display and provenance only — never a key. */
   metric_source_label?: string | null
+  /** How the score was produced: `generative` when the model wrote the
+   *  answer, `log_prob` when the harness scored likelihoods over fixed
+   *  choices. The producer's own classification, so it outranks anything
+   *  inferred from a row's raw fields; absent on a snapshot predating the
+   *  column, and null when the producer could not classify the row. */
+  scoring_mode?: string | null
   /** The row's comparability verdict; only `ok` groups were assessed. */
   comparability_status?: ComparabilityStatus | null
   /** The number the source published, before any canonical-scale
