@@ -11,7 +11,6 @@ import { MergedBenchmarkView } from "@/components/merged-benchmark-view"
 import { ParamRangePicker } from "@/components/param-range-picker"
 import { useAudienceMode } from "@/components/audience-mode-provider"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
-import type { ScaffoldContextPayload } from "@/lib/collections"
 import {
   buildCrossSourceContext,
   crossSourceRowsFromMerged,
@@ -66,45 +65,41 @@ export default function EvalDetailPage() {
   const [splitIds, setSplitIds] = useState<string[]>([])
   const [splitSummaries, setSplitSummaries] = useState<Map<string, BenchmarkEvalSummary>>(new Map())
   const [activeSplitId, setActiveSplitId] = useState<string | null>(null)
-  const [crossSourceContext, setCrossSourceContext] =
-    useState<ScaffoldContextPayload | null>(null)
   // Other sources' measurements of the same (model, benchmark), so a
   // reader can see whether THIS source's number is an outlier. The merged
   // endpoint is already the producer's cross-source join on a canonical
   // scale, so nothing is re-derived here.
   //
-  // Only ~250 of 1,218 benchmarks have a second source at all; the rest
-  // resolve to null and the Context view simply never appears. The curated
-  // study sidecar, where one exists, takes precedence inside EvalDetail.
+  // Deferred on purpose. The merged payload is every source's rows for the
+  // whole benchmark and reaches ~9.8 MB on a well-covered one, which is
+  // far too much to spend on deciding whether to offer a view nobody has
+  // asked for. The page can tell from what it already has whether a second
+  // source exists, so it offers the view on that and downloads only if the
+  // reader opens it. Only ~250 of 1,218 benchmarks qualify at all.
   //
-  // Browser-only and off the critical path: the leaderboard renders with
-  // no strip, and a slow or failed fetch leaves it that way.
-  useEffect(() => {
-    setCrossSourceContext(null)
+  // The curated study sidecar, where one exists, is richer and already on
+  // the summary, so those pages never come here.
+  const crossSourceContextLoader = useMemo(() => {
     const benchmarkId = summary?.benchmark_id
     const metricId = summary?.primary_metric_id
-    if (!summary || !benchmarkId || !metricId || summary.collection?.context) return
+    if (!summary || !benchmarkId || !metricId || summary.collection?.context) return undefined
     // Nothing to ask for when this benchmark has no sibling source, which
     // is most of them, or when the page reports one slice rather than the
     // benchmark the merged payload pools.
-    if ((summary.source_options?.sources.length ?? 0) < 2 || summary.is_slice) return
-    let cancelled = false
-    fetchMergedBenchmarkSummary(benchmarkId, { metricId })
-      .then((payload) => {
-        if (cancelled || !isMergedBenchmarkSummary(payload)) return
-        if (!mergedPayloadIsComparable(payload, { benchmarkId, metricId })) return
-        setCrossSourceContext(
-          buildCrossSourceContext(crossSourceRowsFromMerged(payload), {
-            subjectSourceSlug: summary.composite_benchmark_key,
-            subjectLabel: "This source",
-            benchmarkLabel: summary.evaluation_name,
-            sourceLabel: summary.composite_benchmark_name,
-          }),
-        )
+    if ((summary.source_options?.sources.length ?? 0) < 2 || summary.is_slice) return undefined
+    const subjectSourceSlug = summary.composite_benchmark_key
+    const benchmarkLabel = summary.evaluation_name
+    const sourceLabel = summary.composite_benchmark_name
+    return async (signal: AbortSignal) => {
+      const payload = await fetchMergedBenchmarkSummary(benchmarkId, { metricId, signal })
+      if (!isMergedBenchmarkSummary(payload)) return null
+      if (!mergedPayloadIsComparable(payload, { benchmarkId, metricId })) return null
+      return buildCrossSourceContext(crossSourceRowsFromMerged(payload), {
+        subjectSourceSlug,
+        subjectLabel: "This source",
+        benchmarkLabel,
+        sourceLabel,
       })
-      .catch(() => {})
-    return () => {
-      cancelled = true
     }
   }, [summary])
 
@@ -355,7 +350,7 @@ export default function EvalDetailPage() {
             evalHierarchy={hierarchy}
             comparisonIndex={comparisonIndex}
             activeSummary={activeSplitSummary ?? summary}
-            crossSourceContext={crossSourceContext}
+            crossSourceContextLoader={crossSourceContextLoader}
             splitConfig={
               splitOptions.length > 1
                 ? {

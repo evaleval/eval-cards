@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 
 import { type ScaffoldContextPayload } from "@/lib/collections"
 
@@ -53,6 +53,13 @@ interface ScoreDistributionProps {
    *  community's published measurements. Server-built and carried on
    *  the per-source summary; absent everywhere else. */
   context?: ScaffoldContextPayload
+  /** The same view for a page that has no server-built payload but does
+   *  know another source measured the same models. Offering the chip
+   *  costs nothing; the payload is a large download, so it is fetched
+   *  once, when the reader opens the view. Resolving to null means no
+   *  comparable measurements, which the panel says rather than treats as
+   *  a failure. */
+  contextLoader?: (signal: AbortSignal) => Promise<ScaffoldContextPayload | null>
 }
 
 interface SummaryStats {
@@ -148,6 +155,7 @@ export function ScoreDistribution({
   defaultView,
   showViewToggle = true,
   context,
+  contextLoader,
 }: ScoreDistributionProps) {
   // Normalize: either we got a single series (via values) or many.
   const seriesList: ScoreSeries[] = useMemo(() => {
@@ -200,7 +208,17 @@ export function ScoreDistribution({
   }, [active])
 
   const canShowFrontier = frontier != null
-  const canShowContext = (context?.models.length ?? 0) > 0
+  // A loader is a promise that the view is answerable, not that it has
+  // anything to draw, so the chip is offered on it and stays offered once
+  // the answer turns out to be "nothing comparable".
+  const [loadedContext, setLoadedContext] = useState<ScaffoldContextPayload | null>(null)
+  const [contextLoad, setContextLoad] = useState<"idle" | "loading" | "settled">("idle")
+  const activeContext = context ?? loadedContext ?? undefined
+  const canShowContext = (activeContext?.models.length ?? 0) > 0 || contextLoader != null
+  // The chip's tooltip states the claim before the payload can, and a
+  // loader only ever builds the per-source one.
+  const contextSubject =
+    activeContext?.subjectLabel ?? (contextLoader ? "This source" : "This study")
   const [view, setView] = useState<"distribution" | "frontier" | "context">(
     defaultView ?? "distribution",
   )
@@ -222,6 +240,33 @@ export function ScoreDistribution({
     ...(canShowFrontier ? ["frontier" as const] : []),
     ...(canShowContext ? ["context" as const] : []),
   ]
+
+  // Opening the view is what pays for it, and it is paid once. The
+  // request outlives a switch back to another chip — the reader who came
+  // back would only start it again — so it is keyed on having been asked
+  // for, not on the view still being open, and is aborted on unmount.
+  const [contextRequested, setContextRequested] = useState(false)
+  useEffect(() => {
+    if (effectiveView === "context") setContextRequested(true)
+  }, [effectiveView])
+  useEffect(() => {
+    if (!contextRequested || !contextLoader) return
+    const controller = new AbortController()
+    setContextLoad("loading")
+    contextLoader(controller.signal)
+      .then((payload) => {
+        if (controller.signal.aborted) return
+        setLoadedContext(payload)
+        setContextLoad("settled")
+      })
+      .catch(() => {
+        // An empty answer and an unreachable one read the same here: the
+        // panel says nothing comparable came back rather than raising.
+        if (controller.signal.aborted) return
+        setContextLoad("settled")
+      })
+    return () => controller.abort()
+  }, [contextRequested, contextLoader])
 
   const density = useMemo(() => {
     if (!active || !stats) return null
@@ -344,7 +389,7 @@ export function ScoreDistribution({
                           view === "frontier"
                             ? "Frontier score over model release dates (cumulative best)."
                             : view === "context"
-                              ? `${context?.subjectLabel ?? "This study"}'s score for each model among other published measurements of the same model.`
+                              ? `${contextSubject}'s score for each model among other published measurements of the same model.`
                               : "Kernel-density distribution of model scores."
                         }
                         className={`ec-pill${on ? " on" : ""}`}
@@ -423,8 +468,10 @@ export function ScoreDistribution({
         </div>
       )}
 
-      {effectiveView === "context" && context ? (
-        <ContextPlot context={context} />
+      {effectiveView === "context" && activeContext && activeContext.models.length > 0 ? (
+        <ContextPlot context={activeContext} />
+      ) : effectiveView === "context" ? (
+        <ContextNotice loading={contextLoad === "loading"} />
       ) : effectiveView === "frontier" && frontier ? (
         <FrontierPlot
           events={frontier.events}
@@ -1071,6 +1118,22 @@ function ContextTooltip({
 
 /** Names before the caption turns into a wall. */
 const MAX_NAMED_WITHOUT_CONTEXT = 6
+
+/** The Context view before its payload arrives, and after it arrives with
+ *  nothing to draw. Both are ordinary answers, so both read as one line in
+ *  the panel's own caption voice rather than as an error. */
+function ContextNotice({ loading }: { loading: boolean }) {
+  return (
+    <div
+      className="font-mono"
+      style={{ fontSize: 10, letterSpacing: "0.04em", color: "var(--fg-muted)", padding: "10px 0" }}
+    >
+      {loading
+        ? "Loading other sources' scores…"
+        : "No other source in Every Eval Ever reports a comparable score for these models."}
+    </div>
+  )
+}
 
 export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
   const { models } = context

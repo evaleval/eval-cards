@@ -128,13 +128,18 @@ interface SplitConfig {
 interface EvalDetailProps {
   summary: BenchmarkEvalSummary
   /**
-   * Cross-source context derived by the caller from other sources'
-   * measurements of the same (model, benchmark) — the same strip the
-   * curated study sidecar drives, for the ~250 benchmarks that have more
-   * than one source but no sidecar entry. Ignored when the page's own
-   * summary carries a curated payload, which is richer.
+   * Builds the cross-source context from other sources' measurements of
+   * the same (model, benchmark) — the same strip the curated study
+   * sidecar drives, for the ~250 benchmarks that have more than one
+   * source but no sidecar entry.
+   *
+   * A function rather than a payload because the payload costs a large
+   * download: its presence is what offers the view, and it runs only when
+   * the reader opens it. Resolving to null means nothing comparable came
+   * back, which is an answer, not a failure. Omitted where a curated
+   * payload already exists, and ignored on a merged page.
    */
-  crossSourceContext?: ScaffoldContextPayload | null
+  crossSourceContextLoader?: (signal: AbortSignal) => Promise<ScaffoldContextPayload | null>
   hierarchyLocation?: HierarchyEvalLocation | null
   /** Full eval hierarchy — used by the signals strip to find sibling
    *  appearances of the same canonical benchmark across other suites. */
@@ -771,7 +776,7 @@ export function EvalDetail({
   splitConfig,
   rowHighlight,
   studySourceHref,
-  crossSourceContext,
+  crossSourceContextLoader,
 }: EvalDetailProps) {
   const { mode } = useAudienceMode()
   const isResearchView = mode === "research"
@@ -1162,17 +1167,20 @@ export function EvalDetail({
   // community's published measurements. Server-built and pre-joined by
   // the producer; null unless this exact (collection, benchmark) pair
   // passed the bake gates.
-  // The curated study sidecar when this page has one; otherwise the
-  // cross-source payload the caller derived from other sources' rows. The
-  // sidecar wins: it carries scaffold names, harvest dates and the
-  // with-oracle companion that the derived one cannot.
+  // The curated study sidecar, which arrives on the summary and is the
+  // richer payload: it carries scaffold names, harvest dates and the
+  // with-oracle companion that a derived one cannot. Where there is none,
+  // the loader below offers the same view at a download's notice.
   //
   // A merged page gets neither. Its rows are already one per model and
   // source, so every reading the strip would draw is a row the reader can
   // see, and the strip would only redraw the table above it.
   const scaffoldContext = summary.merged_view
     ? undefined
-    : (summary.collection?.context ?? crossSourceContext ?? undefined)
+    : (summary.collection?.context ?? undefined)
+  const contextLoader = summary.merged_view || scaffoldContext
+    ? undefined
+    : crossSourceContextLoader
 
   // Optional user-driven sort. `default` keeps the score-ordered rows
   // the ranker already produced. The rank label is always by score
@@ -2431,6 +2439,7 @@ export function EvalDetail({
                   })),
                 }]}
                 context={scaffoldContext}
+                contextLoader={contextLoader}
               />
             </div>
           )}

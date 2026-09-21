@@ -369,28 +369,33 @@ function summaryWith(extra: Record<string, unknown>): BenchmarkEvalSummary {
 }
 
 describe("the Context view's scope", () => {
-  const context = buildCrossSourceContext(
-    [
-      row({ modelKey: "org/model-a", displayName: "Model A", score: 0.5, sourceSlug: "mine" }),
-      row({ modelKey: "org/model-a", displayName: "Model A", score: 0.41, sourceSlug: "other" }),
-    ],
-    { subjectSourceSlug: "mine", subjectLabel: "This source" },
-  )
-
-  const render = (extra: Record<string, unknown>) =>
+  const renderWith = (extra: Record<string, unknown>, loader?: () => Promise<null>) =>
     renderToStaticMarkup(
       createElement(
         AudienceModeProvider,
         null,
-        createElement(EvalDetail, { summary: summaryWith(extra), crossSourceContext: context }),
+        createElement(EvalDetail, {
+          summary: summaryWith(extra),
+          crossSourceContextLoader: loader,
+        }),
       ),
     )
 
-  it("offers the view on a per-source page", () => {
-    expect(render({})).toContain(">Context<")
+  it("offers the view on a per-source page without paying for it", () => {
+    // The payload is a multi-megabyte download. Knowing a second source
+    // exists is what offers the chip; opening it is what fetches.
+    const loader = vi.fn(async () => null)
+    expect(renderWith({}, loader)).toContain(">Context<")
+    expect(loader).not.toHaveBeenCalled()
+  })
+
+  it("does not offer it without a loader or a curated payload", () => {
+    expect(renderWith({})).not.toContain(">Context<")
   })
 
   it("does not offer it on a merged page", () => {
-    expect(render({ merged_view: true })).not.toContain(">Context<")
+    const loader = vi.fn(async () => null)
+    expect(renderWith({ merged_view: true }, loader)).not.toContain(">Context<")
+    expect(loader).not.toHaveBeenCalled()
   })
 })
