@@ -170,8 +170,10 @@ describe("scoring mode", () => {
     })
     expect(state(summary, "decoding")).toBe("not_applicable")
     expect(state(summary, "length")).toBe("not_applicable")
-    // …and it gains the question that IS ambiguous for log-prob scoring.
-    expect(state(summary, "scoring_variant")).toBe("missing")
+    // Raw vs length-normalised accuracy is NOT asked: sources report a
+    // metric id of "accuracy" for both, so the slot could only be satisfied
+    // by a label that does not disambiguate.
+    expect(summary.slots.some((slot) => slot.id === "scoring_variant")).toBe(false)
   })
 
   it("treats loglikelihood and loglikelihood_rolling the same way", () => {
@@ -189,7 +191,6 @@ describe("scoring mode", () => {
     })
     expect(state(summary, "decoding")).toBe("missing")
     expect(state(summary, "length")).toBe("missing")
-    expect(state(summary, "scoring_variant")).toBe("unknown")
   })
 
   it("reads a reward model's classifier type as log-prob", () => {
@@ -225,6 +226,7 @@ describe("scoring mode", () => {
     const summary = evaluateReproducibilitySlots({})
     expect(summary.slots.some((slot) => slot.id === "prompt_format")).toBe(false)
     expect(summary.slots.some((slot) => slot.id === "model_build")).toBe(false)
+    expect(summary.slots.some((slot) => slot.id === "scoring_variant")).toBe(false)
   })
 })
 
