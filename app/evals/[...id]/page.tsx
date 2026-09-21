@@ -11,6 +11,8 @@ import { MergedBenchmarkView } from "@/components/merged-benchmark-view"
 import { ParamRangePicker } from "@/components/param-range-picker"
 import { useAudienceMode } from "@/components/audience-mode-provider"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
+import type { ScaffoldContextPayload } from "@/lib/collections"
+import { buildCrossSourceContext, type CrossSourceRow } from "@/lib/cross-source-context"
 import { compositeScoresByModel } from "@/lib/eval-processing"
 import { fetchComparisonIndex, fetchEvalHierarchy, fetchEvalSummary } from "@/lib/dashboard-data-client"
 import { humanizeEvaluationId, isMergedEvalId, routeIdFromSegments, routeIdToPath } from "@/lib/utils"
@@ -54,6 +56,59 @@ export default function EvalDetailPage() {
   const [splitIds, setSplitIds] = useState<string[]>([])
   const [splitSummaries, setSplitSummaries] = useState<Map<string, BenchmarkEvalSummary>>(new Map())
   const [activeSplitId, setActiveSplitId] = useState<string | null>(null)
+  const [crossSourceContext, setCrossSourceContext] =
+    useState<ScaffoldContextPayload | null>(null)
+  // Other sources' measurements of the same (model, benchmark), so a
+  // reader can see whether THIS source's number is an outlier. The merged
+  // endpoint is already the producer's cross-source join on a canonical
+  // scale, so nothing is re-derived here.
+  //
+  // Only ~250 of 1,218 benchmarks have a second source at all; the rest
+  // resolve to null and the Context view simply never appears. The curated
+  // study sidecar, where one exists, takes precedence inside EvalDetail.
+  useEffect(() => {
+    const benchmarkId = summary?.benchmark_id
+    if (!benchmarkId || !summary || summary.collection?.context) {
+      setCrossSourceContext(null)
+      return
+    }
+    let cancelled = false
+    fetch(`/api/eval-summary?id=${encodeURIComponent(benchmarkId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((merged) => {
+        if (cancelled || !merged?.merged || !Array.isArray(merged.results)) return
+        const rows: CrossSourceRow[] = merged.results
+          .filter((row: Record<string, unknown>) => row.is_headline !== false)
+          .map((row: Record<string, unknown>) => {
+            const modelInfo = (row.model_info ?? {}) as { name?: string; id?: string }
+            // The canonical score is the only one comparable across
+            // sources; a published 68.5 and a published 0.685 are the same
+            // measurement on two scales.
+            const score = row.score_canonical ?? row.score
+            return {
+              modelKey: String(row.model_key ?? row.model_route_id ?? modelInfo.id ?? ""),
+              displayName: modelInfo.name ?? String(row.model_key ?? ""),
+              score: typeof score === "number" ? score : Number.NaN,
+              sourceSlug: String(row.composite_slug ?? ""),
+              sourceLabel: String(row.composite_display_name ?? row.composite_slug ?? ""),
+              runDate: typeof row.evaluation_timestamp === "string" ? row.evaluation_timestamp : null,
+            }
+          })
+        setCrossSourceContext(
+          buildCrossSourceContext(rows, {
+            subjectSourceSlug: summary.composite_benchmark_key,
+            subjectLabel: "This source",
+            benchmarkLabel: summary.evaluation_name,
+            sourceLabel: summary.composite_benchmark_name,
+          }),
+        )
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [summary])
+
   const returnTo = searchParams.get("from")
   // Single URL segment = merged all-sources benchmark page (spec F2);
   // two segments = per-source eval page (unchanged).
@@ -301,6 +356,7 @@ export default function EvalDetailPage() {
             evalHierarchy={hierarchy}
             comparisonIndex={comparisonIndex}
             activeSummary={activeSplitSummary ?? summary}
+            crossSourceContext={crossSourceContext}
             splitConfig={
               splitOptions.length > 1
                 ? {

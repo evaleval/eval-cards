@@ -70,6 +70,7 @@ import {
   chooseProtocolColumns,
   formatProtocolValue,
   type ProtocolColumn,
+  type ScaffoldContextPayload,
 } from "@/lib/collections"
 import { CollectionTrajectories } from "@/components/collection-trajectories"
 import { isRecognizedEvaluator } from "@/lib/evaluators"
@@ -106,6 +107,14 @@ interface SplitConfig {
 
 interface EvalDetailProps {
   summary: BenchmarkEvalSummary
+  /**
+   * Cross-source context derived by the caller from other sources'
+   * measurements of the same (model, benchmark) — the same strip the
+   * curated study sidecar drives, for the ~250 benchmarks that have more
+   * than one source but no sidecar entry. Ignored when the page's own
+   * summary carries a curated payload, which is richer.
+   */
+  crossSourceContext?: ScaffoldContextPayload | null
   hierarchyLocation?: HierarchyEvalLocation | null
   /** Full eval hierarchy — used by the signals strip to find sibling
    *  appearances of the same canonical benchmark across other suites. */
@@ -777,6 +786,7 @@ export function EvalDetail({
   splitConfig,
   rowHighlight,
   studySourceHref,
+  crossSourceContext,
 }: EvalDetailProps) {
   const { mode } = useAudienceMode()
   const isResearchView = mode === "research"
@@ -1095,7 +1105,11 @@ export function EvalDetail({
   // community's published measurements. Server-built and pre-joined by
   // the producer; null unless this exact (collection, benchmark) pair
   // passed the bake gates.
-  const scaffoldContext = summary.collection?.context ?? undefined
+  // The curated study sidecar when this page has one; otherwise the
+  // cross-source payload the caller derived from other sources' rows. The
+  // sidecar wins: it carries scaffold names, harvest dates and the
+  // with-oracle companion that the derived one cannot.
+  const scaffoldContext = summary.collection?.context ?? crossSourceContext ?? undefined
 
   // Optional user-driven sort. `default` keeps the score-ordered rows
   // the ranker already produced. The rank label is always by score
@@ -2694,6 +2708,82 @@ export function EvalDetail({
                                   >
                                     {foldHasSources ? "Sources on this page" : "Runs on this page"}
                                   </div>
+                                  {/* One line showing where the readings
+                                      fall relative to each other. The table
+                                      below has the numbers; the strip is
+                                      what makes "these two sources disagree
+                                      by a lot" visible without arithmetic.
+                                      Only drawn when they actually differ —
+                                      a strip of coincident marks says
+                                      nothing and reads as a bug. */}
+                                  {fold.maxScore > fold.minScore && (
+                                    <div className="pb-1 pt-0.5">
+                                      <div
+                                        style={{
+                                          position: "relative",
+                                          height: 18,
+                                          marginLeft: 4,
+                                          marginRight: 4,
+                                        }}
+                                      >
+                                        <div
+                                          style={{
+                                            position: "absolute",
+                                            top: 8,
+                                            left: 0,
+                                            right: 0,
+                                            height: 1,
+                                            background: "var(--border-soft)",
+                                          }}
+                                        />
+                                        {foldMemberRows(fold).map((member) => {
+                                          const span = fold.maxScore - fold.minScore
+                                          const pct =
+                                            ((member.modelResult.score - fold.minScore) / span) * 100
+                                          const label = foldHasSources
+                                            ? (foldSourceOf(member) ?? "source")
+                                            : "run"
+                                          return (
+                                            <div
+                                              key={`strip-${member.key}`}
+                                              title={`${label}: ${formatRawScore(member.modelResult.score)}`}
+                                              style={{
+                                                position: "absolute",
+                                                top: 3,
+                                                left: `${pct}%`,
+                                                width: 2,
+                                                height: 11,
+                                                marginLeft: -1,
+                                                background: "var(--fg-muted)",
+                                              }}
+                                            />
+                                          )
+                                        })}
+                                        {/* The number the row reports, so the
+                                            strip and the row agree on screen. */}
+                                        <div
+                                          title={`Mean ${formatRawScore(fold.foldedScore)}`}
+                                          style={{
+                                            position: "absolute",
+                                            top: 0,
+                                            left: `${((fold.foldedScore - fold.minScore) / (fold.maxScore - fold.minScore)) * 100}%`,
+                                            width: 2,
+                                            height: 17,
+                                            marginLeft: -1,
+                                            background: "var(--accent)",
+                                          }}
+                                        />
+                                      </div>
+                                      <div
+                                        className="flex justify-between font-mono"
+                                        style={{ fontSize: 9, color: "var(--fg-subtle)" }}
+                                      >
+                                        <span>{formatRawScore(fold.minScore)}</span>
+                                        <span>{formatRawScore(fold.maxScore)}</span>
+                                      </div>
+                                    </div>
+                                  )}
+
                                   {/* No commentary: each run's own
                                       conditions and its own score. The
                                       reader compares them. */}
