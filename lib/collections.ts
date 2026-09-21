@@ -150,11 +150,14 @@ export interface StudyRef {
   family_key?: string
 }
 
-/** Feedback is already carried by the ASSISTED badge on the model cell;
- *  a column would say the same thing twice. */
-const PROTOCOL_COLUMN_EXCLUDED = new Set(["feedback"])
+/** Nothing is excluded. `feedback` used to be, because an ASSISTED badge
+ *  carried it; the badge is gone (the run list states conditions rather
+ *  than commenting on them), so the axis has to appear here or the fact
+ *  that a run had an answer oracle disappears from the page. */
+const PROTOCOL_COLUMN_EXCLUDED = new Set<string>()
 
 const PROTOCOL_COLUMN_LABELS: Record<string, string> = {
+  feedback: "Feedback",
   token_limit: "Token budget",
   reasoning_tokens: "Thinking tokens",
   reasoning_effort: "Effort",
@@ -534,6 +537,39 @@ export function protocolValueId(reading: ProtocolAxisReading): string {
   if (typeof raw === "number") return `number:${raw}`
   if (typeof raw === "boolean") return `boolean:${raw}`
   return `string:${String(raw)}`
+}
+
+/**
+ * One axis across the several runs a folded leaderboard row stands for.
+ *
+ * A row standing for nine runs has no single token budget, so the axis
+ * reads as the study's own smallest and largest value, with the unit
+ * said once at the end. Runs that did not report the axis are counted
+ * rather than dropped: "some of these ran without a stated budget" is a
+ * different claim from "they all ran at 6M". Returns null only when the
+ * axis applies to none of the runs, which is the one case with nothing
+ * to say.
+ */
+export function summariseProtocolReadings(
+  readings: ProtocolAxisReading[],
+  column: ProtocolColumn,
+): string | null {
+  if (readings.length === 0) return null
+  const values = readings.filter((reading) => reading.state === "value")
+  const missing = readings.length - values.length
+  if (values.length === 0) {
+    return readings.every((reading) => reading.state === "not_applicable")
+      ? null
+      : "Not reported"
+  }
+  const sorted = [...values].sort((a, b) => compareProtocolReadings(a, b, column, "asc"))
+  const low = sorted[0]
+  const high = sorted[sorted.length - 1]
+  const body =
+    protocolValueId(low) === protocolValueId(high)
+      ? formatProtocolValue(low, column)
+      : `${protocolValueBody(low.raw, column)} to ${formatProtocolValue(high, column)}`
+  return missing > 0 ? `${body}, some not reported` : body
 }
 
 export interface ProtocolFilterOption {

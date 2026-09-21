@@ -126,8 +126,8 @@ const OPUS_PAGE = [
   run(1.0, { feedback: "answer_feedback", reasoning_effort: "high", reasoning_tokens: 32000, compaction: true }),
 ]
 
-describe("EvalDetail leaderboard — protocol condition columns", () => {
-  it("gives every varying axis its own column so same-named rows are distinguishable", () => {
+describe("EvalDetail leaderboard — folded model rows", () => {
+  it("shows one row per model, reporting the mean of its runs", () => {
     const html = render(summaryWith(OPUS_PAGE))
 
     // Headers for the budgets the study declares a unit for, and for the
@@ -164,8 +164,6 @@ describe("EvalDetail leaderboard — protocol condition columns", () => {
     // unranked runs are not numbered #2..#6.
     expect(html.match(/#1/g) ?? []).toHaveLength(1)
     expect(html).not.toContain("#2")
-    expect(html).toContain("Another run of the same model — shown, not ranked")
-    expect(html).toContain("Assisted run (answer feedback) — shown, not ranked")
   })
 
   it("keeps the declared budgets when the page's runs share one condition", () => {

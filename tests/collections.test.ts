@@ -406,12 +406,13 @@ describe("chooseProtocolColumns", () => {
     expect(columns.map((c) => c.key)).toEqual(["token_limit", "reasoning_tokens"])
   })
 
-  it("never adds a feedback column — the assisted badge already says it", () => {
+  it("includes feedback — nothing else on the page records the answer oracle", () => {
     const columns = chooseProtocolColumns(
       [cond({ feedback: "none" }), cond({ feedback: "answer_feedback" })],
       axes.filter((axis) => !axis.unit),
     )
-    expect(columns).toEqual([])
+    expect(columns.map((c) => c.key)).toEqual(["feedback"])
+    expect(columns[0].label).toBe("Feedback")
   })
 
   it("treats a missing key and an explicit null as one reading", () => {
@@ -454,12 +455,12 @@ describe("chooseProtocolColumns", () => {
     // A wide table scrolls; a silently truncated one hides a setting.
     const many = chooseProtocolColumns(
       [
-        cond({ a: 1, b: 1, c: 1, d: 1, e: 1, f: 1 }),
-        cond({ a: 2, b: 2, c: 2, d: 2, e: 2, f: 2 }),
+        cond({ a: 1, b: 1, c: 1, d: 1, e: 1, f: 1, g: 1, h: 1 }),
+        cond({ a: 2, b: 2, c: 2, d: 2, e: 2, f: 2, g: 2, h: 2 }),
       ],
       [],
     )
-    expect(many.map((c) => c.key)).toEqual(["a", "b", "c", "d", "e", "f"])
+    expect(many.map((c) => c.key)).toEqual(["a", "b", "c", "d", "e", "f", "g", "h"])
   })
 })
 

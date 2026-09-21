@@ -51,6 +51,50 @@ export function isAssistedResult(protocolCondition: string | null | undefined): 
   }
 }
 
+/** Student's t critical values at 95% two-sided, df 1-30; the normal
+ *  approximation takes over beyond that. A fold usually holds a handful
+ *  of runs, where 1.96 would understate the interval badly. */
+const T_CRITICAL_95: readonly number[] = [
+  12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
+  2.201, 2.179, 2.16, 2.145, 2.131, 2.12, 2.11, 2.101, 2.093, 2.086,
+  2.08, 2.074, 2.069, 2.064, 2.06, 2.056, 2.052, 2.048, 2.045, 2.042,
+]
+
+export interface ScoreSummary {
+  mean: number
+  /** Half-width of the 95% interval, or null when a single run gives
+   *  nothing to spread. */
+  ci95: number | null
+  n: number
+  min: number
+  max: number
+}
+
+/**
+ * Mean and 95% interval across a model's runs on one page.
+ *
+ * NOTE ON WHAT THE INTERVAL MEANS: these runs are different
+ * CONFIGURATIONS (token budgets, reasoning effort, feedback), not
+ * repeated draws of one quantity. The spread is therefore systematic —
+ * how much the setup moved the score — not sampling error around a true
+ * value. Callers must label it as spread across runs and never as a
+ * confidence interval on the model's ability.
+ */
+export function summariseScores(values: readonly number[]): ScoreSummary | null {
+  const finite = values.filter((value) => Number.isFinite(value))
+  if (finite.length === 0) return null
+  const n = finite.length
+  const mean = finite.reduce((sum, value) => sum + value, 0) / n
+  const min = Math.min(...finite)
+  const max = Math.max(...finite)
+  if (n < 2) return { mean, ci95: null, n, min, max }
+  const variance =
+    finite.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (n - 1)
+  const standardError = Math.sqrt(variance) / Math.sqrt(n)
+  const t = T_CRITICAL_95[n - 2] ?? 1.96
+  return { mean, ci95: t * standardError, n, min, max }
+}
+
 /** A parsed `judge_condition`. `judges` holds the canonical
  *  model ids of the LLM judges behind the number, `label` the source's own
  *  name for the channel. */

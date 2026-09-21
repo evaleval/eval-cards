@@ -132,6 +132,33 @@ export function ProtocolNarrowItems({
 }
 
 /**
+ * The narrow-layout block for a row that stands for several runs: the
+ * same labelled items, each axis summarised across those runs rather
+ * than claiming one value for all of them.
+ */
+export function ProtocolNarrowRanges({
+  columns,
+  summaryFor,
+}: {
+  columns: ProtocolColumn[]
+  summaryFor: (column: ProtocolColumn) => string | null
+}) {
+  const items = columns
+    .map((column) => ({ column, text: summaryFor(column) }))
+    .filter((item): item is { column: ProtocolColumn; text: string } => item.text != null)
+  if (items.length === 0) return null
+  return (
+    <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5" style={{ fontSize: 10 }}>
+      {items.map(({ column, text }) => (
+        <span key={column.key} style={{ color: "var(--fg-subtle)" }}>
+          {column.label}: <span className="font-mono">{text}</span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
  * The setting one curated study's reported run was measured under.
  *
  * A model page carries a study's HEADLINE run per benchmark, which is one
