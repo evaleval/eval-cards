@@ -108,6 +108,139 @@ function axisValue(fields: Record<string, unknown>, key: string): number | null 
 }
 
 /**
+ * A protocol axis that actually VARIES on one page, surfaced as its own
+ * leaderboard column. `format` is applied per row by
+ * `formatProtocolValue`.
+ */
+export interface ProtocolColumn {
+  key: string
+  /** Column header — the study's key, humanised. */
+  label: string
+  /** The axis type as the study declares it (`int`, `boolean`,
+   *  `categorical`); "unknown" when only the rows know the key. */
+  type: string
+  unit?: string | null
+}
+
+/** Feedback is already carried by the ASSISTED badge on the model cell;
+ *  a column would say the same thing twice. */
+const PROTOCOL_COLUMN_EXCLUDED = new Set(["feedback"])
+
+/** A wide table is its own kind of unreadable, so cap the added columns.
+ *  Declared-axis order wins, which is the study's own ordering. */
+const MAX_PROTOCOL_COLUMNS = 4
+
+const PROTOCOL_COLUMN_LABELS: Record<string, string> = {
+  token_limit: "Token budget",
+  reasoning_tokens: "Thinking tokens",
+  reasoning_effort: "Effort",
+  compaction: "Compaction",
+  scaffold: "Scaffold",
+}
+
+function humaniseProtocolKey(key: string): string {
+  const known = PROTOCOL_COLUMN_LABELS[key]
+  if (known) return known
+  const spaced = key.replace(/[_-]+/g, " ").trim()
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1)
+}
+
+/** Distinct-value identity for one row's value of one axis. A missing
+ *  key and an explicit null are the SAME reading ("the study did not set
+ *  it here"), so they must not count as two values and conjure a column
+ *  out of nothing. */
+function protocolValueKey(value: unknown): string {
+  return value == null ? "\u0000absent" : JSON.stringify(value)
+}
+
+/**
+ * The columns a leaderboard needs to tell its protocol rows apart.
+ *
+ * Nine rows reading "Claude Opus 4.6" are nine different runs, and
+ * without the varying axis the reader sees nine identical rows with
+ * different scores. So: one column per axis whose value actually
+ * differs across the rows on this page. An axis the study held constant
+ * (one scaffold everywhere) explains nothing and is left out.
+ *
+ * `declaredAxes` is the collection sidecar's own axis list — it carries
+ * the study's ordering, types and units. Keys seen only in the rows are
+ * appended after it so a new axis still surfaces, untyped, rather than
+ * silently disappearing.
+ */
+export function chooseProtocolColumns(
+  protocolConditions: Array<string | null | undefined>,
+  declaredAxes?: CollectionProtocolAxis[] | null,
+): ProtocolColumn[] {
+  const parsed = protocolConditions
+    .map((raw) => parseProtocolCondition(raw))
+    .filter((fields): fields is Record<string, unknown> => fields != null)
+  if (parsed.length < 2) return []
+
+  const ordered: Array<{ key: string; type: string; unit?: string | null }> = []
+  const seen = new Set<string>()
+  for (const axis of declaredAxes ?? []) {
+    if (!axis?.key || seen.has(axis.key)) continue
+    seen.add(axis.key)
+    ordered.push({ key: axis.key, type: axis.type ?? "unknown", unit: axis.unit })
+  }
+  for (const fields of parsed) {
+    for (const key of Object.keys(fields)) {
+      if (seen.has(key)) continue
+      seen.add(key)
+      ordered.push({ key, type: "unknown" })
+    }
+  }
+
+  const columns: ProtocolColumn[] = []
+  for (const axis of ordered) {
+    if (PROTOCOL_COLUMN_EXCLUDED.has(axis.key)) continue
+    const values = new Set(parsed.map((fields) => protocolValueKey(fields[axis.key])))
+    if (values.size < 2) continue
+    columns.push({
+      key: axis.key,
+      label: humaniseProtocolKey(axis.key),
+      type: axis.type,
+      unit: axis.unit ?? null,
+    })
+    if (columns.length === MAX_PROTOCOL_COLUMNS) break
+  }
+  return columns
+}
+
+/** 32000 -> "32k", 10000000 -> "10M", 1500 -> "1.5k". Budgets are the
+ *  study's round numbers; the raw digits crowd the cell for no gain. */
+function formatCompactCount(value: number): string {
+  const abs = Math.abs(value)
+  if (abs >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}M`
+  if (abs >= 1_000) return `${Number((value / 1_000).toFixed(1))}k`
+  return String(value)
+}
+
+/**
+ * One row's value for one protocol column. Returns null when the row
+ * does not set the axis — the caller renders its own "not set" mark
+ * rather than a word that would read as a value.
+ */
+export function formatProtocolValue(
+  raw: string | null | undefined,
+  column: ProtocolColumn,
+): string | null {
+  const fields = parseProtocolCondition(raw)
+  const value = fields?.[column.key]
+  if (value == null) return null
+  if (typeof value === "boolean") return value ? "on" : "off"
+  if (typeof value === "number" && Number.isFinite(value)) {
+    // Counts get the compact form; a bare number (a temperature, a
+    // seed) is not a magnitude and stays verbatim.
+    return column.type === "int" || column.unit === "tokens"
+      ? formatCompactCount(value)
+      : String(value)
+  }
+  if (typeof value === "string") return value
+  return JSON.stringify(value)
+}
+
+/**
  * R1 per-page x-axis selection: the first candidate axis with >= 2
  * distinct numeric values WITHIN at least one feedback condition.
  * Cross-condition variation alone never qualifies — that would plot a
