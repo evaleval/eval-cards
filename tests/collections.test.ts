@@ -351,15 +351,17 @@ describe("chooseProtocolColumns", () => {
     )
     expect(columns.map((c) => c.key)).toEqual(["reasoning_tokens", "reasoning_effort"])
     // Declared order is the study's, and the labels are readable.
+    // Feedback is constant here, so it earns no column.
     expect(columns.map((c) => c.label)).toEqual(["Thinking tokens", "Effort"])
   })
 
-  it("never adds a feedback column — the assisted badge already says it", () => {
+  it("includes feedback — nothing else on the page records the answer oracle", () => {
     const columns = chooseProtocolColumns(
       [cond({ feedback: "none" }), cond({ feedback: "answer_feedback" })],
       axes,
     )
-    expect(columns).toEqual([])
+    expect(columns.map((c) => c.key)).toEqual(["feedback"])
+    expect(columns[0].label).toBe("Feedback")
   })
 
   it("treats a missing key and an explicit null as one reading", () => {
@@ -392,12 +394,12 @@ describe("chooseProtocolColumns", () => {
   it("caps the columns so the table stays readable", () => {
     const many = chooseProtocolColumns(
       [
-        cond({ a: 1, b: 1, c: 1, d: 1, e: 1, f: 1 }),
-        cond({ a: 2, b: 2, c: 2, d: 2, e: 2, f: 2 }),
+        cond({ a: 1, b: 1, c: 1, d: 1, e: 1, f: 1, g: 1, h: 1 }),
+        cond({ a: 2, b: 2, c: 2, d: 2, e: 2, f: 2, g: 2, h: 2 }),
       ],
       [],
     )
-    expect(many).toHaveLength(4)
+    expect(many).toHaveLength(6)
   })
 })
 

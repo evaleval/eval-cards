@@ -8,8 +8,10 @@ import type { BenchmarkEvalSummary, ModelResultForBenchmark } from "@/lib/eval-p
 
 // The leaderboard ranks CLIENT-side, so a NULL backend rank is not enough
 // on its own: these render the real component and read the rows it emits.
-// One ranked row per model, the model's other judge readings beneath it,
-// unranked and labelled.
+// One row per model, ranked by the score it reports; a model's other
+// judge / protocol readings fold into that row and are listed when it is
+// expanded (which static markup does not reach — `tagFoldMembers` in
+// eval-processing.test.ts covers the unfurled list).
 
 function result(overrides: Partial<ModelResultForBenchmark>): ModelResultForBenchmark {
   const score = overrides.score ?? 0.8
@@ -119,32 +121,25 @@ describe("EvalDetail leaderboard rows — judge and protocol readings", () => {
       ]),
     )
 
-    // Two models on the page, so two ranks and no third: the three judge
-    // rows are shown but never ranked.
+    // Two models on the page, so two rows and two ranks: the three judge
+    // readings fold into Model A's row rather than standing beside it.
     expect(html.match(/#1/g) ?? []).toHaveLength(1)
     expect(html.match(/#2/g) ?? []).toHaveLength(1)
     expect(html).not.toContain("#3")
 
-    // Judge labels: the panel on the headline row, each single judge
-    // beneath it. Names come from the server-resolved map — Claude is a
-    // judge with no result row on this page and still reads as a name —
-    // and an id the map cannot place keeps its raw spelling.
+    // The folded row keeps the headline reading's judge label — the
+    // panel, named from the server-resolved map.
     expect(html).toContain("mean of 3 judges")
-    expect(html).toContain("judged by GPT-4o")
-    expect(html).toContain("judged by Claude 3.5 Sonnet")
-    expect(html).toContain("judged by meta/llama-4")
-    // The panel's members are named on the multi-judge row itself.
     expect(html).toContain("Judges: GPT-4o, Claude 3.5 Sonnet, meta/llama-4")
-    // The source's own channel name rides along as provenance.
-    expect(html).toContain("gpt_score")
+    // Model A read 0.8 / 0.99 / 0.61 / 0.55, so its row reports the mean
+    // of the four, not the headline 0.8 and not the 0.99 a single judge
+    // handed it.
+    expect(html).toContain("mean of 4 runs")
+    expect(html).toContain("0.74")
 
-    // Judge rows sit beneath their model's headline row, before the next
-    // model's row.
-    const judgeIndex = html.indexOf("judged by GPT-4o")
-    const headlineIndex = html.indexOf("mean of 3 judges")
-    const nextModelIndex = html.indexOf("Model B")
-    expect(headlineIndex).toBeLessThan(judgeIndex)
-    expect(judgeIndex).toBeLessThan(nextModelIndex)
+    // The extra readings are not loose rows any more.
+    expect(html).not.toContain("judged by GPT-4o")
+    expect(html).not.toContain("shown, not ranked")
 
     // The study banner is keyed on protocol_condition alone — a judged
     // page is not a study page.
@@ -170,19 +165,18 @@ describe("EvalDetail leaderboard rows — judge and protocol readings", () => {
       ]),
     )
 
-    // Two models → two ranks; neither the judge row nor the assisted run
-    // takes one, and the assisted 0.95 never outranks Model A.
+    // Two models → two rows, two ranks, and the assisted 0.95 neither
+    // takes a rank of its own nor lifts Model B above Model A: it is
+    // listed inside Model B's fold but not counted in its median.
     expect(html.match(/#1/g) ?? []).toHaveLength(1)
     expect(html).not.toContain("#3")
-    expect(html).toContain("assisted")
     expect(html).toContain("Study-specific protocol")
-    expect(html).toContain("Assisted run (answer feedback) — shown, not ranked")
-    expect(html).toContain("Another judge&#x27;s reading of the same model — shown, not ranked")
+    expect(html).toContain("labeled and counted in each model")
+    expect(html.indexOf("Model A")).toBeLessThan(html.indexOf("Model B"))
 
     // Because the backend already withheld the rank, the control cannot
     // put these rows back into the standings; it governs whether they are
     // shown at all, and says so.
-    expect(html).toContain("labeled and never ranked")
     expect(html).toContain("Hide assisted runs")
     expect(html).not.toContain("Include assisted runs in ranking")
   })
@@ -214,11 +208,13 @@ describe("EvalDetail leaderboard rows — judge and protocol readings", () => {
       ]),
     )
 
-    // Two dated variants of one model resolve to the same display name;
-    // the raw id in the tooltip is what separates those rows.
-    expect(html).toContain("Judge model id: openai/gpt-4o")
-    // The compact (mobile) list and the desktop table both carry the
-    // source's own channel name.
-    expect((html.match(/gpt_score/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    // The single-judge reading folds in, so neither its tooltip nor its
+    // own source channel is on the page any more.
+    expect(html).not.toContain("Judge model id: openai/gpt-4o")
+    expect(html).not.toContain("gpt_score")
+    // What the folded row carries is the HEADLINE reading's panel label
+    // and channel, in both the compact list and the desktop table.
+    expect((html.match(/mean of 3 judges/g) ?? []).length).toBeGreaterThanOrEqual(2)
+    expect((html.match(/font-size:10px">score<\/span>/g) ?? []).length).toBeGreaterThanOrEqual(2)
   })
 })

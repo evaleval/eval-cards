@@ -122,15 +122,18 @@ export interface ProtocolColumn {
   unit?: string | null
 }
 
-/** Feedback is already carried by the ASSISTED badge on the model cell;
- *  a column would say the same thing twice. */
-const PROTOCOL_COLUMN_EXCLUDED = new Set(["feedback"])
+/** Nothing is excluded. `feedback` used to be, because an ASSISTED badge
+ *  carried it; the badge is gone (the run list states conditions rather
+ *  than commenting on them), so the axis has to appear here or the fact
+ *  that a run had an answer oracle disappears from the page. */
+const PROTOCOL_COLUMN_EXCLUDED = new Set<string>()
 
-/** A wide table is its own kind of unreadable, so cap the added columns.
- *  Declared-axis order wins, which is the study's own ordering. */
-const MAX_PROTOCOL_COLUMNS = 4
+/** These columns live in a row's expanded run list, which has room, but
+ *  a table nobody can scan is still no use. */
+const MAX_PROTOCOL_COLUMNS = 6
 
 const PROTOCOL_COLUMN_LABELS: Record<string, string> = {
+  feedback: "Feedback",
   token_limit: "Token budget",
   reasoning_tokens: "Thinking tokens",
   reasoning_effort: "Effort",

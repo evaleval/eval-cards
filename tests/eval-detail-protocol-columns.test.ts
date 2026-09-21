@@ -124,63 +124,41 @@ const OPUS_PAGE = [
   run(1.0, { feedback: "answer_feedback", reasoning_effort: "high", reasoning_tokens: 32000, compaction: true }),
 ]
 
-describe("EvalDetail leaderboard — protocol condition columns", () => {
-  it("gives every varying axis its own column so same-named rows are distinguishable", () => {
+describe("EvalDetail leaderboard — folded model rows", () => {
+  it("shows one row per model, reporting the mean of its runs", () => {
     const html = render(summaryWith(OPUS_PAGE))
 
-    // Headers for the axes that vary, with the study's own ordering.
-    expect(html).toContain("Compaction")
-    expect(html).toContain("Thinking tokens")
-    expect(html).toContain("Effort")
-    // Constant axes explain nothing and stay out; feedback is already
-    // carried by the assisted badge.
-    expect(html).not.toContain("Scaffold")
-    expect(html).not.toContain("Token budget</th>")
-
-    // Cell values: the compact count form, the effort words, and the
-    // "not set" mark for the run that declared no effort.
-    expect(html).toContain("16k")
-    expect(html).toContain("32k")
-    expect(html).toContain("64k")
-    expect(html).toContain("xhigh")
-    expect(html).toContain("Effort: not set for this run")
-  })
-
-  it("still ranks one reading per model — the extra runs are labelled, not renumbered", () => {
-    const html = render(summaryWith(OPUS_PAGE))
-
-    // Six rows, one model, one rank: a model's standing is its headline
-    // reading, so the 1.00 assisted run does not take #1 and the
-    // unranked runs are not numbered #2..#6.
+    // Six readings of one model collapse to one ranked row.
     expect(html.match(/#1/g) ?? []).toHaveLength(1)
     expect(html).not.toContain("#2")
-    expect(html).toContain("Another run of the same model — shown, not ranked")
-    expect(html).toContain("Assisted run (answer feedback) — shown, not ranked")
+    // Mean of 0.964, 0.604, 0.726, 0.75, 0.755 and the assisted 1.00.
+    expect(html).toContain("mean of 6 runs")
+    expect(html).toContain("0.80")
   })
 
-  it("subordinates the extra runs to their model's ranked row", () => {
+  it("puts an interval on the row and says it is spread across runs", () => {
     const html = render(summaryWith(OPUS_PAGE))
-
-    // A dash reads as "ranked nowhere". These rows are readings of the
-    // row above them, so they get a branch glyph and an indent instead.
-    expect(html).toContain("\u21b3")
-    expect(html.match(/&#x2014;<\/span>/g) ?? []).toHaveLength(0)
-    // The reason is on the element, not only in a hover tooltip.
-    expect(html).toContain('aria-label="Another run of the same model — shown, not ranked"')
-    expect(html).toContain('aria-label="Rank 1"')
+    expect(html).toContain("±")
+    expect(html).toContain("95% across runs")
+    // The runs are different configurations, so the tooltip must not let
+    // the interval be read as sampling error on the model's ability.
+    expect(html).toContain("not repeated samples")
   })
 
-  it("drops the score sort arrow while the rows are grouped, not sorted", () => {
-    // The grouped order reads 0.96, 0.60, 0.73 … 1.00; a descending
-    // arrow over that column promises a descent it does not make.
-    const grouped = render(summaryWith(OPUS_PAGE))
-    expect(grouped).toContain("Grouped by model")
-    expect(grouped).not.toContain("Score↓")
-    expect(grouped).not.toContain("accuracy↓")
+  it("keeps run conditions off the folded row — an aggregate has no token budget", () => {
+    const html = render(summaryWith(OPUS_PAGE))
+    // The axes belong to individual runs, so no column claims one for
+    // the row that stands for all of them.
+    expect(html).not.toContain("varies")
+    // The desktop header is Rank / Model / Developer / Score /
+    // Evaluator / Source / Released and nothing else.
+    const header = html.slice(html.indexOf("<thead>"), html.indexOf("</thead>"))
+    expect(header).not.toContain("Thinking tokens")
+    expect(header).not.toContain("Compaction")
   })
 
-  it("keeps the score arrow on a page where every row is ranked", () => {
-    const flat = render(
+  it("gives a single-run model a plain score and no interval", () => {
+    const html = render(
       summaryWith([
         run(0.96, { feedback: "none", reasoning_effort: "high" }, { is_headline: true }),
         run(0.7, { feedback: "none", reasoning_effort: "high" }, {
@@ -190,30 +168,16 @@ describe("EvalDetail leaderboard — protocol condition columns", () => {
         }),
       ]),
     )
-    expect(flat).not.toContain("Grouped by model")
-    expect(flat).toContain("↓")
+    expect(html).not.toContain("mean of")
+    expect(html).not.toContain("±")
+    expect(html.match(/#1/g) ?? []).toHaveLength(1)
+    expect(html.match(/#2/g) ?? []).toHaveLength(1)
   })
 
-  it("adds no columns when the page's runs share one condition", () => {
-    const html = render(
-      summaryWith([
-        run(0.96, { feedback: "none", reasoning_effort: "high", reasoning_tokens: 32000 }, { is_headline: true }),
-        run(0.7, { feedback: "none", reasoning_effort: "high", reasoning_tokens: 32000 }, {
-          model_info: { name: "GPT-5.4", id: "openai/gpt-5.4" },
-          model_route_id: "openai%2Fgpt-5.4",
-          is_headline: true,
-        }),
-      ]),
-    )
-    expect(html).not.toContain("Thinking tokens")
-    expect(html).not.toContain("Effort")
-  })
-
-  it("falls back to row-discovered axes when the collection declares none", () => {
-    const html = render(
-      summaryWith(OPUS_PAGE, { protocol_axes: undefined }),
-    )
-    expect(html).toContain("Thinking tokens")
-    expect(html).toContain("Effort")
+  it("counts assisted runs and still records that they were assisted", () => {
+    const html = render(summaryWith(OPUS_PAGE))
+    // Counted: the fold spans all six readings...
+    expect(html).toContain("mean of 6 runs")
+    expect(html).toContain("labeled and counted in each model")
   })
 })
