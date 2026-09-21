@@ -711,6 +711,9 @@ export interface MergedObservationRow {
    *  sample count). Absent when the fact row carries none. */
   source_data?: SourceData
   generation_config?: GenerationConfig
+  /** Same meaning as on ModelResultForBenchmark: the harness the
+   *  reproducibility slots ask a re-runner to obtain and pin. */
+  eval_library?: EvalLibrary | null
   is_verified_evaluator?: boolean
   /** De-aliased evaluator identity (canonical display when resolvable). */
   evaluator_display_name?: string

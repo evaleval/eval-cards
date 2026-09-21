@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
 
 import { mergedSummaryToEvalSummary } from "@/lib/merged-adapter"
+import {
+  evaluateReproducibilitySlots,
+  evidenceFromResult,
+} from "@/lib/reproducibility-slots"
 import type {
   MergedBenchmarkSummary,
   MergedObservationRow,
@@ -438,6 +442,34 @@ describe("mergedSummaryToEvalSummary — EvalDetail surface", () => {
     )
     expect(adapted.metric_config.min_score).toBe(0)
     expect(adapted.metric_config.max_score).toBe(1)
+  })
+
+  it("carries the harness through, so a source earns the same credit on both pages", () => {
+    // The reproducibility slots ask which harness produced the run. A row
+    // that answers that on its own source page must answer it here too.
+    const adapted = mergedSummaryToEvalSummary(
+      mergedPayload([
+        row({ eval_library: { name: "lm-evaluation-harness", version: "0.4.5" } }),
+        row({
+          model_info: { name: "Model B", id: "org/model-b" },
+          model_route_id: "org%2Fmodel-b",
+          eval_library: {} as MergedObservationRow["eval_library"],
+        }),
+      ]),
+    )
+    const [withLibrary, withoutLibrary] = adapted.model_results
+    expect(withLibrary.eval_library).toEqual({
+      name: "lm-evaluation-harness",
+      version: "0.4.5",
+    })
+    const credited = evaluateReproducibilitySlots(evidenceFromResult(withLibrary))
+    expect(credited.slots.find((slot) => slot.id === "harness")?.state).toBe("disclosed")
+    expect(credited.slots.find((slot) => slot.id === "harness_pin")?.state).toBe("disclosed")
+
+    // An empty struct names nothing, so it earns nothing.
+    const uncredited = evaluateReproducibilitySlots(evidenceFromResult(withoutLibrary))
+    expect(uncredited.slots.find((slot) => slot.id === "harness")?.state).toBe("missing")
+    expect(uncredited.slots.find((slot) => slot.id === "harness_pin")?.state).toBe("missing")
   })
 
   it("infers 0–100 bounds for percent-scale scores", () => {

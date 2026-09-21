@@ -1750,6 +1750,7 @@ const MERGED_RESULT_COLUMNS = `
   CAST(to_json(r.generation_config) AS VARCHAR) AS generation_config,
   CAST(to_json(r.source_metadata) AS VARCHAR) AS source_metadata,
   CAST(to_json(r.source_data) AS VARCHAR) AS source_data,
+  CAST(to_json(r.eval_library) AS VARCHAR) AS eval_library,
   r.is_verified_evaluator
 `
 
@@ -1770,6 +1771,7 @@ function mergedObservationFromRow(row: Row): MergedObservationRow {
     source_metadata: sourceMetadataFromRow(row),
     source_data: (parseMaybeJson(row.source_data) ?? undefined) as SourceData | undefined,
     generation_config: (generationConfig ?? undefined) as GenerationConfig | undefined,
+    eval_library: parseMaybeJson(row.eval_library) as MergedObservationRow["eval_library"],
     is_verified_evaluator:
       row.is_verified_evaluator == null ? undefined : Boolean(row.is_verified_evaluator),
     evaluator_display_name: optionalString(row.evaluator_display_name),

@@ -189,6 +189,7 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
       is_verified_evaluator: row.is_verified_evaluator,
       evaluator_display_name: row.evaluator_display_name,
       collection_id: row.collection_id,
+      eval_library: row.eval_library,
       protocol_condition: row.protocol_condition,
       judge_condition: row.judge_condition,
       is_headline: row.is_headline,
