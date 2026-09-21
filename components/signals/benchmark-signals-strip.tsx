@@ -312,8 +312,8 @@ function deriveReproducibility(summary: BenchmarkEvalSummary): DerivedSignal {
     breakdown: {
       formula:
         "Reproducibility = (setup questions answered) / (setup questions that apply). " +
-        "A control this run does not have — sampling on a log-prob score, temperature on a " +
-        "hosted reasoning model — is not counted against it.",
+        "A control this run demonstrably does not have, such as sampling on a score read " +
+        "from log-probabilities, is not counted against it.",
       inputs: [
         { label: "Reported results", value: total.toString() },
         { label: "Questions answered", value: disclosedTotal.toString() },

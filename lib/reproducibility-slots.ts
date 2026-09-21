@@ -7,12 +7,12 @@
  * which tells a reader nothing. It was also wrong in the direction that matters:
  * a study disclosing scaffold, token budget, reasoning effort, compaction and
  * feedback condition scored 0/2, because none of that lives in
- * `generation_config`, and because temperature is not settable on hosted
- * reasoning models at all.
+ * `generation_config`.
  *
  * So: score the DECISIONS a re-runner must pin down, let any of several fields
- * satisfy each one, and never count a knob that does not exist for this run as
- * a failure to disclose.
+ * satisfy each one, and never count a knob that this run demonstrably does not
+ * have as a failure to disclose. "Demonstrably" is the whole of it: a knob
+ * nobody said anything about is undisclosed, not absent.
  *
  * The slot table is data, not code — see `config/reproducibility-slots.json`.
  * Adding a field to a slot is an edit to that file.
@@ -87,8 +87,8 @@ interface SlotConfigShape {
   applicability: {
     reasoning_markers?: string[]
     agentic_markers?: string[]
-    open_weights_implies_sampling_controlled?: boolean
     scoring_mode?: {
+      canonical_paths?: string[]
       output_type_paths?: string[]
       log_prob_output_types?: string[]
       generative_output_types?: string[]
@@ -132,14 +132,28 @@ function resolvePath(evidence: ReproducibilityEvidence, path: string): unknown {
   return current
 }
 
-function anyDisclosed(evidence: ReproducibilityEvidence, paths: string[] | undefined): boolean {
-  return (paths ?? []).some((path) => isDisclosed(resolvePath(evidence, path)))
+/** Strings that disclose the ABSENCE of the thing they name. A hosted API
+ *  spells "no thinking budget" as `reasoning_effort: "none"`, and that is a
+ *  disclosure, but it cannot be the marker that says the run reasoned. */
+const NEGATIVE_VALUES = new Set(["false", "no", "none", "off", "disabled"])
+
+/** A disclosed value that says the thing HAPPENED. Numbers are left alone:
+ *  `0` means "unlimited" on some harnesses and "none" on others. */
+function isAffirmative(value: unknown): boolean {
+  if (!isDisclosed(value)) return false
+  if (value === false) return false
+  if (typeof value === "string") return !NEGATIVE_VALUES.has(value.trim().toLowerCase())
+  return true
+}
+
+function anyAffirmative(evidence: ReproducibilityEvidence, paths: string[] | undefined): boolean {
+  return (paths ?? []).some((path) => isAffirmative(resolvePath(evidence, path)))
 }
 
 /** `true` / `false` / `null` when the evidence cannot say. */
 function isReasoningRun(evidence: ReproducibilityEvidence): boolean | null {
   const markers = CONFIG.applicability.reasoning_markers ?? []
-  if (anyDisclosed(evidence, markers)) return true
+  if (anyAffirmative(evidence, markers)) return true
   // No marker is not evidence of absence: most rows disclose nothing at all,
   // and the registry carries no reasoning flag to fall back on.
   return null
@@ -162,6 +176,13 @@ function scoringMode(evidence: ReproducibilityEvidence): "log_prob" | "generativ
   const norm = (value: unknown) =>
     typeof value === "string" ? value.trim().toLowerCase() : null
 
+  // The producer's own classification, read before anything inferred from the
+  // row's raw fields. Any other value falls through, so a snapshot without the
+  // column is classified exactly as it was before the column existed.
+  for (const path of cfg.canonical_paths ?? []) {
+    const value = norm(resolvePath(evidence, path))
+    if (value === "log_prob" || value === "generative") return value
+  }
   for (const path of cfg.output_type_paths ?? []) {
     const value = norm(resolvePath(evidence, path))
     if (!value) continue
@@ -178,7 +199,7 @@ function scoringMode(evidence: ReproducibilityEvidence): "log_prob" | "generativ
 }
 
 function isAgenticRun(evidence: ReproducibilityEvidence): boolean | null {
-  if (anyDisclosed(evidence, CONFIG.applicability.agentic_markers)) return true
+  if (anyAffirmative(evidence, CONFIG.applicability.agentic_markers)) return true
   return null
 }
 
@@ -208,45 +229,27 @@ function appliesTo(
       if (scoringMode(evidence) === "log_prob") return { applies: true }
       return { applies: null, reason: "Not known to be scored from log-probabilities." }
     }
+    // Only an affirmative log-prob classification excuses these two. A run
+    // whose mode nobody recorded is still asked for its decoding and length
+    // settings: an undisclosed setting is the thing being measured, and
+    // exempting it would read as though the knob had been ruled out.
     case "generative_run": {
-      const mode = scoringMode(evidence)
-      if (mode === "generative") return { applies: true }
-      if (mode === "log_prob") {
-        return {
-          applies: false,
-          reason: "Scored from log-probabilities — nothing is generated, so there is no length to limit.",
-        }
-      }
-      return { applies: null, reason: "Cannot tell whether this run generated text." }
-    }
-    case "sampling_controlled": {
-      // Nothing is sampled in a log-prob run, so there is no sampling to state.
       if (scoringMode(evidence) === "log_prob") {
         return {
           applies: false,
-          reason: "Scored from log-probabilities — no sampling takes place.",
+          reason: "Scored from log-probabilities, so nothing is generated and there is no length to limit.",
         }
       }
-      // A reasoning run on a hosted API cannot set temperature, so the slot
-      // does not apply — scoring it down for a knob the API rejects is the
-      // category error this whole rewrite exists to fix.
-      if (isReasoningRun(evidence) === true) {
+      return { applies: true }
+    }
+    case "sampling_controlled": {
+      if (scoringMode(evidence) === "log_prob") {
         return {
           applies: false,
-          reason: "Reasoning run — hosted reasoning APIs do not accept sampling controls.",
+          reason: "Scored from log-probabilities, so no sampling takes place.",
         }
       }
-      if (
-        CONFIG.applicability.open_weights_implies_sampling_controlled &&
-        resolvePath(evidence, "model.open_weights") === true
-      ) {
-        return { applies: true }
-      }
-      if (scoringMode(evidence) === "generative") return { applies: true }
-      return {
-        applies: null,
-        reason: "Cannot tell whether this run sampled — its scoring mode is not recorded.",
-      }
+      return { applies: true }
     }
     default:
       // An unrecognised rule must not silently mark everything missing.
@@ -281,6 +284,12 @@ export function evaluateReproducibilitySlots(
       })
       continue
     }
+    // A disclosed value settles applicability on its own, including one that
+    // names an absence: `compaction: false` and `reasoning: false` are the
+    // source answering the slot's question, and a source that answered it
+    // must not be scored as though it had said nothing. What such a value
+    // cannot do is stand in as a MARKER that the run reasoned or was agentic,
+    // which is why the marker tests above read affirmative values only.
     if (applies === null && !satisfiedBy) {
       slots.push({
         id: spec.id, label: spec.label, hint: spec.hint, state: "unknown", reason, candidates,
@@ -288,8 +297,6 @@ export function evaluateReproducibilitySlots(
       continue
     }
 
-    // A disclosed value settles applicability on its own: the source would not
-    // report a reasoning budget for a run that had none.
     applicable += 1
     if (satisfiedBy) {
       disclosed += 1
@@ -343,6 +350,9 @@ export interface ReproducibilityRowInput {
   score_details?: unknown
   split?: unknown
   attempts?: unknown
+  /** The producer's `scoring_mode` column: `generative`, `log_prob`, or
+   *  null when it could not classify the row. */
+  scoring_mode?: unknown
   model_info?: { open_weights?: unknown; additional_details?: unknown } | null
   result?: { generation_config?: unknown } | null
 }
@@ -363,6 +373,14 @@ export function evidenceFromResult(result: ReproducibilityRowInput): Reproducibi
   }
   const limits = parseJsonObject(additional.eval_limits ?? generationConfig.eval_limits) ?? {}
 
+  // The view ships the harness as a struct (`{name, version, ...}`). A
+  // payload assembled outside the view layer may carry the two as plain
+  // fields instead, so both shapes resolve to the same two paths: the
+  // slots ask for a library and a pin, not for a column layout.
+  const library = parseJsonObject(result.eval_library)
+  const libraryName = library ? library.name : result.eval_library
+  const libraryVersion = result.eval_library_version ?? library?.version
+
   return {
     generation_args: generationArgs,
     generation_config: generationConfig,
@@ -371,10 +389,11 @@ export function evidenceFromResult(result: ReproducibilityRowInput): Reproducibi
     agent,
     score: (result.score_details as Record<string, unknown> | null) ?? {},
     row: {
-      eval_library: result.eval_library,
-      eval_library_version: result.eval_library_version,
+      eval_library: libraryName,
+      eval_library_version: libraryVersion,
       attempts: result.attempts,
       split: result.split,
+      scoring_mode: result.scoring_mode,
     },
     model: {
       open_weights: result.model_info?.open_weights,

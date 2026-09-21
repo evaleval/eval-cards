@@ -8,6 +8,7 @@
 import type {
   BenchmarkCard,
   BenchmarkEvaluation,
+  EvalLibrary,
   EvalTag,
   GenerationConfig,
   ModelInfo,
@@ -418,6 +419,10 @@ export interface ModelResultForBenchmark {
   /** The source's own label for the published number (`gpt_score`).
    *  Display and provenance only — never a key. */
   metric_source_label?: string | null
+  /** The harness that produced the run, and its version when the source
+   *  named one. Carried on the row because the reproducibility slots ask
+   *  which harness a re-runner would have to obtain and pin. */
+  eval_library?: EvalLibrary | null
   /** How the score was produced: `generative` when the model wrote the
    *  answer, `log_prob` when the harness scored likelihoods over fixed
    *  choices. The producer's own classification, so it outranks anything
@@ -721,6 +726,8 @@ export interface MergedObservationRow {
   is_headline?: boolean | null
   metric_source_label?: string | null
   comparability_status?: ComparabilityStatus | null
+  /** Same meaning as on ModelResultForBenchmark. */
+  scoring_mode?: string | null
   /** The number the source published, before any canonical-scale
    *  conversion applied to `score`. */
   score_published?: number

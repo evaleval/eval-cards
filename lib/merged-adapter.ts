@@ -194,6 +194,7 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
       is_headline: row.is_headline,
       metric_source_label: row.metric_source_label,
       comparability_status: row.comparability_status,
+      scoring_mode: row.scoring_mode,
       score_published: row.score_published,
       result: {
         evaluation_name: metricDisplayName,

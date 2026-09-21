@@ -24,6 +24,7 @@ async function writeSyntheticStageJSnapshot(
     includeTrajectories?: boolean
     includeCollectionContext?: boolean
     includeJudgeColumns?: boolean
+    includeScoringMode?: boolean
     dropRawModelIds?: boolean
   } = {},
 ) {
@@ -39,12 +40,15 @@ async function writeSyntheticStageJSnapshot(
   // includeJudgeColumns=false (the default) emulates a snapshot from
   // before the judge axis: no judge_condition / is_headline / metric_source_label /
   // comparability_status / score_published columns on eval_results_view.
+  // includeScoringMode=false (the default) emulates a snapshot from before
+  // the producer classified a row's scoring mode: no scoring_mode column.
   const {
     includeMergedView = true,
     includeCollections = false,
     includeTrajectories = includeCollections,
     includeCollectionContext = false,
     includeJudgeColumns = false,
+    includeScoringMode = false,
     dropRawModelIds = false,
   } = options
   await mkdir(snapshotDir, { recursive: true })
@@ -434,6 +438,7 @@ async function writeSyntheticStageJSnapshot(
         true AS is_headline,
         NULL::VARCHAR AS metric_source_label,
         'ok' AS comparability_status,
+        'log_prob' AS scoring_mode,
         0.8::DOUBLE AS score_published
     `
   )
@@ -719,6 +724,7 @@ async function writeSyntheticStageJSnapshot(
           "comparability_status",
           "score_published",
         ]),
+    ...(includeScoringMode ? [] : ["scoring_mode"]),
   ]
   const annotationsProjection = includeJudgeColumns
     ? ""
@@ -1095,6 +1101,7 @@ async function withSnapshot(
     includeTrajectories?: boolean
     includeCollectionContext?: boolean
     includeJudgeColumns?: boolean
+    includeScoringMode?: boolean
     dropRawModelIds?: boolean
   },
   run: (
@@ -1436,6 +1443,25 @@ describe("collection surfaces (collection-benchmark-page spec)", () => {
   })
 })
 
+
+describe("the producer's scoring_mode column", () => {
+  it("projects it when the snapshot carries it", async () => {
+    await withSnapshot({ includeScoringMode: true }, async (dataBackend) => {
+      const summary = await dataBackend.getEvalSummaryById("mmlu")
+      expect(summary!.model_results[0].scoring_mode).toBe("log_prob")
+    })
+  })
+
+  it("reads as unknown on a snapshot without the column, rather than failing the query", async () => {
+    // The whole page binds one SELECT, so an unguarded reference to a
+    // column an older snapshot lacks would empty it, not degrade it.
+    await withSnapshot({}, async (dataBackend) => {
+      const summary = await dataBackend.getEvalSummaryById("mmlu")
+      expect(summary!.model_results.length).toBeGreaterThan(0)
+      expect(summary!.model_results[0].scoring_mode).toBeUndefined()
+    })
+  })
+})
 
 describe("judge conditions and headline rows", () => {
   it("keeps the judge rows on the benchmark page and projects their identity columns", async () => {

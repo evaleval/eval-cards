@@ -743,10 +743,14 @@ function reshapeCellToModelResult(row: Row): ModelResultForBenchmark {
     collection_id: optionalString(row.collection_id),
     protocol_condition: optionalString(row.protocol_condition) ?? undefined,
     judge_condition: optionalString(row.judge_condition) ?? undefined,
+    // The reproducibility slots ask which harness a re-runner would have
+    // to obtain and pin, so the row has to carry it.
+    eval_library: parseMaybeJson(row.eval_library) as ModelResultForBenchmark["eval_library"],
     // Always projected: the producer's column, or the rule derived from
     // the ranking on a snapshot that predates it.
     is_headline: row.is_headline == null ? undefined : Boolean(row.is_headline),
     metric_source_label: optionalString(row.metric_source_label),
+    scoring_mode: optionalString(row.scoring_mode),
     comparability_status: comparabilityStatusFromRow(row),
     score_published: optionalNumber(row.score_published),
     aggregate_components: asArray<NonNullable<ModelResultForBenchmark["aggregate_components"]>[number]>(
@@ -945,6 +949,7 @@ interface EvalResultsViewCapabilities {
   comparabilityStatus: boolean
   scorePublished: boolean
   divergenceFlags: boolean
+  scoringMode: boolean
 }
 
 /**
@@ -987,6 +992,7 @@ async function evalResultsViewCapabilities(): Promise<EvalResultsViewCapabilitie
     scorePublished: names.has("score_published"),
     divergenceFlags:
       names.has("has_variant_divergence") && names.has("has_cross_party_divergence"),
+    scoringMode: names.has("scoring_mode"),
   }
 }
 
@@ -1037,12 +1043,21 @@ function collectionRowColumns(caps: EvalResultsViewCapabilities) {
     : "CAST(NULL AS VARCHAR) AS collection_id, CAST(NULL AS VARCHAR) AS protocol_condition"
 }
 
+// How the producer classified the run: `generative`, `log_prob`, or NULL when
+// it could not tell. The reproducibility slots read it in preference to
+// anything they can infer from a row's raw fields, and a snapshot without the
+// column reads as NULL and falls back to that inference.
+function scoringModeColumn(caps: EvalResultsViewCapabilities) {
+  return caps.scoringMode ? "r.scoring_mode" : "CAST(NULL AS VARCHAR) AS scoring_mode"
+}
+
 function additiveEvalRowColumns(caps: EvalResultsViewCapabilities) {
   return `
   ${collectionRowColumns(caps)},
   ${caps.evaluatorDisplayName
     ? "r.evaluator_display_name"
-    : "CAST(NULL AS VARCHAR) AS evaluator_display_name"},${issue47Columns(caps)}`
+    : "CAST(NULL AS VARCHAR) AS evaluator_display_name"},
+  ${scoringModeColumn(caps)},${issue47Columns(caps)}`
 }
 
 function evalCellJoinColumns(caps: EvalResultsViewCapabilities) {
@@ -1764,6 +1779,7 @@ function mergedObservationFromRow(row: Row): MergedObservationRow {
     is_headline: row.is_headline == null ? undefined : Boolean(row.is_headline),
     metric_source_label: optionalString(row.metric_source_label),
     comparability_status: comparabilityStatusFromRow(row),
+    scoring_mode: optionalString(row.scoring_mode),
     score_published: optionalNumber(row.score_published),
   }
 }

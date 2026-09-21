@@ -160,7 +160,7 @@ function ParamRow({
         {termKey ? <Term term={termKey}>{label}</Term> : label}
       </span>
       {isMissing && notApplicable ? (
-        <SignalTooltip content="This run has no such control — hosted reasoning APIs reject sampling parameters — so it is not counted against the source.">
+        <SignalTooltip content="This run has no such control, so it is not counted against the source.">
           <span className="text-xs font-medium cursor-help" style={{ color: "var(--fg-subtle)" }}>
             n/a
           </span>
