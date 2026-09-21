@@ -1221,6 +1221,16 @@ export function EvalDetail({
     }).flat()
   }, [leaderboardGroups, opennessVisibleRows, userRowSort, lb.metric_config.lower_is_better])
 
+  // A page that carries a model's extra readings is NOT a flat score
+  // ordering: the rows are grouped, each model's other runs trailing its
+  // headline row. Two bits of the header depend on knowing that — the
+  // score column must not claim a sort the rows don't follow, and the
+  // rank column has to explain its blanks.
+  const hasSubordinateRows = useMemo(
+    () => orderedLeaderboardRows.some((row) => row.rank === 0),
+    [orderedLeaderboardRows]
+  )
+
   const LEADERBOARD_PAGE_SIZE = 50
   const pagedLeaderboardRows = useMemo(
     () => orderedLeaderboardRows.slice(0, leaderboardPage * LEADERBOARD_PAGE_SIZE),
@@ -1257,7 +1267,13 @@ export function EvalDetail({
 
   const rowSortIndicator = (key: Exclude<RowSortKey, "default">): "↑" | "↓" | null => {
     if (key === "score") {
-      if (userRowSort.key === "default") return scoreBaseDir === "asc" ? "↑" : "↓"
+      // In the default order the rows are grouped by model, so a page
+      // with subordinate rows reads 0.96, 0.60, 0.73, 1.00 … — an arrow
+      // there promises a descent the column visibly does not make.
+      if (userRowSort.key === "default") {
+        if (hasSubordinateRows) return null
+        return scoreBaseDir === "asc" ? "↑" : "↓"
+      }
       if (userRowSort.key === "score") return userRowSort.dir === "asc" ? "↑" : "↓"
       return null
     }
@@ -2072,9 +2088,17 @@ export function EvalDetail({
                           fontWeight: rank === 1 ? 600 : 500,
                         }}
                       >
-                        {rank === 0 ? "—" : rank}
+                        {rank === 0 ? "↳" : rank}
                       </td>
-                      <td style={{ padding: "10px 8px", color: "var(--fg)" }}>
+                      <td
+                        style={{
+                          padding: "10px 8px",
+                          color: "var(--fg)",
+                          ...(rank === 0
+                            ? { paddingLeft: 18, borderLeft: "2px solid var(--border-soft)" }
+                            : undefined),
+                        }}
+                      >
                         <Link
                           href={`/models/${routeIdToPath(modelResult.model_route_id ?? routeIdFromModelId(modelResult.model_group_id))}`}
                           className="hover:text-[color:var(--accent)] transition-colors"
@@ -2161,7 +2185,17 @@ export function EvalDetail({
             <table className="ec-htable" style={{ minWidth: 980 }}>
               <thead>
                 <tr>
-                  <th style={{ width: 64 }} className="num">Rank</th>
+                  <th
+                    style={{ width: 64 }}
+                    className="num"
+                    title={
+                      hasSubordinateRows
+                        ? "One rank per model — its standing on this metric. A model's other runs are shown beneath it, marked ↳ and unranked."
+                        : undefined
+                    }
+                  >
+                    Rank
+                  </th>
                   <th style={{ minWidth: 260 }}>
                     <SortableTh
                       label="Model"
@@ -2194,7 +2228,11 @@ export function EvalDetail({
                       active={userRowSort.key === "score"}
                       indicator={rowSortIndicator("score")}
                       onClick={() => cycleRowSort("score")}
-                      title="Sort by score"
+                      title={
+                        hasSubordinateRows && userRowSort.key === "default"
+                          ? "Grouped by model: each model's other runs follow its ranked row. Click to sort every group by score."
+                          : "Sort by score"
+                      }
                     />
                   </th>
                   <th className="hidden lg:table-cell" style={{ width: 110 }}>
@@ -2314,12 +2352,23 @@ export function EvalDetail({
                               color: rank === 0 ? "var(--fg-subtle)" : rankColor,
                             }}
                             title={rank === 0 ? unrankedReason : undefined}
+                            aria-label={rank === 0 ? unrankedReason : `Rank ${rank}`}
                           >
-                            {rank === 0 ? "—" : `#${rank}`}
+                            {rank === 0 ? "↳" : `#${rank}`}
                           </span>
                         </td>
 
-                        <td className="align-top whitespace-normal">
+                        <td
+                          className="align-top whitespace-normal"
+                          style={
+                            rank === 0
+                              ? {
+                                  paddingLeft: 18,
+                                  borderLeft: "2px solid var(--border-soft)",
+                                }
+                              : undefined
+                          }
+                        >
                           <div className="flex items-start gap-1.5 leading-tight">
                             {hasExpandableDetails && (
                               <button
