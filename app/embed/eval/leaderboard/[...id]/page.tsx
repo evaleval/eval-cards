@@ -3,6 +3,25 @@
 import { useEffect, useMemo, useState } from "react"
 import { useParams, useSearchParams } from "next/navigation"
 import { EmbedSourcePicker, useEmbedEvalSummary } from "@/components/embed-eval-source"
+import {
+  ProtocolSortButton,
+  ProtocolValueText,
+  protocolHeaderTitle,
+} from "@/components/protocol-axis-fields"
+import {
+  chooseProtocolColumns,
+  compareProtocolRows,
+  declaredAxisKeys,
+  readProtocolAxis,
+  unionProtocolAxes,
+  type ProtocolColumn,
+} from "@/lib/collections"
+import {
+  isAssistedResult,
+  isHeadlineResult,
+  scoreStandings,
+  type ModelResultForBenchmark,
+} from "@/lib/eval-processing"
 import { getMetricChipLabel } from "@/lib/metric-labels"
 import { routeIdFromSegments } from "@/lib/utils"
 
@@ -97,6 +116,42 @@ export default function EmbedEvalLeaderboard() {
     }
   }, [activeSlice, sliceAxis])
 
+  // Protocol axes for a study embed. `leaderboard_rows` carries scores
+  // only, so a page whose rows are runs at different budgets would show
+  // the same model several times with nothing to tell the runs apart;
+  // the observation rows carry the condition, so they become the table.
+  //
+  // Only a curated per-source study takes this grain. A merged embed
+  // pools one observation per (model, source) and has no protocol grid to
+  // show, and an ordinary eval that happens to carry varying conditions
+  // must not silently turn into a list of runs.
+  const protocol = useMemo(() => {
+    if (!summary) return null
+    if (!summary.collection?.curated || summary.merged_view) return null
+    const results = summary.model_results ?? []
+    if (results.length === 0) return null
+    const axesByCollection = summary.protocol_axes_by_collection
+    const declared = axesByCollection
+      ? unionProtocolAxes(axesByCollection)
+      : summary.collection?.protocol_axes
+    const columns = chooseProtocolColumns(
+      results.map((result) => result.protocol_condition),
+      declared,
+    )
+    if (columns.length === 0) return null
+    const readingFor = (result: ModelResultForBenchmark, column: ProtocolColumn) =>
+      readProtocolAxis(
+        result.protocol_condition,
+        column,
+        axesByCollection ? declaredAxisKeys(axesByCollection, result.collection_id) : null,
+      )
+    return { columns, results, readingFor }
+  }, [summary])
+
+  const [protocolSort, setProtocolSort] = useState<{ key: string; dir: "asc" | "desc" } | null>(
+    null,
+  )
+
   const view = useMemo(() => {
     if (!summary) return null
     const allMetrics = (summary.leaderboard_metrics ?? []) as LbMetric[]
@@ -155,52 +210,116 @@ export default function EmbedEvalLeaderboard() {
           ? false
           : defaultSortLower
 
-    const tableRows = rows
-      .map((row) => {
-        const values: Record<string, number> = {}
-        let anyScore = false
-        for (const m of metricsWithData) {
-          const key = m.column_key ?? m.metric_summary_id ?? ""
-          const raw = (row.values as Record<string, unknown> | undefined)?.[key]
-          const n = typeof raw === "number" ? raw : Number(raw)
-          if (Number.isFinite(n)) {
-            values[key] = n
-            anyScore = true
+    type TableRow = {
+      modelName: string
+      developer: string | null
+      values: Record<string, number>
+      sortScore: number | null
+      /** The model's standing in the field, assigned once from the
+       *  unassisted headline runs. 0 means the row takes no rank. */
+      rank: number
+      assisted: boolean
+      result?: ModelResultForBenchmark
+    }
+
+    // A study embed takes its rows from the observation grain, where the
+    // protocol lives; every other embed keeps the metric matrix.
+    const protocolMode = protocol && !isMulti && !sliceAxis ? protocol : null
+    let sourceRows: TableRow[]
+    if (protocolMode) {
+      // Assisted runs, where the model is told when its answer is
+      // correct, are shown and never ranked, exactly as the benchmark
+      // page shows them. Rank comes from the unassisted headline runs in
+      // score order and then stays on the row, so sorting by a budget
+      // reorders the table without reassigning a single standing.
+      const runs = protocolMode.results.filter((result) => Number.isFinite(result.score))
+      const byScore = [...runs].sort((a, b) =>
+        sortLower ? a.score - b.score : b.score - a.score,
+      )
+      const ranked = (result: ModelResultForBenchmark) =>
+        isHeadlineResult(result) && !isAssistedResult(result.protocol_condition)
+      const standings = scoreStandings(byScore, (result) => result.score, ranked)
+      const rankByRun = new Map<ModelResultForBenchmark, number>()
+      byScore.forEach((result, i) => rankByRun.set(result, standings[i]))
+
+      sourceRows = byScore.map((result) => ({
+        modelName: result.model_info?.name ?? "Unknown",
+        developer: result.model_info?.developer ?? null,
+        values: { [sortKey]: result.score },
+        sortScore: result.score,
+        rank: rankByRun.get(result) ?? 0,
+        assisted: isAssistedResult(result.protocol_condition),
+        result,
+      }))
+    } else {
+      sourceRows = rows
+        .map((row) => {
+          const values: Record<string, number> = {}
+          let anyScore = false
+          for (const m of metricsWithData) {
+            const key = m.column_key ?? m.metric_summary_id ?? ""
+            const raw = (row.values as Record<string, unknown> | undefined)?.[key]
+            const n = typeof raw === "number" ? raw : Number(raw)
+            if (Number.isFinite(n)) {
+              values[key] = n
+              anyScore = true
+            }
           }
-        }
-        if (!anyScore) return null
-        const modelInfo =
-          (row as { model_info?: { name?: string; developer?: string } }).model_info ?? {}
-        return {
-          modelName:
-            modelInfo.name ??
-            (row as { model_name?: string }).model_name ??
-            "Unknown",
-          developer:
-            modelInfo.developer ??
-            (row as { developer?: string | null }).developer ??
-            null,
-          values,
-          sortScore: values[sortKey] ?? null,
-        }
-      })
-      .filter((r) => r !== null)
-      .sort((a, b) => {
-        const av = a!.sortScore
-        const bv = b!.sortScore
+          if (!anyScore) return null
+          const modelInfo =
+            (row as { model_info?: { name?: string; developer?: string } }).model_info ?? {}
+          return {
+            modelName:
+              modelInfo.name ??
+              (row as { model_name?: string }).model_name ??
+              "Unknown",
+            developer:
+              modelInfo.developer ??
+              (row as { developer?: string | null }).developer ??
+              null,
+            values,
+            sortScore: values[sortKey] ?? null,
+            rank: 0,
+            assisted: false,
+          }
+        })
+        .filter((r) => r !== null) as TableRow[]
+    }
+
+    const protocolColumn =
+      protocolMode && protocolSort
+        ? protocolMode.columns.find((column) => column.key === protocolSort.key) ?? null
+        : null
+
+    let tableRows: TableRow[]
+    if (protocolMode && protocolColumn && protocolSort) {
+      const readingFor = protocolMode.readingFor
+      tableRows = sourceRows
+        .map((row, index) => ({ row: row.result!, index, source: row }))
+        .sort((a, b) =>
+          compareProtocolRows(a, b, protocolColumn, protocolSort.dir, readingFor),
+        )
+        .map(({ source }) => source)
+    } else {
+      tableRows = [...sourceRows].sort((a, b) => {
+        const av = a.sortScore
+        const bv = b.sortScore
         if (av == null && bv == null) return 0
         if (av == null) return 1
         if (bv == null) return -1
         return sortLower ? av - bv : bv - av
-      }) as Array<{
-        modelName: string
-        developer: string | null
-        values: Record<string, number>
-        sortScore: number | null
-      }>
+      })
+    }
 
-    return { metrics: metricsWithData, rows: tableRows, sortKey, sortLower, isMulti }
-  }, [summary, sortOverride, sortDirOverride, sliceAxis, activeSlice])
+    return {
+      metrics: metricsWithData,
+      rows: tableRows,
+      sortKey,
+      sortLower,
+      isMulti,
+      protocol: protocolMode,
+    }
+  }, [summary, sortOverride, sortDirOverride, sliceAxis, activeSlice, protocol, protocolSort])
 
   if (error) {
     // Keep the source picker reachable so a failed pinned-source fetch
@@ -336,6 +455,47 @@ export default function EmbedEvalLeaderboard() {
               >
                 Model
               </th>
+              {(view.protocol?.columns ?? []).map((column) => {
+                const active = protocolSort?.key === column.key
+                return (
+                  <th
+                    key={`protocol-${column.key}`}
+                    className="font-mono uppercase text-left"
+                    aria-sort={
+                      active
+                        ? protocolSort?.dir === "asc"
+                          ? "ascending"
+                          : "descending"
+                        : "none"
+                    }
+                    style={{
+                      fontSize: 10,
+                      letterSpacing: "0.12em",
+                      color: active ? "var(--fg)" : "var(--fg-muted)",
+                      padding: "6px 12px 6px 0",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {/* A real button inside the header, so the sort is
+                        reachable by keyboard as well as by pointer. */}
+                    <ProtocolSortButton
+                      label={column.label}
+                      active={active}
+                      indicator={active ? (protocolSort?.dir === "asc" ? "↑" : "↓") : null}
+                      title={protocolHeaderTitle(column, Boolean(summary.merged_view))}
+                      onClick={() =>
+                        setProtocolSort((current) =>
+                          current?.key !== column.key
+                            ? { key: column.key, dir: "asc" }
+                            : current.dir === "asc"
+                              ? { key: column.key, dir: "desc" }
+                              : null,
+                        )
+                      }
+                    />
+                  </th>
+                )
+              })}
               {view.metrics.map((m) => {
                 const key = m.column_key ?? m.metric_summary_id ?? ""
                 const label = getMetricChipLabel(m)
@@ -399,7 +559,9 @@ export default function EmbedEvalLeaderboard() {
                     width: 40,
                   }}
                 >
-                  {i + 1}
+                  {/* In protocol mode the standing was assigned from the
+                      scores; elsewhere the row's position is its rank. */}
+                  {view.protocol ? (row.rank === 0 ? "—" : row.rank) : i + 1}
                 </td>
                 <td style={{ padding: "5px 8px", color: "var(--fg)" }}>
                   <span style={{ fontWeight: 500 }}>{row.modelName}</span>
@@ -411,7 +573,32 @@ export default function EmbedEvalLeaderboard() {
                       · {row.developer}
                     </span>
                   )}
+                  {row.assisted && (
+                    <span
+                      className="ml-2 font-mono uppercase"
+                      style={{ fontSize: 9, letterSpacing: "0.12em", color: "var(--fg-subtle)" }}
+                      title="Assisted run (answer feedback): shown, not ranked"
+                    >
+                      Assisted
+                    </span>
+                  )}
                 </td>
+                {(view.protocol?.columns ?? []).map((column) => (
+                  <td
+                    key={`protocol-${column.key}`}
+                    className="font-mono"
+                    style={{ fontSize: 11.5, padding: "5px 12px 5px 0", whiteSpace: "nowrap" }}
+                  >
+                    {row.result ? (
+                      <ProtocolValueText
+                        reading={view.protocol!.readingFor(row.result, column)}
+                        column={column}
+                      />
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                ))}
                 {view.metrics.map((m) => {
                   const key = m.column_key ?? m.metric_summary_id ?? ""
                   const val = row.values[key]
@@ -441,7 +628,10 @@ export default function EmbedEvalLeaderboard() {
           className="font-mono mt-3"
           style={{ fontSize: 11, color: "var(--fg-subtle)" }}
         >
-          + {hiddenCount} more model{hiddenCount === 1 ? "" : "s"} not shown — see the
+          {/* In protocol mode a row is a run, not a model: several rows
+              can belong to one model. */}
+          + {hiddenCount} more {view.protocol ? "run" : "model"}
+          {hiddenCount === 1 ? "" : "s"} not shown. See the
           full leaderboard on the eval page.
         </div>
       )}

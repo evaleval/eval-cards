@@ -5,9 +5,18 @@ import {
   buildScaffoldContext,
   chooseComputeAxis,
   chooseProtocolColumns,
+  compareProtocolReadings,
+  compareProtocolRows,
+  compareProtocolTuples,
   feedbackConditionOf,
   formatProtocolValue,
+  protocolFilterOptions,
+  protocolValueId,
+  protocolValueTitle,
+  readProtocolAxis,
   type CollectionContextSidecar,
+  type ProtocolAxisReading,
+  type ProtocolColumn,
   type ScaffoldContextEntry,
   type ScaffoldContextSummaryInput,
 } from "@/lib/collections"
@@ -15,6 +24,15 @@ import {
 import contextFixture from "./fixtures/collection_context.json"
 
 const cond = (fields: Record<string, unknown>) => JSON.stringify(fields)
+
+const protocolColumn = (over: Partial<ProtocolColumn> & { key: string }): ProtocolColumn => ({
+  label: over.key,
+  type: "int",
+  unit: "tokens",
+  values: null,
+  quantitative: over.unit === null ? false : true,
+  ...over,
+})
 
 describe("feedbackConditionOf", () => {
   it("classifies the three feedback conditions and keeps unknown unknown", () => {
@@ -338,26 +356,60 @@ describe("chooseProtocolColumns", () => {
     { key: "reasoning_effort", type: "categorical" },
   ]
 
-  it("keeps only the axes that vary across the page's rows", () => {
+  it("keeps the declared budgets and the axes that vary", () => {
     // The AISI shape: one scaffold everywhere, effort and thinking
-    // tokens are what separate the runs.
+    // tokens separate the runs, and both token budgets stay on the row
+    // because a score cannot be read without them.
     const columns = chooseProtocolColumns(
       [
-        cond({ scaffold: "S-adaptive", feedback: "none", reasoning_effort: "high", reasoning_tokens: 32000 }),
-        cond({ scaffold: "S-adaptive", feedback: "none", reasoning_effort: "xhigh", reasoning_tokens: 32000 }),
-        cond({ scaffold: "S-adaptive", feedback: "none", reasoning_effort: "xhigh", reasoning_tokens: 64000 }),
+        cond({ scaffold: "S-adaptive", feedback: "none", token_limit: 10_000_000, reasoning_effort: "high", reasoning_tokens: 32000 }),
+        cond({ scaffold: "S-adaptive", feedback: "none", token_limit: 10_000_000, reasoning_effort: "xhigh", reasoning_tokens: 32000 }),
+        cond({ scaffold: "S-adaptive", feedback: "none", token_limit: 10_000_000, reasoning_effort: "xhigh", reasoning_tokens: 64000 }),
       ],
       axes,
     )
-    expect(columns.map((c) => c.key)).toEqual(["reasoning_tokens", "reasoning_effort"])
+    expect(columns.map((c) => c.key)).toEqual([
+      "token_limit",
+      "reasoning_tokens",
+      "reasoning_effort",
+    ])
     // Declared order is the study's, and the labels are readable.
-    expect(columns.map((c) => c.label)).toEqual(["Thinking tokens", "Effort"])
+    expect(columns.map((c) => c.label)).toEqual([
+      "Token budget",
+      "Thinking tokens",
+      "Effort",
+    ])
+    // A constant scaffold explains nothing and stays out.
+    expect(columns.map((c) => c.key)).not.toContain("scaffold")
+  })
+
+  it("shows a unit-bearing axis that is null on every row", () => {
+    // The cyber shape: the run cap varies, thinking tokens are never
+    // reported. Dropping the column would read as "the study didn't use
+    // one", which is a different claim from "it did not say".
+    const columns = chooseProtocolColumns(
+      [
+        cond({ scaffold: "ReAct", compaction: true, feedback: "none", token_limit: 50_000_000, reasoning_tokens: null, reasoning_effort: null }),
+        cond({ scaffold: "ReAct", compaction: true, feedback: "none", token_limit: 100_000_000, reasoning_tokens: null, reasoning_effort: null }),
+      ],
+      axes,
+    )
+    expect(columns.map((c) => c.key)).toEqual(["token_limit", "reasoning_tokens"])
+    expect(columns.every((c) => c.quantitative)).toBe(true)
+  })
+
+  it("shows the declared budgets on a single-row page", () => {
+    const columns = chooseProtocolColumns(
+      [cond({ scaffold: "ReAct", token_limit: 100_000_000, reasoning_tokens: null })],
+      axes,
+    )
+    expect(columns.map((c) => c.key)).toEqual(["token_limit", "reasoning_tokens"])
   })
 
   it("never adds a feedback column — the assisted badge already says it", () => {
     const columns = chooseProtocolColumns(
       [cond({ feedback: "none" }), cond({ feedback: "answer_feedback" })],
-      axes,
+      axes.filter((axis) => !axis.unit),
     )
     expect(columns).toEqual([])
   })
@@ -370,7 +422,7 @@ describe("chooseProtocolColumns", () => {
         cond({ scaffold: "S-adaptive", reasoning_effort: null }),
         cond({ scaffold: "S-adaptive" }),
       ],
-      axes,
+      axes.filter((axis) => !axis.unit),
     )
     expect(columns).toEqual([])
   })
@@ -378,18 +430,28 @@ describe("chooseProtocolColumns", () => {
   it("surfaces an axis the sidecar never declared", () => {
     const columns = chooseProtocolColumns(
       [cond({ retries: 1 }), cond({ retries: 3 })],
-      axes,
+      axes.filter((axis) => !axis.unit),
     )
     expect(columns.map((c) => c.key)).toEqual(["retries"])
     expect(columns[0].label).toBe("Retries")
   })
 
-  it("returns nothing when there is only one protocol row to explain", () => {
-    expect(chooseProtocolColumns([cond({ reasoning_effort: "high" })], axes)).toEqual([])
-    expect(chooseProtocolColumns([null, undefined], axes)).toEqual([])
+  it("keeps the declared budgets when no row carries a protocol condition", () => {
+    // A budget that disappears reads as an axis that never applied. The
+    // study declared it, so the column stays and every cell says the
+    // study did not report it.
+    const columns = chooseProtocolColumns([null, undefined], axes)
+    expect(columns.map((c) => c.key)).toEqual(["token_limit", "reasoning_tokens"])
+    expect(columns.every((c) => c.quantitative)).toBe(true)
   })
 
-  it("caps the columns so the table stays readable", () => {
+  it("adds no columns to a page that declares nothing and reports nothing", () => {
+    expect(chooseProtocolColumns([null, undefined])).toEqual([])
+    expect(chooseProtocolColumns([null, undefined], [])).toEqual([])
+  })
+
+  it("keeps every eligible axis rather than dropping the last ones", () => {
+    // A wide table scrolls; a silently truncated one hides a setting.
     const many = chooseProtocolColumns(
       [
         cond({ a: 1, b: 1, c: 1, d: 1, e: 1, f: 1 }),
@@ -397,39 +459,327 @@ describe("chooseProtocolColumns", () => {
       ],
       [],
     )
-    expect(many).toHaveLength(4)
+    expect(many.map((c) => c.key)).toEqual(["a", "b", "c", "d", "e", "f"])
+  })
+})
+
+describe("readProtocolAxis", () => {
+  const tokenLimit = protocolColumn({ key: "token_limit", label: "Token budget" })
+
+  it("separates a reported value, an unreported one and an inapplicable axis", () => {
+    expect(readProtocolAxis(cond({ token_limit: 50_000_000 }), tokenLimit)).toEqual({
+      state: "value",
+      raw: 50_000_000,
+    })
+    expect(readProtocolAxis(cond({ token_limit: null }), tokenLimit).state).toBe("not_reported")
+    // A row with a protocol of its own that simply omits the key still
+    // belongs to a page where the axis applies.
+    expect(readProtocolAxis(cond({ scaffold: "ReAct" }), tokenLimit).state).toBe("not_reported")
+    // A row with no protocol at all, on a page that declares nothing for
+    // its collection, never ran under this axis.
+    expect(readProtocolAxis(null, tokenLimit).state).toBe("not_applicable")
+    expect(readProtocolAxis(cond({ judge: "x" }), tokenLimit, new Set()).state).toBe(
+      "not_applicable",
+    )
+    expect(
+      readProtocolAxis(cond({ judge: "x" }), tokenLimit, new Set(["token_limit"])).state,
+    ).toBe("not_reported")
   })
 })
 
 describe("formatProtocolValue", () => {
-  const column = (over: Record<string, unknown> = {}) => ({
-    key: "reasoning_tokens",
-    label: "Thinking tokens",
-    type: "int",
-    unit: "tokens",
-    ...over,
-  }) as Parameters<typeof formatProtocolValue>[1]
+  const thinking = protocolColumn({ key: "reasoning_tokens", label: "Thinking tokens" })
+  const read = (fields: Record<string, unknown>, column = thinking) =>
+    readProtocolAxis(cond(fields), column)
 
-  it("renders token counts compactly", () => {
-    expect(formatProtocolValue(cond({ reasoning_tokens: 32000 }), column())).toBe("32k")
-    expect(formatProtocolValue(cond({ reasoning_tokens: 10_000_000 }), column())).toBe("10M")
-    expect(formatProtocolValue(cond({ reasoning_tokens: 1500 }), column())).toBe("1.5k")
+  it("renders a declared token count compactly, with its unit", () => {
+    expect(formatProtocolValue(read({ reasoning_tokens: 50_000_000 }), thinking)).toBe(
+      "50M tokens",
+    )
+    expect(formatProtocolValue(read({ reasoning_tokens: 10_000_000 }), thinking)).toBe(
+      "10M tokens",
+    )
+    expect(formatProtocolValue(read({ reasoning_tokens: 64_000 }), thinking)).toBe("64k tokens")
+    expect(formatProtocolValue(read({ reasoning_tokens: 1500 }), thinking)).toBe("1.5k tokens")
+    // The exact number stays available for the title.
+    expect(protocolValueTitle(read({ reasoning_tokens: 50_000_000 }), thinking)).toBe(
+      "50,000,000 tokens",
+    )
   })
 
-  it("renders booleans, strings and unset values", () => {
-    const compaction = column({ key: "compaction", label: "Compaction", type: "boolean", unit: null })
-    expect(formatProtocolValue(cond({ compaction: true }), compaction)).toBe("on")
-    expect(formatProtocolValue(cond({ compaction: false }), compaction)).toBe("off")
-    const effort = column({ key: "reasoning_effort", label: "Effort", type: "categorical", unit: null })
-    expect(formatProtocolValue(cond({ reasoning_effort: "xhigh" }), effort)).toBe("xhigh")
-    // Null and absent are "the study did not set it here", not a value.
-    expect(formatProtocolValue(cond({ reasoning_effort: null }), effort)).toBeNull()
-    expect(formatProtocolValue(cond({}), effort)).toBeNull()
-    expect(formatProtocolValue(null, effort)).toBeNull()
+  it("covers the magnitudes either side of each unit boundary", () => {
+    const shown = (value: unknown) => formatProtocolValue(read({ reasoning_tokens: value }), thinking)
+    expect(shown(0)).toBe("0 tokens")
+    expect(shown(999)).toBe("999 tokens")
+    expect(shown(1_000)).toBe("1k tokens")
+    // Rounding must not leave a thousand of the smaller unit on screen.
+    expect(shown(999_999)).toBe("1M tokens")
+    expect(shown(1_000_000)).toBe("1M tokens")
+    expect(shown(-999_999)).toBe("-1M tokens")
+    // Three significant digits, so neighbouring budgets stay apart.
+    expect(shown(1_040_000)).toBe("1.04M tokens")
+    expect(shown(1_049_000)).toBe("1.05M tokens")
+    expect(shown(1.25)).toBe("1.25 tokens")
+    // Past a billion there is still a unit to use.
+    expect(shown(2_500_000_000)).toBe("2.5B tokens")
+    // Nothing pathological renders as NaN or throws.
+    expect(shown(1e21)).toMatch(/^[\d.e+-]+B tokens$/)
   })
 
-  it("leaves a plain number alone when the axis is not a count", () => {
-    const temp = column({ key: "temperature", label: "Temperature", type: "unknown", unit: null })
-    expect(formatProtocolValue(cond({ temperature: 2000 }), temp)).toBe("2000")
+  it("normalises a numeric string on an axis declared numeric", () => {
+    // A source that wrote its budget as text still reads and sorts as a
+    // number, because the descriptor says the axis is one.
+    expect(read({ reasoning_tokens: "6000000" }).raw).toBe(6_000_000)
+    expect(formatProtocolValue(read({ reasoning_tokens: "6000000" }), thinking)).toBe("6M tokens")
+    // Text that is not a number keeps its own type rather than becoming NaN.
+    expect(read({ reasoning_tokens: "unbounded" }).raw).toBe("unbounded")
+    // A JSON literal too large to represent is not a budget.
+    expect(read({ reasoning_tokens: 1e400 }).state).toBe("not_reported")
+  })
+
+  it("renders booleans as a state and categoricals humanised", () => {
+    const compaction = protocolColumn({
+      key: "compaction",
+      label: "Compaction",
+      type: "boolean",
+      unit: null,
+    })
+    expect(formatProtocolValue(read({ compaction: true }, compaction), compaction)).toBe("On")
+    expect(formatProtocolValue(read({ compaction: false }, compaction), compaction)).toBe("Off")
+
+    const effort = protocolColumn({
+      key: "reasoning_effort",
+      label: "Effort",
+      type: "categorical",
+      unit: null,
+      values: ["high", "xhigh"],
+    })
+    expect(formatProtocolValue(read({ reasoning_effort: "xhigh" }, effort), effort)).toBe(
+      "X-high",
+    )
+    expect(formatProtocolValue(read({ reasoning_effort: "high" }, effort), effort)).toBe("High")
+    // A name the study chose keeps its own spelling.
+    const scaffold = protocolColumn({
+      key: "scaffold",
+      label: "Scaffold",
+      type: "categorical",
+      unit: null,
+    })
+    expect(formatProtocolValue(read({ scaffold: "S-adaptive" }, scaffold), scaffold)).toBe(
+      "S-adaptive",
+    )
+    // Only the spellings the studies actually use are rewritten. An
+    // unrelated value starting with x is not an effort level.
+    for (const value of ["xlam", "xml"]) {
+      expect(formatProtocolValue(read({ scaffold: value }, scaffold), scaffold)).toBe(value)
+    }
+  })
+
+  it("says what is missing and never turns a null into no limit", () => {
+    expect(formatProtocolValue({ state: "not_reported", raw: null }, thinking)).toBe(
+      "Not reported",
+    )
+    expect(formatProtocolValue({ state: "not_applicable", raw: null }, thinking)).toBe(
+      "Not applicable",
+    )
+    expect(formatProtocolValue(read({ reasoning_tokens: null }), thinking)).toBe("Not reported")
+    expect(formatProtocolValue(read({}), thinking)).toBe("Not reported")
+    for (const state of ["not_reported", "not_applicable"] as const) {
+      expect(formatProtocolValue({ state, raw: null }, thinking)).not.toContain("limit")
+    }
+  })
+
+  it("leaves a plain number alone when the axis declares no unit", () => {
+    const temp = protocolColumn({
+      key: "temperature",
+      label: "Temperature",
+      type: "unknown",
+      unit: null,
+    })
+    expect(formatProtocolValue(read({ temperature: 2000 }, temp), temp)).toBe("2000")
+  })
+})
+
+describe("compareProtocolReadings", () => {
+  const tokenLimit = protocolColumn({ key: "token_limit", label: "Token budget" })
+  const reading = (value: unknown) =>
+    readProtocolAxis(cond({ token_limit: value }), tokenLimit)
+
+  const order = (values: unknown[], dir: "asc" | "desc") =>
+    values
+      .map(reading)
+      .sort((a, b) => compareProtocolReadings(a, b, tokenLimit, dir))
+      .map((r) => r.raw)
+
+  it("compares the raw numbers, not their labels", () => {
+    // Lexically "10M tokens" precedes "6M tokens"; numerically it does not.
+    expect(order([10_000_000, 6_000_000, 64_000], "asc")).toEqual([
+      64_000,
+      6_000_000,
+      10_000_000,
+    ])
+    expect(order([6_000_000, 10_000_000, 64_000], "desc")).toEqual([
+      10_000_000,
+      6_000_000,
+      64_000,
+    ])
+  })
+
+  it("keeps unreported and inapplicable readings last in both directions", () => {
+    expect(order([null, 10_000_000, 6_000_000], "asc")).toEqual([6_000_000, 10_000_000, null])
+    expect(order([null, 10_000_000, 6_000_000], "desc")).toEqual([10_000_000, 6_000_000, null])
+    const mixed = [
+      { state: "not_applicable", raw: null } as const,
+      reading(6_000_000),
+    ]
+    expect(
+      [...mixed].sort((a, b) => compareProtocolReadings(a, b, tokenLimit, "desc"))[0].raw,
+    ).toBe(6_000_000)
+  })
+
+  it("orders booleans Off then On and categoricals by the declared order", () => {
+    const compaction = protocolColumn({
+      key: "compaction",
+      label: "Compaction",
+      type: "boolean",
+      unit: null,
+    })
+    const bools = [true, false]
+      .map((value) => readProtocolAxis(cond({ compaction: value }), compaction))
+      .sort((a, b) => compareProtocolReadings(a, b, compaction, "asc"))
+      .map((r) => r.raw)
+    expect(bools).toEqual([false, true])
+
+    const effort = protocolColumn({
+      key: "reasoning_effort",
+      label: "Effort",
+      type: "categorical",
+      unit: null,
+      values: ["high", "xhigh"],
+    })
+    const efforts = ["xhigh", "high", "medium"]
+      .map((value) => readProtocolAxis(cond({ reasoning_effort: value }), effort))
+      .sort((a, b) => compareProtocolReadings(a, b, effort, "asc"))
+      .map((r) => r.raw)
+    // Declared values first, in the study's order; undeclared follow.
+    expect(efforts).toEqual(["high", "xhigh", "medium"])
+  })
+})
+
+describe("protocolFilterOptions", () => {
+  const tokenLimit = protocolColumn({ key: "token_limit", label: "Token budget" })
+
+  it("offers each distinct raw value once, keyed typed and labelled formatted", () => {
+    const readings = [50_000_000, 100_000_000, 50_000_000, null].map((value) =>
+      readProtocolAxis(cond({ token_limit: value }), tokenLimit),
+    )
+    expect(protocolFilterOptions(readings, tokenLimit)).toEqual([
+      { id: "number:50000000", label: "50M tokens", title: "50,000,000 tokens" },
+      { id: "number:100000000", label: "100M tokens", title: "100,000,000 tokens" },
+      { id: "missing:not_reported", label: "Not reported", title: "Not reported" },
+    ])
+  })
+
+  it("keeps values apart that only look alike as text", () => {
+    // Without the type tag an unreported budget and a categorical whose
+    // value is literally "null" are one option, and the URL then selects
+    // rows the reader never asked for.
+    const free = protocolColumn({ key: "mode", label: "Mode", type: "categorical", unit: null })
+    const pairs: Array<[ProtocolAxisReading, ProtocolAxisReading]> = [
+      [{ state: "not_reported", raw: null }, { state: "value", raw: "null" }],
+      [{ state: "not_applicable", raw: null }, { state: "value", raw: "not_applicable" }],
+      [{ state: "not_reported", raw: null }, { state: "not_applicable", raw: null }],
+      [{ state: "value", raw: 1 }, { state: "value", raw: "1" }],
+      [{ state: "value", raw: true }, { state: "value", raw: "true" }],
+    ]
+    for (const [a, b] of pairs) {
+      expect(protocolValueId(a)).not.toBe(protocolValueId(b))
+      expect(protocolFilterOptions([a, b], free)).toHaveLength(2)
+    }
+  })
+
+  it("gives every option the exact value as its title", () => {
+    // Two budgets can round to the same short label; the title is what
+    // tells them apart.
+    const options = protocolFilterOptions(
+      [1_040_000, 1_049_000].map((value) =>
+        readProtocolAxis(cond({ token_limit: value }), tokenLimit),
+      ),
+      tokenLimit,
+    )
+    expect(options.map((option) => option.title)).toEqual([
+      "1,040,000 tokens",
+      "1,049,000 tokens",
+    ])
+  })
+
+  it("never reads a published curve's thresholds as protocol values", () => {
+    // The cyber records keep every curve point in score details; only the
+    // run cap is a protocol value, and the option list must say so.
+    const readings = [50_000_000, 100_000_000].map((value) =>
+      readProtocolAxis(cond({ token_limit: value }), tokenLimit),
+    )
+    const ids = protocolFilterOptions(readings, tokenLimit).map((option) => option.id)
+    for (const threshold of [500_000, 1_500_000, 5_000_000, 15_000_000]) {
+      expect(ids).not.toContain(`number:${threshold}`)
+    }
+  })
+})
+
+describe("compareProtocolRows", () => {
+  const tokenLimit = protocolColumn({ key: "token_limit", label: "Token budget" })
+  const thinking = protocolColumn({ key: "reasoning_tokens", label: "Thinking tokens" })
+  const readingFor = (row: { protocol_condition?: string | null }, column: ProtocolColumn) =>
+    readProtocolAxis(row.protocol_condition, column)
+
+  const run = (tokenLimitValue: number) => ({
+    model_info: { name: "Claude Opus 4.6" },
+    model_route_id: "anthropic%2Fclaude-opus-4.6",
+    protocol_condition: cond({ token_limit: tokenLimitValue, reasoning_tokens: 64_000 }),
+  })
+
+  it("orders the same input the same way whatever order it arrives in", () => {
+    // Two runs of one model share the sorted axis and differ only in
+    // another; without the full tie-break tuple they swap when the
+    // producer serves them the other way round.
+    const forward = [run(6_000_000), run(10_000_000)]
+    const reversed = [run(10_000_000), run(6_000_000)]
+    const sorted = (rows: ReturnType<typeof run>[]) =>
+      rows
+        .map((row, index) => ({ row, index }))
+        .sort((a, b) => compareProtocolRows(a, b, thinking, "asc", readingFor))
+        .map(({ row }) => row.protocol_condition)
+    expect(sorted(forward)).toEqual(sorted(reversed))
+  })
+
+  it("still sorts on the selected axis first", () => {
+    const rows = [run(10_000_000), run(6_000_000)]
+    const sorted = rows
+      .map((row, index) => ({ row, index }))
+      .sort((a, b) => compareProtocolRows(a, b, tokenLimit, "asc", readingFor))
+      .map(({ row }) => readProtocolAxis(row.protocol_condition, tokenLimit).raw)
+    expect(sorted).toEqual([6_000_000, 10_000_000])
+  })
+})
+
+describe("compareProtocolTuples", () => {
+  const columns = [
+    protocolColumn({ key: "token_limit", label: "Token budget" }),
+    protocolColumn({ key: "reasoning_tokens", label: "Thinking tokens" }),
+  ]
+
+  it("orders a model's extra runs by their declared tuple, nulls last", () => {
+    const conditions = [
+      cond({ token_limit: 10_000_000, reasoning_tokens: null }),
+      cond({ token_limit: 6_000_000, reasoning_tokens: 64_000 }),
+      cond({ token_limit: 10_000_000, reasoning_tokens: 16_000 }),
+    ]
+    const sorted = [...conditions].sort((a, b) => compareProtocolTuples(a, b, columns))
+    expect(sorted.map((c) => JSON.parse(c).token_limit)).toEqual([
+      6_000_000,
+      10_000_000,
+      10_000_000,
+    ])
+    expect(JSON.parse(sorted[2]).reasoning_tokens).toBeNull()
   })
 })

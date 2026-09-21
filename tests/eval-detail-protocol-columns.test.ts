@@ -1,10 +1,12 @@
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { AudienceModeProvider } from "@/components/audience-mode-provider"
 import { EvalDetail } from "@/components/eval-detail"
 import type { BenchmarkEvalSummary, ModelResultForBenchmark } from "@/lib/eval-processing"
+
+vi.mock("next/navigation", () => import("./next-navigation-stub"))
 
 // A protocol-varied study (the AISI inference-scaling shape) repeats one
 // model name down the page: nine "Claude Opus 4.6" rows are nine runs at
@@ -128,22 +130,30 @@ describe("EvalDetail leaderboard — protocol condition columns", () => {
   it("gives every varying axis its own column so same-named rows are distinguishable", () => {
     const html = render(summaryWith(OPUS_PAGE))
 
-    // Headers for the axes that vary, with the study's own ordering.
+    // Headers for the budgets the study declares a unit for, and for the
+    // axes that vary, in the study's own ordering.
+    expect(html).toContain("Token budget")
     expect(html).toContain("Compaction")
     expect(html).toContain("Thinking tokens")
     expect(html).toContain("Effort")
-    // Constant axes explain nothing and stay out; feedback is already
-    // carried by the assisted badge.
+    // A constant scaffold explains nothing; feedback is already carried
+    // by the assisted badge.
     expect(html).not.toContain("Scaffold")
-    expect(html).not.toContain("Token budget</th>")
+    expect(html).not.toContain(">Feedback<")
 
-    // Cell values: the compact count form, the effort words, and the
-    // "not set" mark for the run that declared no effort.
-    expect(html).toContain("16k")
-    expect(html).toContain("32k")
-    expect(html).toContain("64k")
-    expect(html).toContain("xhigh")
-    expect(html).toContain("Effort: not set for this run")
+    // Cell values carry the declared unit, and the effort words are
+    // humanised.
+    expect(html).toContain("16k tokens")
+    expect(html).toContain("32k tokens")
+    expect(html).toContain("64k tokens")
+    expect(html).toContain("10M tokens")
+    expect(html).toContain("X-high")
+    // The exact value stays reachable.
+    expect(html).toContain("10,000,000 tokens")
+    // A null on an applicable axis is an absence of reporting, never a
+    // missing limit.
+    expect(html).toContain("Not reported")
+    expect(html).not.toContain("No limit")
   })
 
   it("still ranks one reading per model — the extra runs are labelled, not renumbered", () => {
@@ -158,7 +168,9 @@ describe("EvalDetail leaderboard — protocol condition columns", () => {
     expect(html).toContain("Assisted run (answer feedback) — shown, not ranked")
   })
 
-  it("adds no columns when the page's runs share one condition", () => {
+  it("keeps the declared budgets when the page's runs share one condition", () => {
+    // A constant budget is still the budget every score on the page was
+    // produced under; only the axes that explain nothing drop out.
     const html = render(
       summaryWith([
         run(0.96, { feedback: "none", reasoning_effort: "high", reasoning_tokens: 32000 }, { is_headline: true }),
@@ -169,8 +181,74 @@ describe("EvalDetail leaderboard — protocol condition columns", () => {
         }),
       ]),
     )
-    expect(html).not.toContain("Thinking tokens")
+    expect(html).toContain("Token budget")
+    expect(html).toContain("Thinking tokens")
+    expect(html).toContain("10M tokens")
+    expect(html).toContain("32k tokens")
     expect(html).not.toContain("Effort")
+  })
+
+  it("labels both token budgets on an aggregate-only page that reports neither thinking budget", () => {
+    // The cyber shape: one cell per model at the run cap, thinking
+    // tokens never reported. The column has to stay, saying so.
+    const html = render(
+      summaryWith([
+        run(0.85, {}, {
+          is_headline: true,
+          protocol_condition: JSON.stringify({
+            scaffold: "ReAct",
+            compaction: true,
+            feedback: "none",
+            token_limit: 50_000_000,
+            reasoning_tokens: null,
+            reasoning_effort: null,
+          }),
+        }),
+        run(0.62, {}, {
+          model_info: { name: "GPT-5.4", id: "openai/gpt-5.4" },
+          model_route_id: "openai%2Fgpt-5.4",
+          is_headline: true,
+          protocol_condition: JSON.stringify({
+            scaffold: "ReAct",
+            compaction: true,
+            feedback: "none",
+            token_limit: 100_000_000,
+            reasoning_tokens: null,
+            reasoning_effort: null,
+          }),
+        }),
+      ]),
+    )
+    expect(html).toContain("Token budget")
+    expect(html).toContain("Thinking tokens")
+    expect(html).toContain("50M tokens")
+    expect(html).toContain("100M tokens")
+    expect(html).toContain("Not reported")
+  })
+
+  it("makes protocol headers sortable and announces the sort state", () => {
+    const html = render(summaryWith(OPUS_PAGE))
+    expect(html).toContain('aria-sort="none"')
+    // The header is a button, and its title names the axis it sorts on.
+    expect(html).toContain("Protocol axis &quot;token_limit&quot; (tokens)")
+  })
+
+  it("labels each value in the narrow layout instead of running them together", () => {
+    const html = render(summaryWith(OPUS_PAGE))
+    // The narrow block names the axis next to its value; the old
+    // "xhigh · 32k · on" form said which settings but not which was which.
+    expect(html).toContain("Token budget:")
+    expect(html).toContain("Thinking tokens:")
+    expect(html).not.toContain("xhigh · 32k")
+  })
+
+  it("offers a filter per axis whose value varies", () => {
+    const html = render(summaryWith(OPUS_PAGE))
+    // Options read as formatted values; the raw identity behind them,
+    // which is what the URL and the filter compare on, is covered by the
+    // collections unit tests.
+    expect(html).toContain('aria-pressed="false"')
+    expect(html).toContain("Not reported")
   })
 
   it("falls back to row-discovered axes when the collection declares none", () => {
@@ -179,5 +257,76 @@ describe("EvalDetail leaderboard — protocol condition columns", () => {
     )
     expect(html).toContain("Thinking tokens")
     expect(html).toContain("Effort")
+  })
+
+  it("never turns a published curve's thresholds into protocol values", () => {
+    // An aggregate-only record is ONE cell at its run cap, with every
+    // curve point kept in the score details. Reading those thresholds as
+    // protocol points would invent runs the study never reported.
+    const score = 0.85
+    const html = render(
+      summaryWith([
+        run(score, {}, {
+          is_headline: true,
+          protocol_condition: JSON.stringify({
+            scaffold: "ReAct",
+            compaction: true,
+            feedback: "none",
+            token_limit: 50_000_000,
+            reasoning_tokens: null,
+            reasoning_effort: null,
+          }),
+          score_details: {
+            score,
+            details: {
+              published_curve: [
+                { token_threshold: 500_000, score: 0.1 },
+                { token_threshold: 1_500_000, score: 0.3 },
+                { token_threshold: 15_000_000, score: 0.7 },
+              ],
+            },
+          } as unknown as ModelResultForBenchmark["score_details"],
+        }),
+      ]),
+    )
+    expect(html).toContain("50M tokens")
+    for (const threshold of ["500k tokens", "1.5M tokens", "15M tokens"]) {
+      expect(html).not.toContain(threshold)
+    }
+    expect(html).not.toContain("Token threshold")
+  })
+
+  it("reads a row against its own collection's axes on a mixed page", () => {
+    // A merged page pools rows from several sources. An axis the row's
+    // own collection never declares does not apply to it; saying "Not
+    // reported" there would blame the source for a silence that is not
+    // theirs.
+    const summary = summaryWith(
+      [
+        run(0.9, { feedback: "none", reasoning_tokens: 64000 }, {
+          is_headline: true,
+          collection_id: "uk-aisi-inference-scaling",
+        }),
+        result({
+          score: 0.4,
+          is_headline: true,
+          model_info: { name: "GPT-5.4", id: "openai/gpt-5.4" },
+          model_route_id: "openai%2Fgpt-5.4",
+          collection_id: "some-leaderboard",
+          protocol_condition: undefined,
+        }),
+      ],
+    )
+    const mixed = {
+      ...summary,
+      collection: undefined,
+      merged_view: true,
+      protocol_axes_by_collection: { "uk-aisi-inference-scaling": PROTOCOL_AXES },
+    } as unknown as BenchmarkEvalSummary
+
+    const html = render(mixed)
+    expect(html).toContain("Token budget")
+    expect(html).toContain("10M tokens")
+    expect(html).toContain("Not applicable")
   })
 })

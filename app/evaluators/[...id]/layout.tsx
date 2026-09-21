@@ -18,6 +18,7 @@ export async function generateMetadata(props: {
   let evaluatorName = "Evaluator"
   let evalCount: number | null = null
   let verifiedCount: number | null = null
+  let resolved = true
 
   try {
     const summary = await getEvaluatorSummaryBySlug(slug)
@@ -25,9 +26,21 @@ export async function generateMetadata(props: {
       evaluatorName = summary.name ?? evaluatorName
       evalCount = summary.evalCount ?? null
       verifiedCount = summary.verifiedCount ?? null
+    } else {
+      resolved = false
     }
   } catch {
-    // Fall through to generic copy.
+    // A failed read is not evidence that the org does not exist, so it
+    // keeps the generic copy rather than declaring the page missing.
+  }
+
+  // The page itself answers 404 for a slug that names no org; metadata
+  // cannot carry a status, so it says the same thing the only way it can.
+  if (!resolved) {
+    return {
+      title: "Evaluator not found",
+      robots: { index: false, follow: false },
+    }
   }
 
   const idSlug = routeIdToPath(slug)

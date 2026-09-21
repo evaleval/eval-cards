@@ -108,9 +108,13 @@ function axisValue(fields: Record<string, unknown>, key: string): number | null 
 }
 
 /**
- * A protocol axis that actually VARIES on one page, surfaced as its own
- * leaderboard column. `format` is applied per row by
- * `formatProtocolValue`.
+ * One protocol axis surfaced as its own leaderboard column.
+ *
+ * A QUANTITATIVE axis is one whose descriptor declares a unit: the
+ * reader cannot judge a run without the budget it ran under, so those
+ * are shown whenever the page knows about them, constant or entirely
+ * unreported. Categorical and boolean axes earn a column only by
+ * varying, where the column is what tells two same-named rows apart.
  */
 export interface ProtocolColumn {
   key: string
@@ -120,15 +124,35 @@ export interface ProtocolColumn {
    *  `categorical`); "unknown" when only the rows know the key. */
   type: string
   unit?: string | null
+  /** Declared value order for a categorical axis, when the study names one. */
+  values?: Array<string | null> | null
+  /** True when the descriptor declares a unit. */
+  quantitative: boolean
+}
+
+/** Declared axes per collection id: the descriptor lookup a page whose
+ *  rows span several collections (a merged benchmark page) needs to give
+ *  a row's numbers their unit and to tell "not reported here" from "this
+ *  axis is not part of that row's protocol". */
+export type ProtocolAxesByCollection = Record<string, CollectionProtocolAxis[]>
+
+/** A curated study the visible rows belong to. Attribution only: unlike
+ *  {@link CollectionAttachment} it lights up no study chrome. */
+export interface StudyRef {
+  collection_id: string
+  name: string
+  url?: string
+  /** The benchmark family the study's rows sit under, when they all sit
+   *  under one. It is what makes the study's name a way back into the
+   *  list of its benchmarks; absent when the rows span several families
+   *  or the page carries no family key, and the name is then plain
+   *  text rather than a link into the wrong listing. */
+  family_key?: string
 }
 
 /** Feedback is already carried by the ASSISTED badge on the model cell;
  *  a column would say the same thing twice. */
 const PROTOCOL_COLUMN_EXCLUDED = new Set(["feedback"])
-
-/** A wide table is its own kind of unreadable, so cap the added columns.
- *  Declared-axis order wins, which is the study's own ordering. */
-const MAX_PROTOCOL_COLUMNS = 4
 
 const PROTOCOL_COLUMN_LABELS: Record<string, string> = {
   token_limit: "Token budget",
@@ -154,18 +178,29 @@ function protocolValueKey(value: unknown): string {
 }
 
 /**
- * The columns a leaderboard needs to tell its protocol rows apart.
+ * The columns a leaderboard needs to describe its protocol rows.
  *
- * Nine rows reading "Claude Opus 4.6" are nine different runs, and
- * without the varying axis the reader sees nine identical rows with
- * different scores. So: one column per axis whose value actually
- * differs across the rows on this page. An axis the study held constant
- * (one scaffold everywhere) explains nothing and is left out.
+ * Two rules, both driven by the descriptor and the data, never by a
+ * benchmark id or an axis-name list:
+ *
+ *   - An axis with a declared unit is a budget the reader has to know to
+ *     read the score at all, so it is shown whenever the collection
+ *     declares it or a row carries it: constant, single-row, all-null,
+ *     and no row carrying a condition at all included. A budget that
+ *     vanishes reads as an axis that never applied, which is a different
+ *     claim about the score.
+ *   - A page that declares nothing and whose rows carry nothing gets no
+ *     columns, which is every ordinary benchmark page.
+ *   - Every other axis earns its column by varying across the page's
+ *     rows. Nine rows reading "Claude Opus 4.6" are nine runs, and the
+ *     varying axis is what tells them apart; an axis the study held
+ *     constant explains nothing.
  *
  * `declaredAxes` is the collection sidecar's own axis list — it carries
- * the study's ordering, types and units. Keys seen only in the rows are
- * appended after it so a new axis still surfaces, untyped, rather than
- * silently disappearing.
+ * the study's ordering, types and units. On a page whose rows span
+ * several collections it is the union of their axes, in declared order.
+ * Keys seen only in the rows are appended after it so a new axis still
+ * surfaces, untyped, rather than silently disappearing.
  */
 export function chooseProtocolColumns(
   protocolConditions: Array<string | null | undefined>,
@@ -174,14 +209,32 @@ export function chooseProtocolColumns(
   const parsed = protocolConditions
     .map((raw) => parseProtocolCondition(raw))
     .filter((fields): fields is Record<string, unknown> => fields != null)
-  if (parsed.length < 2) return []
 
-  const ordered: Array<{ key: string; type: string; unit?: string | null }> = []
+  const columns: ProtocolColumn[] = []
+  for (const axis of orderedProtocolAxes(parsed, declaredAxes)) {
+    if (PROTOCOL_COLUMN_EXCLUDED.has(axis.key)) continue
+    const column = protocolColumnOf(axis)
+    if (!column.quantitative) {
+      const values = new Set(parsed.map((fields) => protocolValueKey(fields[axis.key])))
+      if (values.size < 2) continue
+    }
+    columns.push(column)
+  }
+  return columns
+}
+
+/** The declared axes first, in the study's own order, then any key only
+ *  the rows know about. */
+function orderedProtocolAxes(
+  parsed: Array<Record<string, unknown>>,
+  declaredAxes?: CollectionProtocolAxis[] | null,
+): CollectionProtocolAxis[] {
+  const ordered: CollectionProtocolAxis[] = []
   const seen = new Set<string>()
   for (const axis of declaredAxes ?? []) {
     if (!axis?.key || seen.has(axis.key)) continue
     seen.add(axis.key)
-    ordered.push({ key: axis.key, type: axis.type ?? "unknown", unit: axis.unit })
+    ordered.push({ ...axis, type: axis.type ?? "unknown" })
   }
   for (const fields of parsed) {
     for (const key of Object.keys(fields)) {
@@ -190,54 +243,422 @@ export function chooseProtocolColumns(
       ordered.push({ key, type: "unknown" })
     }
   }
+  return ordered
+}
 
+function protocolColumnOf(axis: CollectionProtocolAxis): ProtocolColumn {
+  return {
+    key: axis.key,
+    label: humaniseProtocolKey(axis.key),
+    type: axis.type ?? "unknown",
+    unit: axis.unit ?? null,
+    values: axis.values ?? null,
+    quantitative: Boolean(axis.unit),
+  }
+}
+
+/**
+ * The axes ONE row can speak to, in declared order. The varying-axis rule
+ * that shapes a leaderboard cannot apply here, because a single run
+ * varies nothing; away from the leaderboard the reader still needs the
+ * whole setting the score was measured under, so a constant budget is
+ * exactly as load-bearing as a varied one.
+ *
+ * Every declared budget is listed, reported or not, because "the study
+ * did not say" is itself part of how the score has to be read. The rest
+ * of the axes are listed only when this run reports a value, which keeps
+ * the group short enough to sit inline.
+ */
+export function protocolColumnsForRow(
+  protocolCondition: string | null | undefined,
+  declaredAxes?: CollectionProtocolAxis[] | null,
+): ProtocolColumn[] {
+  const fields = parseProtocolCondition(protocolCondition)
+  const declaredKeys = declaredKeysOf(declaredAxes)
   const columns: ProtocolColumn[] = []
-  for (const axis of ordered) {
+  for (const axis of orderedProtocolAxes(fields ? [fields] : [], declaredAxes)) {
     if (PROTOCOL_COLUMN_EXCLUDED.has(axis.key)) continue
-    const values = new Set(parsed.map((fields) => protocolValueKey(fields[axis.key])))
-    if (values.size < 2) continue
-    columns.push({
-      key: axis.key,
-      label: humaniseProtocolKey(axis.key),
-      type: axis.type,
-      unit: axis.unit ?? null,
-    })
-    if (columns.length === MAX_PROTOCOL_COLUMNS) break
+    const column = protocolColumnOf(axis)
+    if (column.quantitative) {
+      columns.push(column)
+      continue
+    }
+    if (readProtocolAxis(protocolCondition, column, declaredKeys).state !== "value") continue
+    columns.push(column)
   }
   return columns
 }
 
-/** 32000 -> "32k", 10000000 -> "10M", 1500 -> "1.5k". Budgets are the
- *  study's round numbers; the raw digits crowd the cell for no gain. */
-function formatCompactCount(value: number): string {
-  const abs = Math.abs(value)
-  if (abs >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}M`
-  if (abs >= 1_000) return `${Number((value / 1_000).toFixed(1))}k`
-  return String(value)
+/** The key set a row's readings are judged against, so an axis the study
+ *  declares reads "not reported" rather than "not applicable" when the
+ *  row carries no protocol at all. */
+export function declaredKeysOf(
+  declaredAxes: CollectionProtocolAxis[] | null | undefined,
+): ReadonlySet<string> {
+  return new Set((declaredAxes ?? []).map((axis) => axis.key))
+}
+
+// ---------------------------------------------------------------------------
+// One reading, one formatter. Every surface that shows a protocol value
+// (benchmark page, merged page, embed) reads the raw typed value through
+// `readProtocolAxis` and renders it through `formatProtocolValue`, so the
+// same run never reads "50M" in one place and "50000000" in another.
+// ---------------------------------------------------------------------------
+
+/** Missing means one of two different things, and a reader has to be
+ *  able to tell them apart: the axis applies to this run and the study
+ *  did not report it, or the axis is not part of this run's protocol at
+ *  all (a row from another source on a merged page). Neither ever means
+ *  "no limit". */
+export type ProtocolValueState = "value" | "not_reported" | "not_applicable"
+
+export interface ProtocolAxisReading {
+  state: ProtocolValueState
+  /** The typed value sorting and filtering use, normalised to the
+   *  descriptor's declared type but never to a display string. */
+  raw: string | number | boolean | null
+}
+
+const NOT_REPORTED: ProtocolAxisReading = { state: "not_reported", raw: null }
+const NOT_APPLICABLE: ProtocolAxisReading = { state: "not_applicable", raw: null }
+
+/** Declared types that make an axis a quantity. A descriptor that names a
+ *  unit is quantitative whatever it calls its type. */
+const NUMERIC_AXIS_TYPES = new Set(["int", "integer", "number", "float", "double"])
+
+function isNumericAxis(column: ProtocolColumn): boolean {
+  return Boolean(column.unit) || NUMERIC_AXIS_TYPES.has((column.type ?? "").toLowerCase())
 }
 
 /**
- * One row's value for one protocol column. Returns null when the row
- * does not set the axis — the caller renders its own "not set" mark
- * rather than a word that would read as a value.
+ * Coerce one raw JSON value to the descriptor's declared type. A source
+ * that writes its token budget as "6000000" must still sort below
+ * 10000000 and still read as 6M, so a numeric axis parses numeric text.
+ * A value that will not convert keeps its own type rather than becoming a
+ * silent NaN.
  */
-export function formatProtocolValue(
-  raw: string | null | undefined,
+function normalizeAxisValue(
+  value: unknown,
   column: ProtocolColumn,
-): string | null {
-  const fields = parseProtocolCondition(raw)
-  const value = fields?.[column.key]
-  if (value == null) return null
-  if (typeof value === "boolean") return value ? "on" : "off"
-  if (typeof value === "number" && Number.isFinite(value)) {
-    // Counts get the compact form; a bare number (a temperature, a
-    // seed) is not a magnitude and stays verbatim.
-    return column.type === "int" || column.unit === "tokens"
-      ? formatCompactCount(value)
-      : String(value)
+): string | number | boolean | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null
+  if (typeof value === "boolean") return value
+  if (typeof value === "string") {
+    const trimmed = value.trim()
+    if (!trimmed) return null
+    if (isNumericAxis(column)) {
+      const parsed = Number(trimmed)
+      if (Number.isFinite(parsed)) return parsed
+    }
+    return value
   }
-  if (typeof value === "string") return value
-  return JSON.stringify(value)
+  return value == null ? null : JSON.stringify(value)
+}
+
+/**
+ * One row's reading of one axis.
+ *
+ * `declaredKeys` is the set of axis keys the ROW's own collection
+ * declares. Pass null (the per-source default) when every column on the
+ * page applies to every row; pass a per-row set on a mixed page, where a
+ * row whose collection declares nothing about the axis reads "not
+ * applicable" rather than pretending the study withheld a value.
+ */
+export function readProtocolAxis(
+  protocolCondition: string | null | undefined,
+  column: ProtocolColumn,
+  declaredKeys?: ReadonlySet<string> | null,
+): ProtocolAxisReading {
+  const fields = parseProtocolCondition(protocolCondition)
+  if (fields && Object.prototype.hasOwnProperty.call(fields, column.key)) {
+    const raw = normalizeAxisValue(fields[column.key], column)
+    return raw == null ? NOT_REPORTED : { state: "value", raw }
+  }
+  if (declaredKeys) return declaredKeys.has(column.key) ? NOT_REPORTED : NOT_APPLICABLE
+  return fields ? NOT_REPORTED : NOT_APPLICABLE
+}
+
+/** SI decimal steps, smallest first, which is how the studies write their
+ *  own round numbers. */
+const COMPACT_UNITS: Array<[number, string]> = [
+  [1, ""],
+  [1_000, "k"],
+  [1_000_000, "M"],
+  [1_000_000_000, "B"],
+]
+
+/** Three significant digits: enough that 1,040,000 and 1,049,000 stay
+ *  visibly different, few enough that a budget does not fill the cell. */
+function toThreeSignificant(value: number): number {
+  return Number(value.toPrecision(3))
+}
+
+/** 32000 -> "32k", 10000000 -> "10M", 1500 -> "1.5k", 999999 -> "1M". */
+function formatCompactCount(value: number): string {
+  if (!Number.isFinite(value)) return String(value)
+  const abs = Math.abs(value)
+  let index = 0
+  for (let i = COMPACT_UNITS.length - 1; i > 0; i -= 1) {
+    if (abs >= COMPACT_UNITS[i][0]) {
+      index = i
+      break
+    }
+  }
+  let scaled = toThreeSignificant(value / COMPACT_UNITS[index][0])
+  // Rounding can push a value past its own unit: 999,999 divided by a
+  // thousand rounds to 1000, which reads as "1000k" rather than "1M".
+  while (Math.abs(scaled) >= 1000 && index < COMPACT_UNITS.length - 1) {
+    index += 1
+    scaled = toThreeSignificant(value / COMPACT_UNITS[index][0])
+  }
+  return `${scaled}${COMPACT_UNITS[index][1]}`
+}
+
+/** Spellings the studies use that read badly verbatim. Everything else is
+ *  the study's own wording and is shown as written, so an unrelated value
+ *  such as "xml" is never rewritten into something it does not say. */
+const PROTOCOL_VALUE_LABELS: Record<string, string> = {
+  xhigh: "X-high",
+  xlow: "X-low",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+  minimal: "Minimal",
+  none: "None",
+  unknown: "Unknown",
+  answer_feedback: "Answer feedback",
+}
+
+function labelCategorical(value: string): string {
+  const trimmed = value.trim()
+  return PROTOCOL_VALUE_LABELS[trimmed.toLowerCase()] ?? trimmed
+}
+
+/** The value alone, with no unit after it: what a list of several values
+ *  repeats, so the unit can be said once at the end instead of after
+ *  every number. */
+function protocolValueBody(
+  value: string | number | boolean | null,
+  column: ProtocolColumn,
+): string {
+  if (typeof value === "boolean") return value ? "On" : "Off"
+  if (typeof value === "number" && Number.isFinite(value)) {
+    // A declared unit makes the number a magnitude worth compacting; a
+    // bare number (a temperature, a seed) stays verbatim.
+    return column.unit ? formatCompactCount(value) : String(value)
+  }
+  return labelCategorical(String(value))
+}
+
+/** What the cell shows. */
+export function formatProtocolValue(
+  reading: ProtocolAxisReading,
+  column: ProtocolColumn,
+): string {
+  if (reading.state === "not_applicable") return "Not applicable"
+  if (reading.state === "not_reported") return "Not reported"
+  const value = reading.raw
+  const body = protocolValueBody(value, column)
+  return column.unit && typeof value === "number" && Number.isFinite(value)
+    ? `${body} ${column.unit}`
+    : body
+}
+
+/** What the cell's title carries: the exact value, unshortened. */
+export function protocolValueTitle(
+  reading: ProtocolAxisReading,
+  column: ProtocolColumn,
+): string {
+  if (reading.state !== "value") return formatProtocolValue(reading, column)
+  const value = reading.raw
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const exact = value.toLocaleString("en-US", { maximumFractionDigits: 20 })
+    return column.unit ? `${exact} ${column.unit}` : exact
+  }
+  return formatProtocolValue(reading, column)
+}
+
+/**
+ * Typed comparison for one axis, direction applied. Numbers compare as
+ * numbers (6M before 10M), booleans Off before On, categoricals by the
+ * study's declared order and then locale. Missing readings sort LAST in
+ * both directions, because flipping the direction must not make an
+ * unreported budget masquerade as the smallest one. Returns 0 on a tie,
+ * leaving the caller to apply its own stable tie-break.
+ */
+export function compareProtocolReadings(
+  a: ProtocolAxisReading,
+  b: ProtocolAxisReading,
+  column: ProtocolColumn,
+  dir: "asc" | "desc",
+): number {
+  const aMissing = a.state !== "value"
+  const bMissing = b.state !== "value"
+  if (aMissing && bMissing) return 0
+  if (aMissing) return 1
+  if (bMissing) return -1
+
+  const sign = dir === "asc" ? 1 : -1
+  const left = a.raw
+  const right = b.raw
+  if (typeof left === "number" && typeof right === "number") return (left - right) * sign
+  if (typeof left === "boolean" && typeof right === "boolean") {
+    return ((left ? 1 : 0) - (right ? 1 : 0)) * sign
+  }
+  const leftText = String(left)
+  const rightText = String(right)
+  const declared = (column.values ?? []).filter((value): value is string => value != null)
+  if (declared.length > 0) {
+    const leftIndex = declared.indexOf(leftText)
+    const rightIndex = declared.indexOf(rightText)
+    // Values the study never declared follow the declared ones rather
+    // than landing at the front on an index of -1.
+    const leftRank = leftIndex === -1 ? declared.length : leftIndex
+    const rightRank = rightIndex === -1 ? declared.length : rightIndex
+    if (leftRank !== rightRank) return (leftRank - rightRank) * sign
+  }
+  return leftText.localeCompare(rightText) * sign
+}
+
+/**
+ * Filter identity for one reading, carrying the state and the primitive
+ * type as well as the text. Without the tag an unreported budget and a
+ * categorical whose value is literally "null" would be the same filter,
+ * and a numeric 1 could not be told from the string "1". Filters and the
+ * URL key on this, never on the formatted label.
+ */
+export function protocolValueId(reading: ProtocolAxisReading): string {
+  if (reading.state === "not_applicable") return "missing:not_applicable"
+  if (reading.state === "not_reported") return "missing:not_reported"
+  const raw = reading.raw
+  if (typeof raw === "number") return `number:${raw}`
+  if (typeof raw === "boolean") return `boolean:${raw}`
+  return `string:${String(raw)}`
+}
+
+export interface ProtocolFilterOption {
+  /** Typed raw identity, as it appears in `protocol.<axis>=<id>`. */
+  id: string
+  label: string
+  /** The exact value, for the button's title: two budgets can round to
+   *  the same short label and the reader still has to tell them apart. */
+  title: string
+}
+
+/**
+ * The distinct readings of one axis across a page's rows, in the same
+ * order the column sorts ascending. Options are typed raw identities; the
+ * label is presentation only.
+ */
+export function protocolFilterOptions(
+  readings: ProtocolAxisReading[],
+  column: ProtocolColumn,
+): ProtocolFilterOption[] {
+  const byId = new Map<string, ProtocolAxisReading>()
+  for (const reading of readings) {
+    const id = protocolValueId(reading)
+    if (!byId.has(id)) byId.set(id, reading)
+  }
+  return Array.from(byId.entries())
+    .sort(([, a], [, b]) => compareProtocolReadings(a, b, column, "asc"))
+    .map(([id, reading]) => ({
+      id,
+      label: formatProtocolValue(reading, column),
+      title: protocolValueTitle(reading, column),
+    }))
+}
+
+/** The row fields the shared protocol comparator breaks ties on. */
+export interface ProtocolSortableRow {
+  protocol_condition?: string | null
+  model_info?: { name?: string }
+  model_route_id?: string
+  /** Present on per-source rows; merged rows carry their source slug. */
+  evaluation_id?: string
+  merged_source_slug?: string
+}
+
+/**
+ * One deterministic order for every protocol sort. Equal readings fall
+ * through a fixed tuple (model name, route id, source identity, the
+ * canonical protocol JSON, original position), so two runs of the same
+ * model at the same budget cannot swap places because the producer
+ * happened to serve them in a different order.
+ */
+export function compareProtocolRows<T extends ProtocolSortableRow>(
+  a: { row: T; index: number },
+  b: { row: T; index: number },
+  column: ProtocolColumn,
+  dir: "asc" | "desc",
+  readingFor: (row: T, column: ProtocolColumn) => ProtocolAxisReading,
+): number {
+  const primary = compareProtocolReadings(
+    readingFor(a.row, column),
+    readingFor(b.row, column),
+    column,
+    dir,
+  )
+  if (primary !== 0) return primary
+  const keys: Array<(row: T) => string> = [
+    (row) => row.model_info?.name ?? "",
+    (row) => row.model_route_id ?? "",
+    (row) => row.evaluation_id ?? row.merged_source_slug ?? "",
+    (row) => row.protocol_condition ?? "",
+  ]
+  for (const key of keys) {
+    const cmp = key(a.row).localeCompare(key(b.row))
+    if (cmp !== 0) return cmp
+  }
+  return a.index - b.index
+}
+
+/**
+ * The declared protocol tuple of one row, ascending with nulls last: the
+ * order a model's extra runs sit in beneath its headline reading, so two
+ * equivalent pages present the same rows in the same order.
+ */
+export function compareProtocolTuples(
+  a: string | null | undefined,
+  b: string | null | undefined,
+  columns: ProtocolColumn[],
+): number {
+  for (const column of columns) {
+    const cmp = compareProtocolReadings(
+      readProtocolAxis(a, column),
+      readProtocolAxis(b, column),
+      column,
+      "asc",
+    )
+    if (cmp !== 0) return cmp
+  }
+  return (a ?? "").localeCompare(b ?? "")
+}
+
+/** The axis keys one collection declares, for the per-row applicability
+ *  test on a page whose rows span several collections. */
+export function declaredAxisKeys(
+  axesByCollection: ProtocolAxesByCollection | null | undefined,
+  collectionId: string | null | undefined,
+): ReadonlySet<string> {
+  const axes = collectionId ? axesByCollection?.[collectionId] : undefined
+  return new Set((axes ?? []).map((axis) => axis.key))
+}
+
+/** The declared axes of several collections, deduped, in declared order:
+ *  the descriptor list a mixed page builds its columns from. */
+export function unionProtocolAxes(
+  axesByCollection: ProtocolAxesByCollection | null | undefined,
+): CollectionProtocolAxis[] {
+  const out: CollectionProtocolAxis[] = []
+  const seen = new Set<string>()
+  for (const axes of Object.values(axesByCollection ?? {})) {
+    for (const axis of axes ?? []) {
+      if (!axis?.key || seen.has(axis.key)) continue
+      seen.add(axis.key)
+      out.push(axis)
+    }
+  }
+  return out
 }
 
 /**

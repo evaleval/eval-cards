@@ -24,6 +24,7 @@ export async function GET(
   let evaluatorName = "Evaluator"
   let evalCount: number | null = null
   let verifiedCount: number | null = null
+  let resolved = true
 
   try {
     const summary = await getEvaluatorSummaryBySlug(slug)
@@ -31,9 +32,18 @@ export async function GET(
       evaluatorName = summary.name ?? evaluatorName
       evalCount = summary.evalCount ?? null
       verifiedCount = summary.verifiedCount ?? null
+    } else {
+      resolved = false
     }
   } catch {
-    // Fall through to the generic card.
+    // A failed read is not evidence that the org does not exist, so
+    // keep the generic card rather than claiming the evaluator is gone.
+  }
+
+  // No org behind the slug means no card: the page is a 404 and its
+  // unfurl must not answer 200 with a plausible-looking evaluator.
+  if (!resolved) {
+    return new Response("Evaluator not found", { status: 404 })
   }
 
   const logoUrl = resolveBrandLogoUrl(request)

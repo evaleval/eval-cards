@@ -133,12 +133,182 @@ describe("mergedSummaryToEvalSummary — EvalDetail surface", () => {
     expect(adapted.leaderboard_metrics).toHaveLength(1)
     expect(adapted.leaderboard_metrics?.[0].column_key).toBe("accuracy")
     expect(adapted.leaderboard_rows?.map((r) => r.values.accuracy)).toEqual([91.2, 91.2, 55.5])
+    // Reporting orgs, from the rows. A source's composite display name is
+    // the title of a leaderboard or a paper, not an organisation.
     expect(adapted.evaluator_names).toEqual(["Source A", "Source B"])
     // Collection-page gate (spec requirement 8): the adapter must never
     // set the per-source-only `collection` attachment — it is what keeps
     // the Compute chip and trajectory panels off merged pages.
     expect("collection" in adapted).toBe(false)
     expect(adapted.collection).toBeUndefined()
+  })
+
+  it("never lets a study title into an evaluator field", () => {
+    // The bug this pins: a composite's display name is the study's title
+    // ("How Inference Compute Shapes Frontier LLM Evaluation"), and
+    // reading it as an evaluator both misattributes the work and links a
+    // title to an evaluator page that does not exist.
+    const payload = mergedPayload([
+      row({
+        composite_slug: "aisi-inference-scaling",
+        composite_display_name: "How Inference Compute Shapes Frontier LLM Evaluation",
+        evaluator_display_name: "UK AI Security Institute",
+        is_verified_evaluator: true,
+        collection_id: "uk-aisi-inference-scaling",
+        source_metadata: sourceMeta("UK AI Security Institute"),
+      }),
+    ])
+    payload.aggregate_sources = [
+      {
+        evaluation_id: "aisi-inference-scaling%2Fcyber-ctfs",
+        composite_slug: "aisi-inference-scaling",
+        composite_display_name: "How Inference Compute Shapes Frontier LLM Evaluation",
+        models_count: 1,
+        results_count: 1,
+        reports_preferred: true,
+        slice_only: false,
+      },
+    ]
+    payload.collections = {
+      "uk-aisi-inference-scaling": {
+        curated: true,
+        display_name: "How Inference Compute Shapes Frontier LLM Evaluation",
+        kind: "paper_study",
+        url: "https://arxiv.org/abs/2606.17930",
+        protocol_axes: [
+          { key: "token_limit", type: "int", unit: "tokens" },
+          { key: "reasoning_tokens", type: "int", unit: "tokens" },
+        ],
+      },
+    }
+
+    const adapted = mergedSummaryToEvalSummary(payload)
+
+    expect(adapted.evaluator_names).toEqual(["UK AI Security Institute"])
+    expect(adapted.verified_evaluator_names).toEqual(["UK AI Security Institute"])
+    for (const name of [
+      ...adapted.evaluator_names,
+      ...(adapted.verified_evaluator_names ?? []),
+    ]) {
+      expect(name).not.toBe("How Inference Compute Shapes Frontier LLM Evaluation")
+    }
+    // The study is what the results are PART OF, carried separately so it
+    // can be named without turning on the study-only panels.
+    expect(adapted.study_refs).toEqual([
+      {
+        collection_id: "uk-aisi-inference-scaling",
+        name: "How Inference Compute Shapes Frontier LLM Evaluation",
+        url: "https://arxiv.org/abs/2606.17930",
+        // The family the study's own rows sit under, which is what makes
+        // the study's name a way back to its other benchmarks.
+        family_key: "aisi-inference-scaling",
+      },
+    ])
+    expect(adapted.collection).toBeUndefined()
+    // Axis descriptors survive so merged token values get their unit.
+    expect(
+      adapted.protocol_axes_by_collection?.["uk-aisi-inference-scaling"]?.map((a) => a.key),
+    ).toEqual(["token_limit", "reasoning_tokens"])
+  })
+
+  it("keeps each row's own upstream provenance", () => {
+    // Two sources of one benchmark are two datasets: replacing both with
+    // the benchmark's name throws away the repo, url and sample count the
+    // fact row already carried.
+    const adapted = mergedSummaryToEvalSummary(
+      mergedPayload([
+        row({
+          source_data: { dataset_name: "MMLU-Pro", hf_repo: "TIGER-Lab/MMLU-Pro", samples_number: 12032 },
+        }),
+        row({
+          composite_slug: "src-b",
+          source_metadata: sourceMeta("Source B"),
+          source_data: { dataset_name: "MMLU-Pro (mirror)", hf_repo: "other/mmlu-pro" },
+        }),
+        row({ model_info: { name: "Model C", id: "org/model-c" } }),
+      ]),
+    )
+    const sourceData = adapted.model_results.map((result) => result.source_data)
+    expect(sourceData[0]).toEqual({
+      dataset_name: "MMLU-Pro",
+      hf_repo: "TIGER-Lab/MMLU-Pro",
+      samples_number: 12032,
+    })
+    expect(sourceData[1]).toEqual({
+      dataset_name: "MMLU-Pro (mirror)",
+      hf_repo: "other/mmlu-pro",
+    })
+    // A row that carries none still names the benchmark.
+    expect(sourceData[2]).toEqual({ dataset_name: "Bench" })
+    expect(adapted.leaderboard_rows?.[0].source_data).toEqual(sourceData[0])
+    expect(adapted.model_results[0].result.source_data).toEqual(sourceData[0])
+  })
+
+  it("prefers a source organisation over a whitespace-only evaluator name", () => {
+    const adapted = mergedSummaryToEvalSummary(
+      mergedPayload([
+        row({
+          evaluator_display_name: "   ",
+          source_metadata: sourceMeta("Papers with Code"),
+        }),
+      ]),
+    )
+    expect(adapted.evaluator_names).toEqual(["Papers with Code"])
+  })
+
+  it("orders reporters the same way whatever order the rows arrive in", () => {
+    // Equal scores for one model have no source tie-break in the query,
+    // so row order alone is not stable, and the hero shows only the first
+    // two names.
+    const make = (name: string) =>
+      row({ composite_slug: name, source_metadata: sourceMeta(name), evaluator_display_name: name })
+    const forward = [make("BenchPress"), make("TIGER-Lab"), make("TIGER-Lab")]
+    const reversed = [make("TIGER-Lab"), make("BenchPress"), make("TIGER-Lab")]
+    const names = (rows: MergedObservationRow[]) =>
+      mergedSummaryToEvalSummary(mergedPayload(rows)).evaluator_names
+    // Most-reported first, so the two the hero shows are the main ones.
+    expect(names(forward)).toEqual(["TIGER-Lab", "BenchPress"])
+    expect(names(reversed)).toEqual(names(forward))
+  })
+
+  it("names no reporter when the visible rows carry no organisation", () => {
+    const adapted = mergedSummaryToEvalSummary(
+      mergedPayload([
+        row({
+          evaluator_display_name: undefined,
+          source_metadata: {
+            source_name: undefined,
+            source_type: "leaderboard",
+            source_organization_name: "",
+            evaluator_relationship: "third_party",
+          } as SourceMetadata,
+        }),
+      ]),
+    )
+    expect(adapted.evaluator_names).toEqual([])
+  })
+
+  it("verifies only the orgs whose own rows are verified", () => {
+    const adapted = mergedSummaryToEvalSummary(
+      mergedPayload([
+        row({ evaluator_display_name: "Source A", is_verified_evaluator: true }),
+        row({
+          composite_slug: "src-b",
+          evaluator_display_name: "Source B",
+          is_verified_evaluator: false,
+          source_metadata: sourceMeta("Source B"),
+        }),
+      ]),
+    )
+    expect(adapted.evaluator_names).toEqual(["Source A", "Source B"])
+    expect(adapted.verified_evaluator_names).toEqual(["Source A"])
+  })
+
+  it("names no study when the rows' collections are not curated", () => {
+    const payload = mergedPayload([row({ collection_id: "crfm/helm-lite" })])
+    const adapted = mergedSummaryToEvalSummary(payload)
+    expect(adapted.study_refs).toBeUndefined()
+    expect(adapted.protocol_axes_by_collection).toBeUndefined()
   })
 
   it("excludes flagged rows (null score_canonical) from the pool entirely", () => {

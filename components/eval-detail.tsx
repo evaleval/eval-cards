@@ -34,7 +34,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { cn, formatDateISO, humanizeEvaluationId, routeIdFromModelId, routeIdToPath } from "@/lib/utils"
+import { cn, familyEvalsHref, formatDateISO, humanizeEvaluationId, routeIdFromModelId, routeIdToPath } from "@/lib/utils"
 import {
   AlertTriangle,
   BarChart3,
@@ -63,16 +63,34 @@ import {
   orderGroupsByScore,
   primaryMetricColumnKey,
   scoreSortBaseDirection,
+  scoreStandings,
 } from "@/lib/eval-processing"
 import type { BenchmarkEvalSummary, ModelResultForBenchmark } from "@/lib/eval-processing"
 import {
   chooseProtocolColumns,
-  formatProtocolValue,
+  compareProtocolRows,
+  compareProtocolTuples,
+  declaredAxisKeys,
+  declaredKeysOf,
+  protocolFilterOptions,
+  protocolValueId,
+  readProtocolAxis,
+  unionProtocolAxes,
+  type ProtocolAxisReading,
   type ProtocolColumn,
+  type StudyRef,
 } from "@/lib/collections"
+import { useProtocolFilters } from "@/lib/use-protocol-filters"
+import {
+  ProtocolFilters,
+  ProtocolNarrowItems,
+  ProtocolSortButton,
+  ProtocolValueText,
+  protocolHeaderTitle,
+} from "@/components/protocol-axis-fields"
 import { CollectionTrajectories } from "@/components/collection-trajectories"
 import { isRecognizedEvaluator } from "@/lib/evaluators"
-import { useEvaluatorSlug } from "@/components/org-metadata-provider"
+import { EvaluatorName, useKnownEvaluator } from "@/components/org-metadata-provider"
 import type { ComparisonIndex, EvalHierarchy } from "@/lib/backend-artifacts"
 import type { HierarchyEvalLocation } from "@/lib/hierarchy-lookup"
 import { PolicyOverview } from "@/components/policy-overview"
@@ -448,39 +466,6 @@ function formatMetadataValue(value: unknown): string {
 // shared YYYY-MM-DD implementation lives in `lib/utils` so model-page
 // and other surfaces format identically.
 const formatDate = formatDateISO
-
-/**
- * Render an evaluator org name. When `linkName` is a known evaluator (a
- * de-aliased name with a /evaluators/<slug> page) the name links there;
- * otherwise it renders as plain text so we never emit a broken link. The
- * slug uses the shared, deterministic `evaluatorSlug` base helper.
- */
-function EvaluatorName({
-  display,
-  linkName,
-  className,
-  style,
-}: {
-  display: React.ReactNode
-  linkName: string | null
-  className?: string
-  style?: React.CSSProperties
-}) {
-  const slugFor = useEvaluatorSlug()
-  if (!linkName) {
-    return <span className={className} style={style}>{display}</span>
-  }
-  return (
-    <Link
-      href={`/evaluators/${slugFor(linkName)}`}
-      className={cn("hover:text-[color:var(--accent)] hover:underline", className)}
-      style={style}
-      onClick={(e) => e.stopPropagation()}
-    >
-      {display}
-    </Link>
-  )
-}
 
 /**
  * Render a benchmark-card field path (e.g. `methodology.metrics`,
@@ -881,12 +866,65 @@ export function EvalDetail({
     return (modelId: string) => names[modelId] ?? modelId
   }, [lb.judge_display_names, summary.judge_display_names])
 
+  // Protocol rows repeat the model name: nine "Claude Opus 4.6" rows on
+  // the AISI inference-scaling page are nine runs at different reasoning
+  // budgets, and with only the name and the metric in the cell they read
+  // as nine copies of one row with inexplicably different scores. So the
+  // budgets the study declares a unit for are always on the row, and every
+  // other axis earns a column by varying. Derived from the whole page's
+  // rows, not the visible page, so the table doesn't change shape as the
+  // reader pages or filters.
+  //
+  // A merged page's rows can come from several collections, so the
+  // descriptors are the union of their declared axes and each row is read
+  // against its OWN collection's keys: a row from a source that never ran
+  // the study says "Not applicable", not "Not reported".
+  const axesByCollection = summary.protocol_axes_by_collection
+  const declaredAxes = useMemo(
+    () =>
+      axesByCollection
+        ? unionProtocolAxes(axesByCollection)
+        : summary.collection?.protocol_axes,
+    [axesByCollection, summary.collection?.protocol_axes]
+  )
+  const protocolColumns = useMemo<ProtocolColumn[]>(
+    () =>
+      chooseProtocolColumns(
+        lb.model_results.map((result) => result.protocol_condition),
+        declaredAxes,
+      ),
+    [lb.model_results, declaredAxes]
+  )
+
+  // A per-source study page declares one axis list for every row, so a
+  // row with no protocol of its own is still a row the declared budgets
+  // apply to: it reads "Not reported", never "Not applicable".
+  const pageDeclaredKeys = useMemo(() => {
+    if (axesByCollection) return null
+    const keys = declaredKeysOf(summary.collection?.protocol_axes)
+    // Nothing declared means nothing to judge a row against, which is the
+    // reading readProtocolAxis already makes from the row alone.
+    return keys.size > 0 ? keys : null
+  }, [axesByCollection, summary.collection?.protocol_axes])
+  const protocolReading = useMemo(
+    () => (result: ModelResultForBenchmark, column: ProtocolColumn): ProtocolAxisReading =>
+      readProtocolAxis(
+        result.protocol_condition,
+        column,
+        axesByCollection
+          ? declaredAxisKeys(axesByCollection, result.collection_id)
+          : pageDeclaredKeys,
+      ),
+    [axesByCollection, pageDeclaredKeys]
+  )
+
   // The view ships one row per (model, protocol arm, judge
   // panel) and marks ONE of them as the model's headline reading. Sort
   // and rank the headline rows; each model's other rows follow directly
-  // beneath their headline, in the order the producer served them, and
-  // never take a rank. On snapshots predating the column every row is a
-  // headline, so this is the old flat ordering exactly.
+  // beneath their headline, ordered by their declared protocol tuple so
+  // two equivalent payloads present them identically, and never take a
+  // rank. On snapshots predating the column every row is a headline, so
+  // this is the old flat ordering exactly.
   const sortedResults = useMemo(() => {
     const sourceResults = slicedScoreByRoute
       ? lb.model_results
@@ -914,22 +952,27 @@ export function EvalDetail({
       lb.metric_config.lower_is_better ? a.score - b.score : b.score - a.score
     )
 
+    const orderSecondary = (rows: ModelResultForBenchmark[]) =>
+      [...rows].sort((a, b) =>
+        compareProtocolTuples(a.protocol_condition, b.protocol_condition, protocolColumns),
+      )
+
     const ordered: ModelResultForBenchmark[] = []
     for (const result of headline) {
       ordered.push(result)
       const key = modelGroupKey(result)
       const secondary = secondaryByModel.get(key)
       if (secondary) {
-        ordered.push(...secondary)
+        ordered.push(...orderSecondary(secondary))
         secondaryByModel.delete(key)
       }
     }
     // A non-headline row whose model has no headline row on this page
     // (e.g. the headline lives on another metric) still deserves to be
     // readable, so keep it at the end rather than dropping it.
-    for (const secondary of secondaryByModel.values()) ordered.push(...secondary)
+    for (const secondary of secondaryByModel.values()) ordered.push(...orderSecondary(secondary))
     return ordered
-  }, [lb.model_results, lb.metric_config.lower_is_better, slicedScoreByRoute])
+  }, [lb.model_results, lb.metric_config.lower_is_better, protocolColumns, slicedScoreByRoute])
 
   const [showUnknownSize, setShowUnknownSize] = useState(true)
 
@@ -968,34 +1011,22 @@ export function EvalDetail({
   const [includeAssistedInRanking, setIncludeAssistedInRanking] = useState(false)
   const [showAssistedRows, setShowAssistedRows] = useState(true)
 
-  // Protocol rows repeat the model name — nine "Claude Opus 4.6" rows on
-  // the AISI inference-scaling page are nine runs at different reasoning
-  // budgets, and with only the name and the metric in the cell they read
-  // as nine copies of one row with inexplicably different scores. Give
-  // each axis that actually varies its own column. Derived from the whole
-  // page's rows, not the visible page, so the table doesn't change shape
-  // as the reader pages or filters.
-  const protocolColumns = useMemo<ProtocolColumn[]>(
-    () =>
-      chooseProtocolColumns(
-        lb.model_results.map((result) => result.protocol_condition),
-        summary.collection?.protocol_axes,
-      ),
-    [lb.model_results, summary.collection?.protocol_axes]
+  // Protocol filters live in the URL, alongside the metric and slice
+  // controls, so a filtered leaderboard is a link someone can send and
+  // changing the metric does not silently drop the selection. Only axes
+  // this page actually has a column for are honoured.
+  const protocolAxisKeys = useMemo(
+    () => protocolColumns.map((column) => column.key),
+    [protocolColumns],
   )
+  const {
+    selected: protocolFilters,
+    activeCount: protocolFilterCount,
+    toggle: toggleProtocolFilter,
+    clear: clearProtocolFilters,
+  } = useProtocolFilters(protocolAxisKeys)
 
-  /** The compact one-line form for the narrow table, which has no room
-   *  for a column per axis: "xhigh · 32k · on". */
-  const protocolSummaryFor = useMemo(
-    () => (result: ModelResultForBenchmark) => {
-      if (protocolColumns.length === 0) return null
-      const parts = protocolColumns
-        .map((column) => formatProtocolValue(result.protocol_condition, column))
-        .filter((part): part is string => part != null)
-      return parts.length > 0 ? parts.join(" · ") : null
-    },
-    [protocolColumns]
-  )
+  const hasProtocolColumns = protocolColumns.length > 0
 
   const hasParameterData = useMemo(
     () => sortedResults.some((result) => getParamsBillions(result) != null),
@@ -1029,29 +1060,21 @@ export function EvalDetail({
   ])
 
   const leaderboardRows = useMemo<LeaderboardRow[]>(() => {
-    let currentRank = 0
-    let previousScore: number | null = null
-    let rankedCount = 0
+    // Assisted runs are visible but take no rank unless the reader
+    // explicitly re-includes them. Non-headline rows (a losing judge
+    // panel or protocol arm) are never ranked: the backend serves them a
+    // NULL rank and the reader must not see the same model twice in the
+    // standings.
+    const ranks = scoreStandings(
+      filteredResults,
+      (result) => result.score,
+      (result) =>
+        isHeadlineResult(result) &&
+        (includeAssistedInRanking || !isAssistedResult(result.protocol_condition)),
+    )
 
     return filteredResults.map((modelResult, index) => {
-      // Assisted runs are visible but take no rank (rank 0 sentinel)
-      // unless the reader explicitly re-includes them. Non-headline rows
-      // (a losing judge panel or protocol arm) are never ranked — the
-      // backend serves them a NULL rank and the reader must not see the
-      // same model twice in the standings.
-      const unranked =
-        !isHeadlineResult(modelResult) ||
-        (!includeAssistedInRanking && isAssistedResult(modelResult.protocol_condition))
-      let rank = 0
-      if (!unranked) {
-        rankedCount += 1
-        if (previousScore === null || Math.abs(modelResult.score - previousScore) > 1e-9) {
-          currentRank = rankedCount
-          previousScore = modelResult.score
-        }
-        rank = currentRank
-      }
-
+      const rank = ranks[index]
       const judge = judgeConditionSummary(modelResult.judge_condition, judgeDisplayName)
 
       return {
@@ -1110,9 +1133,17 @@ export function EvalDetail({
     | "source"
     | "released"
     | "updated"
+    /** One protocol axis, keyed by its study key. */
+    | `protocol:${string}`
   const [userRowSort, setUserRowSort] = useState<{ key: RowSortKey; dir: "asc" | "desc" }>(
     { key: "default", dir: "desc" },
   )
+  const sortedProtocolColumn =
+    userRowSort.key.startsWith("protocol:")
+      ? protocolColumns.find(
+          (column) => column.key === userRowSort.key.slice("protocol:".length),
+        ) ?? null
+      : null
 
   const [openness, setOpenness] = useState<ModelOpenness[]>([...MODEL_OPENNESS_ORDER])
 
@@ -1137,16 +1168,58 @@ export function EvalDetail({
     return tally
   }, [leaderboardRows])
 
+  // Protocol filters narrow the same way the weights filter does: after
+  // ranking, before pagination, so a filtered page still reports each
+  // model's standing in the full field.
+  const visibleRows = useMemo(() => {
+    const active = protocolColumns
+      .map((column) => ({ column, ids: protocolFilters.get(column.key) ?? [] }))
+      .filter(({ ids }) => ids.length > 0)
+    if (active.length === 0) return opennessVisibleRows
+    return opennessVisibleRows.filter((row) =>
+      active.every(({ column, ids }) =>
+        ids.includes(protocolValueId(protocolReading(row.modelResult, column))),
+      ),
+    )
+  }, [opennessVisibleRows, protocolColumns, protocolFilters, protocolReading])
+
+  const protocolOptionsFor = useMemo(() => {
+    const cache = new Map<string, ReturnType<typeof protocolFilterOptions>>()
+    return (column: ProtocolColumn) => {
+      const cached = cache.get(column.key)
+      if (cached) return cached
+      const options = protocolFilterOptions(
+        leaderboardRows.map((row) => protocolReading(row.modelResult, column)),
+        column,
+      )
+      cache.set(column.key, options)
+      return options
+    }
+  }, [leaderboardRows, protocolReading])
+
   // A model and the judge / protocol readings sitting beneath it move
   // together. Sorting the flattened row list would immediately break that:
   // reversing it alone puts every secondary row ABOVE its own headline.
   const leaderboardGroups = useMemo(
-    () => groupByHeadlineModel(opennessVisibleRows, (row) => row.modelResult),
-    [opennessVisibleRows]
+    () => groupByHeadlineModel(visibleRows, (row) => row.modelResult),
+    [visibleRows]
   )
 
   const orderedLeaderboardRows = useMemo(() => {
-    if (userRowSort.key === "default") return opennessVisibleRows
+    if (userRowSort.key === "default") return visibleRows
+    // A protocol axis is the one sort that reads a row rather than a
+    // model: the readings that differ are exactly the extra runs sitting
+    // under a headline, so grouping them back under their model would
+    // leave the column unsorted. Ranks are already assigned, so ordering
+    // by budget renumbers nothing.
+    if (sortedProtocolColumn) {
+      const column = sortedProtocolColumn
+      const dir = userRowSort.dir
+      return visibleRows
+        .map((row, index) => ({ row: row.modelResult, index, source: row }))
+        .sort((a, b) => compareProtocolRows(a, b, column, dir, protocolReading))
+        .map(({ source }) => source)
+    }
     // `leaderboardGroups` is already "best first" — descending for
     // higher-is-better metrics, ascending for lower-is-better. Sorting
     // by score just toggles that order verbatim, group by group.
@@ -1219,7 +1292,14 @@ export function EvalDetail({
       if (cmp === 0) cmp = (ma.model_info.name ?? "").localeCompare(mb.model_info.name ?? "")
       return cmp * dirSign
     }).flat()
-  }, [leaderboardGroups, opennessVisibleRows, userRowSort, lb.metric_config.lower_is_better])
+  }, [
+    leaderboardGroups,
+    visibleRows,
+    userRowSort,
+    sortedProtocolColumn,
+    protocolReading,
+    lb.metric_config.lower_is_better,
+  ])
 
   const LEADERBOARD_PAGE_SIZE = 50
   const pagedLeaderboardRows = useMemo(
@@ -1227,11 +1307,29 @@ export function EvalDetail({
     [orderedLeaderboardRows, leaderboardPage]
   )
 
+  // A narrowed table starts at its own first page: keeping the reader on
+  // page 3 of a selection that may be one page long shows nothing.
+  const protocolFilterKey = useMemo(
+    () =>
+      Array.from(protocolFilters.entries())
+        .map(([axis, ids]) => `${axis}=${[...ids].sort().join(",")}`)
+        .sort()
+        .join("&"),
+    [protocolFilters],
+  )
+  useEffect(() => {
+    setLeaderboardPage(1)
+  }, [protocolFilterKey])
+
   // First click on a column picks a sensible initial direction (alpha
   // for text, "best/most-recent first" for numeric/date). Second click
   // flips. Third click returns to the page's natural order.
   const naturalDir = (key: Exclude<RowSortKey, "default">): "asc" | "desc" =>
-    key === "model" || key === "developer" || key === "evaluator" || key === "source"
+    key === "model" ||
+    key === "developer" ||
+    key === "evaluator" ||
+    key === "source" ||
+    key.startsWith("protocol:")
       ? "asc"
       : "desc"
 
@@ -1339,14 +1437,60 @@ export function EvalDetail({
   // per-row Source value is the *raw* source name (e.g. "crfm"), which can be
   // an alias of a de-aliased evaluator ("Stanford CRFM"); when it doesn't match
   // directly but the eval has exactly one evaluator, that row unambiguously
-  // belongs to it, so we link to the sole evaluator.
-  const soleEvaluator =
-    knownEvaluatorByLower.size === 1 ? Array.from(knownEvaluatorByLower.values())[0] : null
+  // belongs to it, so we link to the sole evaluator, but only once that
+  // sole value is itself an org with an evaluator page, or the fallback
+  // sends every row's Source cell to whatever single string the page
+  // happens to carry.
+  const isKnownEvaluator = useKnownEvaluator()
+  const soleEvaluator = (() => {
+    if (knownEvaluatorByLower.size !== 1) return null
+    const only = Array.from(knownEvaluatorByLower.values())[0]
+    if (!isKnownEvaluator(only)) return null
+    return only
+  })()
   const resolveEvaluatorName = (raw: string | undefined | null): string | null => {
     const t = (raw ?? "").trim()
     if (!t) return null
     return knownEvaluatorByLower.get(t.toLowerCase()) ?? soleEvaluator
   }
+
+  // The curated studies this page's results belong to. A per-source page
+  // has one, carried by its collection attachment; a merged page names
+  // the studies its visible rows come from without taking on the
+  // attachment, which is what gates the study-only panels.
+  const studyAttributions = useMemo<StudyRef[]>(() => {
+    if (summary.collection?.curated) {
+      return [
+        {
+          collection_id: summary.collection.collection_id,
+          name: summary.collection.display_name,
+          url: summary.collection.url,
+          // The study's listing is the composite it published under, the
+          // same key the merged page reads off its rows. `family_id` is
+          // the BENCHMARK's family (this page's benchmark, shared with
+          // every other source of it), which would send the reader to a
+          // listing the study is only one entry of.
+          family_key: summary.composite_slug ?? summary.composite_benchmark_key ?? undefined,
+        },
+      ]
+    }
+    return summary.study_refs ?? []
+  }, [summary.collection, summary.study_refs, summary.composite_slug, summary.composite_benchmark_key])
+
+  // The study name only links where the key is a family the listing can
+  // actually resolve: cleanHierarchy can nest or drop a composite, and
+  // `?family=` matches top-level keys exactly, so an unresolvable key
+  // would leave the reader on the full unfiltered list. The hierarchy
+  // arrives after first paint, so the name starts as text and becomes a
+  // link in place.
+  const topLevelFamilyKeys = useMemo(
+    () => new Set((evalHierarchy?.families ?? []).map((family) => family.key)),
+    [evalHierarchy]
+  )
+  const studyListingHref = (study: StudyRef): string | null =>
+    study.family_key && topLevelFamilyKeys.has(study.family_key)
+      ? familyEvalsHref(study.family_key)
+      : null
 
   const heroLede = isResearchView
     ? summary.metric_config.evaluation_description
@@ -1418,26 +1562,42 @@ export function EvalDetail({
             </>
           )}
         </div>
-        {/* Study attribution, curated collections only. */}
-        {summary.collection?.curated && (
+        {/* Study attribution, curated collections only. A study is what a
+            result is PART OF; the org that ran it is named above. */}
+        {studyAttributions.length > 0 && (
           <div className="-mt-3 mb-6 text-[13px]" style={{ color: "var(--fg-muted)" }}>
-            Part of{" "}
-            <span style={{ fontWeight: 600, color: "var(--fg)" }}>
-              {summary.collection.display_name}
-            </span>
-            {summary.collection.url && (
-              <>
-                {" · "}
-                <a
-                  href={summary.collection.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="underline underline-offset-2 hover:text-[color:var(--accent)]"
-                >
-                  paper ↗
-                </a>
-              </>
-            )}
+            {studyAttributions.map((study) => {
+              const listingHref = studyListingHref(study)
+              return (
+              <div key={study.collection_id}>
+                Part of{" "}
+                {listingHref ? (
+                  <Link
+                    href={listingHref}
+                    className="underline underline-offset-2 hover:text-[color:var(--accent)]"
+                    style={{ fontWeight: 600, color: "var(--fg)" }}
+                  >
+                    {study.name}
+                  </Link>
+                ) : (
+                  <span style={{ fontWeight: 600, color: "var(--fg)" }}>{study.name}</span>
+                )}
+                {study.url && (
+                  <>
+                    {" · "}
+                    <a
+                      href={study.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline underline-offset-2 hover:text-[color:var(--accent)]"
+                    >
+                      paper ↗
+                    </a>
+                  </>
+                )}
+              </div>
+              )
+            })}
           </div>
         )}
         {/* Summary view renders the description inside the "At a glance"
@@ -1826,6 +1986,34 @@ export function EvalDetail({
             />
           )}
 
+          {/* Protocol-axis filters. Narrow the standings by the setting a
+              run used; the selection rides the URL so the narrowed view
+              is a link. */}
+          {hasProtocolColumns && (
+            <div className="mb-4">
+              <ProtocolFilters
+                columns={protocolColumns}
+                optionsFor={protocolOptionsFor}
+                selected={protocolFilters}
+                activeCount={protocolFilterCount}
+                onToggle={toggleProtocolFilter}
+                onClear={clearProtocolFilters}
+              />
+              {summary.merged_view && studySourceHref && (
+                <p className="mt-2 text-[12px]" style={{ color: "var(--fg-muted)" }}>
+                  This page carries one headline protocol point per source and model.{" "}
+                  <Link
+                    href={studySourceHref}
+                    className="underline underline-offset-2 hover:text-[color:var(--accent)]"
+                    style={{ color: "var(--fg)" }}
+                  >
+                    View all protocol points
+                  </Link>
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Subtask split picker for evals like Global MMLU Lite where
               the splits live as subtasks of a single eval (not as
               separate eval IDs the page-level SplitPicker can swap to).
@@ -2104,24 +2292,15 @@ export function EvalDetail({
                             )}
                           </div>
                         )}
-                        {/* No room for a column per axis here, so the
-                            varying axes collapse to one line — the
-                            narrow table still has to distinguish two
-                            rows that carry the same model name. */}
-                        {protocolSummaryFor(modelResult) && (
-                          <div
-                            className="font-mono"
-                            style={{ fontSize: 10, color: "var(--fg-subtle)" }}
-                            title={protocolColumns
-                              .map(
-                                (column) =>
-                                  `${column.label}: ${formatProtocolValue(modelResult.protocol_condition, column) ?? "not set"}`,
-                              )
-                              .join("\n")}
-                          >
-                            {protocolSummaryFor(modelResult)}
-                          </div>
-                        )}
+                        {/* No room for a column per axis here, so each
+                            axis becomes a labelled item, because the
+                            table still has to distinguish two rows that
+                            carry the same model name, and an unlabelled
+                            "32k" does not say which budget it is. */}
+                        <ProtocolNarrowItems
+                          columns={protocolColumns}
+                          readingFor={(column) => protocolReading(modelResult, column)}
+                        />
                       </td>
                       <td
                         className="font-mono tabular-nums"
@@ -2178,16 +2357,32 @@ export function EvalDetail({
                       onClick={() => cycleRowSort("developer")}
                     />
                   </th>
-                  {protocolColumns.map((column) => (
-                    <th
-                      key={`protocol-head-${column.key}`}
-                      className="hidden lg:table-cell"
-                      style={{ width: 96 }}
-                      title={`Protocol axis "${column.key}"${column.unit ? ` (${column.unit})` : ""} — varies across this page's runs`}
-                    >
-                      {column.label}
-                    </th>
-                  ))}
+                  {protocolColumns.map((column) => {
+                    const sortKey: RowSortKey = `protocol:${column.key}`
+                    const active = userRowSort.key === sortKey
+                    return (
+                      <th
+                        key={`protocol-head-${column.key}`}
+                        className="hidden lg:table-cell"
+                        style={{ minWidth: 124 }}
+                        aria-sort={
+                          active
+                            ? userRowSort.dir === "asc"
+                              ? "ascending"
+                              : "descending"
+                            : "none"
+                        }
+                      >
+                        <ProtocolSortButton
+                          label={column.label}
+                          active={active}
+                          indicator={rowSortIndicator(sortKey)}
+                          onClick={() => cycleRowSort(sortKey)}
+                          title={protocolHeaderTitle(column, Boolean(summary.merged_view))}
+                        />
+                      </th>
+                    )
+                  })}
                   <th className="num" style={{ minWidth: 200 }}>
                     <SortableTh
                       label={lb.metric_config.unit ?? "Score"}
@@ -2408,23 +2603,18 @@ export function EvalDetail({
                           </div>
                         </td>
 
-                        {protocolColumns.map((column) => {
-                          const value = formatProtocolValue(modelResult.protocol_condition, column)
-                          return (
-                            <td
-                              key={`protocol-cell-${key}-${column.key}`}
-                              className="hidden lg:table-cell align-top font-mono"
-                              style={{
-                                fontSize: 11,
-                                color: value == null ? "var(--fg-subtle)" : "var(--fg-muted)",
-                                whiteSpace: "nowrap",
-                              }}
-                              title={value == null ? `${column.label}: not set for this run` : undefined}
-                            >
-                              {value ?? "—"}
-                            </td>
-                          )
-                        })}
+                        {protocolColumns.map((column) => (
+                          <td
+                            key={`protocol-cell-${key}-${column.key}`}
+                            className="hidden lg:table-cell align-top font-mono"
+                            style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                          >
+                            <ProtocolValueText
+                              reading={protocolReading(modelResult, column)}
+                              column={column}
+                            />
+                          </td>
+                        ))}
 
                         <td className="num align-top">
                           {/* Score with inline performance bar so the
@@ -2835,8 +3025,15 @@ function MultiMetricLeaderboard({
     }
     return m
   }, [summary.evaluator_names])
-  const soleEvaluator =
-    knownEvaluatorByLower.size === 1 ? Array.from(knownEvaluatorByLower.values())[0] : null
+  // The sole-evaluator fallback only holds when that sole value is itself
+  // an org with an evaluator page.
+  const isKnownEvaluator = useKnownEvaluator()
+  const soleEvaluator = (() => {
+    if (knownEvaluatorByLower.size !== 1) return null
+    const only = Array.from(knownEvaluatorByLower.values())[0]
+    if (!isKnownEvaluator(only)) return null
+    return only
+  })()
   const resolveEvaluatorName = (raw: string | undefined | null): string | null => {
     const t = (raw ?? "").trim()
     if (!t) return null

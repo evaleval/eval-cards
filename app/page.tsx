@@ -10,6 +10,7 @@ import {
   fetchCorpusAggregates,
   fetchEvalHierarchy,
 } from "@/lib/hf-data"
+import { familyEvalsHref } from "@/lib/utils"
 
 function formatGeneratedAt(value: string | null | undefined) {
   if (!value) return null
@@ -223,7 +224,7 @@ export default async function HomePage() {
               {featuredFamilies.map((fam) => (
                 <Link
                   key={fam.key}
-                  href={`/evals?family=${encodeURIComponent(fam.key)}`}
+                  href={familyEvalsHref(fam.key)}
                   className="fam-card"
                 >
                   <div className="mb-3 flex items-center justify-between">

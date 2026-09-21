@@ -24,7 +24,12 @@ import type {
   RowAnnotations,
   SignalSummaries,
 } from './backend-artifacts'
-import type { CollectionAttachment } from './collections'
+import type {
+  CollectionAttachment,
+  CollectionsSidecarEntry,
+  ProtocolAxesByCollection,
+  StudyRef,
+} from './collections'
 
 export type { BenchmarkCard }
 export type { ModelEvaluationSummary }
@@ -208,6 +213,33 @@ export function isHeadlineResult(result: {
   is_headline?: boolean | null
 }): boolean {
   return result.is_headline !== false
+}
+
+/**
+ * Score standings for rows already in score order: one rank per ranked
+ * row, ties sharing a rank, and 0 for every row the caller says takes no
+ * rank (an assisted run, a losing judge panel, a secondary protocol
+ * point). The standing is the model's position in the field, so it is
+ * assigned once here and never recomputed from a row's display position.
+ */
+export function scoreStandings<T>(
+  rows: T[],
+  score: (row: T) => number,
+  ranked: (row: T) => boolean,
+): number[] {
+  let currentRank = 0
+  let previousScore: number | null = null
+  let rankedCount = 0
+  return rows.map((row) => {
+    if (!ranked(row)) return 0
+    rankedCount += 1
+    const value = score(row)
+    if (previousScore === null || Math.abs(value - previousScore) > 1e-9) {
+      currentRank = rankedCount
+      previousScore = value
+    }
+    return currentRank
+  })
 }
 
 /** The identity a model's rows group under: the producer's route id when
@@ -482,6 +514,13 @@ export interface BenchmarkEvalSummary extends SignalSummaries {
    *  gates every collection surface off merged summaries. Per-source
    *  embeds carry it and render the study surfaces deliberately. */
   collection?: CollectionAttachment
+  /** Curated studies the visible rows come from. Attribution only, and
+   *  the one study surface a merged summary carries. */
+  study_refs?: StudyRef[]
+  /** Declared protocol axes keyed by collection id, for a page whose rows
+   *  span several collections. Descriptor lookup only: it gives a row's
+   *  numbers their unit and says which axes apply to which row. */
+  protocol_axes_by_collection?: ProtocolAxesByCollection
   /** Source ↔ merged switcher data for per-source pages.
    *  Absent when the page has neither a merged page nor sibling sources,
    *  and on old snapshots. */
@@ -632,6 +671,9 @@ export interface MergedObservationRow {
   scale_conversion: MergedScaleConversion | null
   evaluation_timestamp: string
   source_metadata: SourceMetadata
+  /** The row's own upstream dataset provenance (repo, url, version,
+   *  sample count). Absent when the fact row carries none. */
+  source_data?: SourceData
   generation_config?: GenerationConfig
   is_verified_evaluator?: boolean
   /** De-aliased evaluator identity (canonical display when resolvable). */
@@ -691,6 +733,11 @@ export interface MergedBenchmarkSummary {
   /** The benchmark's card, sourced from a per-source instantiation that
    *  authored one (preferring a source that reports the preferred metric). */
   benchmark_card?: BenchmarkCard | null
+  /** `collections.json` entries for the curated collections these rows
+   *  belong to, keyed by collection_id. Lets the reader name the study a
+   *  row comes from and give its protocol numbers their declared units
+   *  without a second fetch. */
+  collections?: Record<string, CollectionsSidecarEntry>
 }
 
 /**

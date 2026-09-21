@@ -20,6 +20,7 @@ import type {
   MergedObservationRow,
 } from "@/lib/eval-processing"
 import { isAssistedResult, isHeadlineResult } from "@/lib/eval-processing"
+import type { ProtocolAxesByCollection, StudyRef } from "@/lib/collections"
 import type { MetricConfig, SourceData } from "@/lib/benchmark-schema"
 
 export function isMergedBenchmarkSummary(payload: unknown): payload is MergedBenchmarkSummary {
@@ -73,6 +74,71 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
 
   const rows = convertedRows(merged)
 
+  // Reporting identity comes from the ROWS. A source's composite display
+  // name is the title of a leaderboard or a paper ("How Inference Compute
+  // Shapes Frontier LLM Evaluation"), never an organisation, and reading
+  // it as an evaluator both misattributes the work and links a title to
+  // an evaluator page that does not exist.
+  //
+  // Trim before falling back, or a whitespace-only de-aliased name hides
+  // a perfectly good source organisation.
+  const evaluatorOf = (row: MergedObservationRow): string =>
+    row.evaluator_display_name?.trim() ||
+    row.source_metadata?.source_organization_name?.trim() ||
+    ""
+  // Ordered by how much of the page each org reported, then by name. Row
+  // order alone is not deterministic (equal scores for one model have no
+  // source tie-break in the query), and the hero shows only the first two
+  // names, so the two it shows are the page's main reporters.
+  const orderedReporters = (pool: MergedObservationRow[]): string[] => {
+    const counts = new Map<string, number>()
+    for (const row of pool) {
+      const name = evaluatorOf(row)
+      if (!name) continue
+      counts.set(name, (counts.get(name) ?? 0) + 1)
+    }
+    return Array.from(counts.entries())
+      .sort(([nameA, countA], [nameB, countB]) => countB - countA || nameA.localeCompare(nameB))
+      .map(([name]) => name)
+  }
+  const evaluatorNames = orderedReporters(rows)
+  const verifiedEvaluatorNames = orderedReporters(
+    rows.filter((row) => row.is_verified_evaluator),
+  )
+
+  // Study attribution and axis descriptors, resolved per row from the
+  // collections sidecar the merged payload carries. Deliberately NOT the
+  // `collection` attachment: that one gates the Compute chip and the
+  // trajectory panels, which belong to a per-source study page.
+  const collectionIds = Array.from(
+    new Set(rows.map((row) => row.collection_id).filter((id): id is string => Boolean(id))),
+  )
+  const studyRefs: StudyRef[] = []
+  const protocolAxesByCollection: ProtocolAxesByCollection = {}
+  for (const id of collectionIds) {
+    const entry = merged.collections?.[id]
+    if (!entry?.curated) continue
+    if (entry.display_name) {
+      // The family the study's own rows on this page sit under. A merged
+      // page pools several sources, so only the rows belonging to THIS
+      // study are asked; when they disagree there is no single listing
+      // to send the reader to and the name stays plain text.
+      const families = new Set(
+        rows
+          .filter((row) => row.collection_id === id)
+          .map((row) => row.composite_slug)
+          .filter((slug): slug is string => Boolean(slug)),
+      )
+      studyRefs.push({
+        collection_id: id,
+        name: entry.display_name,
+        url: entry.url,
+        family_key: families.size === 1 ? [...families][0] : undefined,
+      })
+    }
+    if (entry.protocol_axes?.length) protocolAxesByCollection[id] = entry.protocol_axes
+  }
+
   // Infer canonical-scale bounds from the pooled canonical scores so
   // score bars / normalisation in EvalDetail behave: prefer the
   // conventional 0–1 and 0–100 scales when every score fits, else fall
@@ -98,10 +164,19 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
     ...bounds,
   }
 
-  const sourceData: SourceData = { dataset_name: merged.display_name }
+  // Each row keeps its own upstream provenance: the repo, url, version
+  // and sample count differ per source, and replacing them all with the
+  // benchmark's name throws away what the row actually came from. The
+  // benchmark name stands in only for a row that carries nothing.
+  const fallbackSourceData: SourceData = { dataset_name: merged.display_name }
+  const sourceDataOf = (row: MergedObservationRow): SourceData =>
+    row.source_data && Object.keys(row.source_data).length > 0
+      ? row.source_data
+      : fallbackSourceData
 
   const model_results = rows.map((row) => {
     const score = row.score_canonical as number
+    const sourceData = sourceDataOf(row)
     return {
       model_info: row.model_info,
       model_route_id: row.model_route_id,
@@ -139,7 +214,7 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
     model_route_id: row.model_route_id,
     evaluation_timestamp: row.evaluation_timestamp,
     source_metadata: row.source_metadata,
-    source_data: sourceData,
+    source_data: sourceDataOf(row),
     values: { [columnKey]: row.score_canonical as number },
     verified: row.is_verified_evaluator ? { [columnKey]: true } : undefined,
     metrics_present: 1,
@@ -180,9 +255,12 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
       )
       return shown.size > 0 ? shown.size : (selectedMetric?.models_count ?? merged.models_count)
     })(),
-    evaluator_names: Array.from(
-      new Set(merged.aggregate_sources.map((s) => s.composite_display_name).filter(Boolean)),
-    ),
+    evaluator_names: evaluatorNames,
+    verified_evaluator_names: verifiedEvaluatorNames,
+    ...(studyRefs.length > 0 ? { study_refs: studyRefs } : {}),
+    ...(Object.keys(protocolAxesByCollection).length > 0
+      ? { protocol_axes_by_collection: protocolAxesByCollection }
+      : {}),
     source_types: [],
     third_party_ratio: 0,
     missing_generation_config_count: 0,

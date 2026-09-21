@@ -177,3 +177,14 @@ export function formatDateISO(ts: string | null | undefined): string {
   if (Number.isNaN(parsed.getTime())) return "Unknown"
   return parsed.toISOString().slice(0, 10)
 }
+
+/**
+ * The Evaluations list scoped to one benchmark family, which is where the
+ * app has always sent a family link (the home page's family cards). The
+ * list resolves the key itself: a family with a single clean benchmark
+ * redirects to that benchmark's page, and one with several seeds the
+ * search box so the listing narrows to it.
+ */
+export function familyEvalsHref(familyKey: string): string {
+  return `/evals?family=${encodeURIComponent(familyKey)}`
+}

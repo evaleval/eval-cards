@@ -4,6 +4,7 @@
  */
 
 import type { EvalcardsAnnotations, RowAnnotations, SignalSummaries } from "@/lib/backend-artifacts"
+import type { CollectionsSidecarEntry } from "@/lib/collections"
 
 // TODO: standardize eval-id naming across the frontend. `eval_summary_id`
 // (raw warehouse evaluation_id) vs `evaluation_id` (always-present, sometimes
@@ -25,6 +26,10 @@ export interface BenchmarkEvaluation {
   canonical_display_name?: string
   derived_tags?: EvalTag[]
   family_id?: string
+  /** The composite (leaderboard or study) this result was published
+   *  under, e.g. "helm-classic". Distinct from `family_id`, which is the
+   *  BENCHMARK's family and is shared with every other source of it. */
+  composite_slug?: string
   benchmark_family_name?: string
   parent_benchmark_id?: string
   benchmark_parent_name?: string
@@ -44,6 +49,12 @@ export interface BenchmarkEvaluation {
   eval_library?: EvalLibrary
   model_info: ModelInfo
   generation_config?: GenerationConfig
+  /** The collection this result was reported under. Every result carries
+   *  one; only the curated ones name a study. */
+  collection_id?: string
+  /** The run's own protocol settings, raw JSON as the producer stored
+   *  them. Read through lib/collections, never parsed at a call site. */
+  protocol_condition?: string
   evaluation_results: EvaluationResult[]
   detailed_evaluation_results_per_samples?: SampleResult[]
   evalcards?: { annotations?: EvalcardsAnnotations }
@@ -282,6 +293,10 @@ export interface ModelSummaryCore extends SignalSummaries {
   lineage_origin_model_id?: string    // deepest non-variant ancestor (base model)
   resolution_source?: string          // enum: hf | models_dev | curated | inferred | none
   resolution_granularity?: string     // enum: variant | group | family
+  /** Curated sidecar entries for the collections this model's results
+   *  belong to, keyed by collection_id. Absent when none of them belongs
+   *  to a curated study. */
+  collections?: Record<string, CollectionsSidecarEntry>
 }
 
 export interface ModelVariantSummary extends ModelSummaryCore {

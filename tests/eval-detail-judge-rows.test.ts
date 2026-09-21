@@ -1,10 +1,12 @@
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { AudienceModeProvider } from "@/components/audience-mode-provider"
 import { EvalDetail } from "@/components/eval-detail"
 import type { BenchmarkEvalSummary, ModelResultForBenchmark } from "@/lib/eval-processing"
+
+vi.mock("next/navigation", () => import("./next-navigation-stub"))
 
 // The leaderboard ranks CLIENT-side, so a NULL backend rank is not enough
 // on its own: these render the real component and read the rows it emits.
