@@ -914,6 +914,24 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* Protocol-axis columns. A study that varied four axes adds four more
+     columns to a table that already has eight, so these wrap onto a
+     second line and sit in tighter gutters instead of pushing the whole
+     table into a horizontal scroll. `anywhere` lets a long unbroken
+     token give way too, so the table can always shrink to its box. */
+  .ec-htable th.ec-axis,
+  .ec-htable td.ec-axis {
+    padding-left: 10px;
+    padding-right: 10px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  /* A header is two or three words at most, so it breaks between them
+     and never mid-word — "COMPACTIO / N" reads as a truncation bug. */
+  .ec-htable th.ec-axis {
+    overflow-wrap: normal;
+  }
+
   /* Hairline data list (definition-style) */
   .ec-datalist {
     display: grid;
