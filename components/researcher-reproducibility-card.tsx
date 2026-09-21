@@ -1,11 +1,16 @@
 "use client"
 
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { AlertTriangle, ExternalLink, FlaskConical } from "lucide-react"
 import { Term } from "@/components/term"
 import { SignalTooltip } from "@/components/signals/signal-tooltip"
 import type { ModelResultForBenchmark } from "@/lib/eval-processing"
 import type { GenerationConfig, ScoreDetails } from "@/lib/benchmark-schema"
+import {
+  evaluateReproducibilitySlots,
+  evidenceFromResult,
+  SLOT_FIELD_PATHS,
+} from "@/lib/reproducibility-slots"
 
 interface ResearcherReproducibilityCardProps {
   modelResult: ModelResultForBenchmark
@@ -129,16 +134,24 @@ function formatValue(value: unknown): string | null {
   }
 }
 
+/** "protocol.reasoning_effort" -> "reasoning effort". The namespace is
+ *  plumbing; the reader wants the field. */
+function fieldNameOf(path: string): string {
+  return path.slice(path.lastIndexOf(".") + 1).replace(/_/g, " ")
+}
+
 function ParamRow({
   label,
   value,
   termKey,
   hint,
+  notApplicable,
 }: {
   label: string
   value: ReactNode | null
   termKey?: string
   hint?: string
+  notApplicable?: boolean
 }) {
   const isMissing = value === null || value === undefined
   return (
@@ -146,7 +159,13 @@ function ParamRow({
       <span className="text-muted-foreground">
         {termKey ? <Term term={termKey}>{label}</Term> : label}
       </span>
-      {isMissing ? (
+      {isMissing && notApplicable ? (
+        <SignalTooltip content="This run has no such control — hosted reasoning APIs reject sampling parameters — so it is not counted against the source.">
+          <span className="text-xs font-medium cursor-help" style={{ color: "var(--fg-subtle)" }}>
+            n/a
+          </span>
+        </SignalTooltip>
+      ) : isMissing ? (
         <SignalTooltip
           content={
             hint ??
@@ -169,6 +188,9 @@ interface FieldSpec {
   value: string | null
   termKey?: string
   hint?: string
+  /** The slot this field belongs to does not apply to this run, so its
+   *  absence is not a disclosure failure. */
+  notApplicable?: boolean
 }
 
 interface FieldGroup {
@@ -383,33 +405,47 @@ export function ResearcherReproducibilityCard({
   //
   // TODO(repro-allowlist): expand both views together once the corpus
   // populates more fields reliably.
-  const requiredFieldLabels = new Set<string>(["temperature", "max tokens"])
-  if (hasAgentSetup) {
-    requiredFieldLabels.add("eval plan")
-    requiredFieldLabels.add("eval limits")
-  }
-  const filteredGroups: FieldGroup[] = groups
-    .map((g) => ({
-      ...g,
-      fields: g.fields.filter((f) => requiredFieldLabels.has(f.label)),
-    }))
-    .filter((g) => g.fields.length > 0)
-
-  const totalFields = filteredGroups.reduce((n, g) => n + g.fields.length, 0)
-  const disclosedFields = filteredGroups.reduce(
-    (n, g) => n + g.fields.filter((f) => f.value !== null).length,
-    0
+  // Scored as SLOTS — one per decision a re-runner must pin down, each
+  // satisfiable by any of several fields, and each skipped when the knob
+  // does not exist for this run. The old rule asked every row for
+  // `temperature` and `max_tokens` and nothing else, which read ~0%
+  // across 98% of the corpus and gave a study disclosing scaffold, token
+  // budget and reasoning effort a flat 0/2. The slot table lives in
+  // config/reproducibility-slots.json and is meant to be edited there.
+  const slotSummary = useMemo(
+    () =>
+      evaluateReproducibilitySlots(
+        evidenceFromResult({
+          ...modelResult,
+          generation_config: gen ?? modelResult.result.generation_config,
+          protocol_condition: modelResult.protocol_condition,
+        })
+      ),
+    [modelResult, gen]
   )
-  const disclosureRatio = totalFields > 0 ? disclosedFields / totalFields : 0
-  const disclosedGroups = filteredGroups
-    .map((g) => ({ ...g, fields: g.fields.filter((f) => f.value !== null) }))
-    .filter((g) => g.fields.length > 0)
 
-  // If fewer than ~30% of fields are disclosed (and at least one is missing),
-  // start in compact mode so the card isn't a wall of "Not disclosed".
-  const shouldStartCompact = disclosureRatio < 0.3 && disclosedFields < totalFields
-  const [showAll, setShowAll] = useState(!shouldStartCompact)
-  const isCompact = shouldStartCompact && !showAll
+  // The audit grid still lists every field the source could have set; the
+  // slots decide what is SCORED.
+  const totalFields = slotSummary.applicable
+  const disclosedFields = slotSummary.disclosed
+
+  // Fields the source reported that no slot scores — standard error, test
+  // instances, judge, and so on. Worth showing; never worth flagging as
+  // missing, so only populated ones appear.
+  const otherReportedFields = useMemo(() => {
+    const scoredLabels = new Set(
+      slotSummary.slots
+        .flatMap((slot) => slot.candidates ?? [])
+        .map((path) => path.slice(path.lastIndexOf(".") + 1).replace(/[^a-z0-9]/gi, "").toLowerCase()),
+    )
+    return groups
+      .flatMap((g) => g.fields)
+      .filter(
+        (f) =>
+          f.value !== null &&
+          !scoredLabels.has(f.label.replace(/[^a-z0-9]/gi, "").toLowerCase()),
+      )
+  }, [groups, slotSummary])
 
   return (
     <section
@@ -430,11 +466,9 @@ export function ResearcherReproducibilityCard({
               Reproducibility
             </div>
             <div className="text-[12px]" style={{ color: "var(--fg-muted)" }}>
-              {isCompact
-                ? disclosedFields === 0
-                  ? "How this score was produced wasn't disclosed by the source."
-                  : "Most reproducibility fields aren't documented by the source."
-                : "Everything someone would need to re-run this evaluation. Missing fields are flagged."}
+              {disclosedFields === 0
+                ? "How this score was produced wasn't disclosed by the source."
+                : "What the source reported, against what re-running this evaluation needs. Controls this run does not have are marked n/a and left out of the score."}
             </div>
           </div>
         </div>
@@ -450,54 +484,120 @@ export function ResearcherReproducibilityCard({
             textTransform: "uppercase",
           }}
         >
-          {loading ? "loading…" : `${disclosedFields}/${totalFields} disclosed`}
+          {loading
+            ? "loading…"
+            : totalFields > 0
+              ? `${disclosedFields}/${totalFields} applicable`
+              : "nothing scorable"}
         </span>
       </header>
 
-      {isCompact ? (
-        disclosedGroups.length > 0 ? (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {disclosedGroups.map((g) => (
-              <div key={g.title}>
-                <div
-                  className="mb-2 font-mono uppercase"
-                  style={{ fontSize: 10, letterSpacing: "0.14em", color: "var(--fg-subtle)" }}
+      {/* The slots, and why each one counts or doesn't. A bare percentage
+          with a moving denominator is unreadable; showing the slots is
+          what makes "3 of 4" mean something. */}
+      <div className="mb-4 flex flex-wrap gap-1.5">
+        {slotSummary.slots.map((slot) => {
+          const style =
+            slot.state === "disclosed"
+              ? { color: "var(--fg)", border: "1px solid var(--fg-muted)" }
+              : slot.state === "missing"
+                ? { color: "var(--fg-muted)", border: "1px dashed var(--fg-muted)" }
+                : { color: "var(--fg-subtle)", border: "1px solid var(--border-soft)" }
+          const mark =
+            slot.state === "disclosed"
+              ? "✓"
+              : slot.state === "missing"
+                ? "—"
+                : slot.state === "not_applicable"
+                  ? "n/a"
+                  : "?"
+          return (
+            <span
+              key={slot.id}
+              className="inline-flex items-center gap-1.5 font-mono uppercase"
+              style={{ fontSize: 9.5, letterSpacing: "0.08em", padding: "2px 6px", ...style }}
+              title={
+                slot.state === "disclosed"
+                  ? `${slot.label}: disclosed via ${slot.satisfiedBy}`
+                  : slot.state === "missing"
+                    ? `${slot.label}: applies to this run but the source did not disclose it.${slot.hint ? ` ${slot.hint}` : ""}`
+                    : `${slot.label}: not counted. ${slot.reason ?? ""}`
+              }
+            >
+              <span aria-hidden="true">{mark}</span>
+              {slot.label}
+            </span>
+          )
+        })}
+      </div>
+
+      {/* What the source actually reported, per slot. The old fixed grid
+          listed every field the schema knows about and flagged the rest
+          "Not disclosed" — under a dynamic rule that grid says nothing
+          about what was scored, and contradicts the chips above whenever a
+          slot is n/a. This lists the evidence instead. */}
+      <div>
+        {slotSummary.slots.map((slot) => (
+          <div
+            key={slot.id}
+            className="flex items-baseline justify-between gap-3 border-b border-dashed border-border/50 py-1.5 text-sm last:border-0"
+          >
+            <span className="min-w-0">
+              <span style={{ color: "var(--fg)" }}>{slot.label}</span>
+              {slot.state === "disclosed" && slot.satisfiedBy && (
+                <span className="ml-2 font-mono" style={{ fontSize: 11, color: "var(--fg-subtle)" }}>
+                  {fieldNameOf(slot.satisfiedBy)}
+                </span>
+              )}
+              {slot.state === "missing" && slot.candidates && slot.candidates.length > 0 && (
+                <span className="ml-2" style={{ fontSize: 11, color: "var(--fg-subtle)" }}>
+                  looked for {slot.candidates.map(fieldNameOf).join(", ")}
+                </span>
+              )}
+            </span>
+            {slot.state === "disclosed" ? (
+              <span className="font-medium tabular-nums shrink-0">
+                {formatValue(slot.value) ?? "reported"}
+              </span>
+            ) : slot.state === "missing" ? (
+              <SignalTooltip
+                content={
+                  slot.hint ??
+                  "This applies to the run but the source did not report it, so the result may not be exactly reproducible."
+                }
+              >
+                <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 dark:text-amber-300 cursor-help shrink-0">
+                  <AlertTriangle className="h-3 w-3" /> Not disclosed
+                </span>
+              </SignalTooltip>
+            ) : (
+              <SignalTooltip content={slot.reason ?? "Not counted for this run."}>
+                <span
+                  className="text-xs font-medium cursor-help shrink-0"
+                  style={{ color: "var(--fg-subtle)" }}
                 >
-                  {g.title}
-                </div>
-                {g.fields.map((f) => (
-                  <ParamRow key={f.label} label={f.label} termKey={f.termKey} value={f.value} hint={f.hint} />
-                ))}
-              </div>
+                  {slot.state === "not_applicable" ? "n/a" : "unknown"}
+                </span>
+              </SignalTooltip>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {otherReportedFields.length > 0 && (
+        <div className="mt-4">
+          <div
+            className="mb-2 font-mono uppercase"
+            style={{ fontSize: 10, letterSpacing: "0.14em", color: "var(--fg-subtle)" }}
+          >
+            Also reported
+          </div>
+          <div className="grid gap-x-6 sm:grid-cols-2 lg:grid-cols-3">
+            {otherReportedFields.map((f) => (
+              <ParamRow key={f.label} label={f.label} termKey={f.termKey} value={f.value} hint={f.hint} />
             ))}
           </div>
-        ) : null
-      ) : (
-        <div className="grid gap-4 lg:grid-cols-3">
-          {filteredGroups.map((g) => (
-            <div key={g.title}>
-              <div className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                {g.title}
-              </div>
-              {g.fields.map((f) => (
-                <ParamRow key={f.label} label={f.label} termKey={f.termKey} value={f.value} hint={f.hint} />
-              ))}
-            </div>
-          ))}
         </div>
-      )}
-
-      {shouldStartCompact && (
-        <button
-          type="button"
-          onClick={() => setShowAll((v) => !v)}
-          className="mt-3 inline-flex items-center font-mono uppercase underline-offset-4 hover:underline"
-          style={{ fontSize: 10, letterSpacing: "0.12em", color: "var(--accent)" }}
-        >
-          {showAll
-            ? "Hide undisclosed fields"
-            : `Show all ${totalFields} checked fields`}
-        </button>
       )}
 
       {/* Prompt-template block hidden until the corpus reliably reports

@@ -10,6 +10,10 @@ import type {
   EvalHierarchy,
 } from "@/lib/backend-artifacts"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
+import {
+  evaluateReproducibilitySlots,
+  evidenceFromResult,
+} from "@/lib/reproducibility-slots"
 import type { ModelResultForBenchmark } from "@/lib/eval-processing"
 import { isHeadlineResult } from "@/lib/eval-processing"
 
@@ -210,10 +214,6 @@ function getGenerationArgs(result: ModelResultForBenchmark): Record<string, unkn
 
 function deriveReproducibility(summary: BenchmarkEvalSummary): DerivedSignal {
   const triples = headlineResults(summary)
-  const agentic = isAgenticBenchmark(summary)
-  const required: string[] = agentic
-    ? [...BASE_REQUIRED_FIELDS, ...AGENTIC_REQUIRED_FIELDS]
-    : [...BASE_REQUIRED_FIELDS]
 
   if (triples.length === 0) {
     return {
@@ -222,70 +222,85 @@ function deriveReproducibility(summary: BenchmarkEvalSummary): DerivedSignal {
       headline: "Reproducibility doesn't apply (no reported scores).",
       detail: "",
       breakdown: {
-        formula: "Reproducibility = (results with all required setup fields) / (total results).",
+        formula: "Reproducibility = (setup questions answered) / (setup questions that apply).",
         inputs: [{ label: "Reported results", value: "0" }],
         empty: "No model results have been reported for this benchmark yet.",
       },
     }
   }
 
-  const fieldMissing = new Map<string, number>(required.map((f) => [f, 0]))
-  let triplesWithoutGap = 0
+  // Scored per SLOT, the same engine and the same data file the per-row panel
+  // uses (config/reproducibility-slots.json). The old rule demanded
+  // `temperature` and `max_tokens` of every result: temperature appears on
+  // 1.9% of the corpus and max_tokens on 1.4%, so this read ~0% almost
+  // everywhere — and it read 0% loudest on the studies that document the
+  // most, because they record their setup as a protocol condition rather than
+  // as decoding args, and because a quarter of the corpus is scored from
+  // log-probabilities where neither field exists at all.
+  const perSlot = new Map<string, { disclosed: number; applicable: number; label: string }>()
+  let disclosedTotal = 0
+  let applicableTotal = 0
+  let fullyDocumented = 0
 
   for (const triple of triples) {
-    const args = getGenerationArgs(triple) ?? {}
-    let allPresent = true
-    for (const f of required) {
-      if (!isPopulated(args[f])) {
-        fieldMissing.set(f, (fieldMissing.get(f) ?? 0) + 1)
-        allPresent = false
-      }
+    const summaryForRow = evaluateReproducibilitySlots(evidenceFromResult(triple))
+    if (summaryForRow.applicable > 0 && summaryForRow.disclosed === summaryForRow.applicable) {
+      fullyDocumented += 1
     }
-    if (allPresent) triplesWithoutGap++
+    disclosedTotal += summaryForRow.disclosed
+    applicableTotal += summaryForRow.applicable
+    for (const slot of summaryForRow.slots) {
+      if (slot.state !== "disclosed" && slot.state !== "missing") continue
+      const entry = perSlot.get(slot.id) ?? { disclosed: 0, applicable: 0, label: slot.label }
+      entry.applicable += 1
+      if (slot.state === "disclosed") entry.disclosed += 1
+      perSlot.set(slot.id, entry)
+    }
   }
 
   const total = triples.length
-  const score = triplesWithoutGap / total
+  const score = applicableTotal > 0 ? disclosedTotal / applicableTotal : 0
 
-  const topMissing = Array.from(fieldMissing.entries())
-    .filter(([, n]) => n > 0)
-    .sort((a, b) => b[1] - a[1])
+  const worst = [...perSlot.entries()]
+    .filter(([, v]) => v.applicable - v.disclosed > 0)
+    .sort((a, b) => b[1].applicable - b[1].disclosed - (a[1].applicable - a[1].disclosed))
     .slice(0, 2)
-    .map(([f, n]) => `${FIELD_LABELS[f] ?? f} (${formatPct(n / total)})`)
+    .map(([, v]) => `${v.label} (${formatPct((v.applicable - v.disclosed) / v.applicable)})`)
     .join(", ")
 
   const headline =
-    score === 1
-      ? "Every reported score has a complete generation config."
-      : score === 0
-      ? "No reported score has all required setup fields."
-      : `${triplesWithoutGap} of ${total} triples document the full setup.`
+    applicableTotal === 0
+      ? "Nothing about this run's setup is scorable."
+      : score === 1
+        ? "Every setup question that applies to these runs is answered."
+        : score === 0
+          ? "How these scores were produced wasn't disclosed by the source."
+          : `${disclosedTotal} of ${applicableTotal} applicable setup questions are answered.`
 
-  const detail = topMissing
-    ? `Most often missing: ${topMissing}.`
-    : `Required: ${required.map((f) => FIELD_LABELS[f] ?? f).join(", ")}.`
+  const detail = worst
+    ? `Most often missing: ${worst}.`
+    : `${fullyDocumented} of ${total} results document everything that applies to them.`
 
-  const rows: BreakdownRow[] = required.map((field) => {
-    const missing = fieldMissing.get(field) ?? 0
-    const present = total - missing
+  const rows: BreakdownRow[] = [...perSlot.entries()].map(([, v]) => {
+    const missing = v.applicable - v.disclosed
     if (missing === 0) {
       return {
-        label: FIELD_LABELS[field] ?? field,
-        status: "ok",
-        detail: `Reported on every result (${present}/${total}).`,
+        label: v.label,
+        status: "ok" as const,
+        detail: `Reported wherever it applies (${v.disclosed}/${v.applicable}).`,
       }
     }
-    if (present === 0) {
+    if (v.disclosed === 0) {
       return {
-        label: FIELD_LABELS[field] ?? field,
-        status: "missing",
-        detail: `Not reported on any result (0/${total}).`,
+        label: v.label,
+        status: "missing" as const,
+        detail: `Applies to ${v.applicable} result${v.applicable === 1 ? "" : "s"}, reported on none.`,
       }
     }
     return {
-      label: FIELD_LABELS[field] ?? field,
-      status: "warn",
-      detail: `Reported on ${present} of ${total} results.`,
+      label: v.label,
+      status: "warn" as const,
+      detail: `Reported on ${v.disclosed} of ${v.applicable} results it applies to.`,
     }
   })
 
@@ -296,14 +311,14 @@ function deriveReproducibility(summary: BenchmarkEvalSummary): DerivedSignal {
     detail,
     breakdown: {
       formula:
-        "Reproducibility = (results that record every required setup field) / (total reported results).",
+        "Reproducibility = (setup questions answered) / (setup questions that apply). " +
+        "A control this run does not have — sampling on a log-prob score, temperature on a " +
+        "hosted reasoning model — is not counted against it.",
       inputs: [
         { label: "Reported results", value: total.toString() },
-        { label: "Fully documented", value: triplesWithoutGap.toString() },
-        {
-          label: "Required fields",
-          value: required.map((f) => FIELD_LABELS[f] ?? f).join(", "),
-        },
+        { label: "Questions answered", value: disclosedTotal.toString() },
+        { label: "Questions applicable", value: applicableTotal.toString() },
+        { label: "Fully documented results", value: fullyDocumented.toString() },
       ],
       rows,
     },

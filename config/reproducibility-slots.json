@@ -1,0 +1,309 @@
+{
+  "version": 1,
+  "_readme": [
+    "Reproducibility is scored as SLOTS, not as a fixed list of field names.",
+    "A slot is one decision somebody re-running this evaluation has to be able to",
+    "pin down. Any one of its `satisfied_by` paths satisfies it, so a study that",
+    "discloses `token_limit` is credited the same as one disclosing `max_tokens`.",
+    "",
+    "Paths under generation_config.additional_details are where most sources actually put their setup \u2014 temperature_raw, effort, repeats, eval_split, lm_eval_task and so on. Check there first when a source looks undocumented.",
+    "",
+    "Harness is deliberately TWO slots: `harness` (which one) and `harness_pin` (which version/task config of it). Collapsing them would let a library name alone \u2014 present on 99% of rows \u2014 stand for reproducibility.",
+    "",
+    "EDITING THIS FILE",
+    "  - Add a field to a slot: append its path to `satisfied_by`. No code change.",
+    "  - Add a slot: append an object with id/label/hint/satisfied_by/applies.",
+    "  - Retire a slot: delete it, or set `applies` to \"never\".",
+    "  Paths resolve against the normalised evidence object built by",
+    "  lib/reproducibility-slots.ts (see EVIDENCE_SHAPE there). Unknown paths are",
+    "  ignored rather than throwing, so a typo costs you credit, not a crash.",
+    "",
+    "APPLICABILITY",
+    "  `applies` names a rule implemented in lib/reproducibility-slots.ts:",
+    "    always              - every run must disclose this",
+    "    reasoning_run       - only when the run used a reasoning/thinking budget",
+    "    sampling_controlled - only when sampling knobs exist for this run. Reasoning",
+    "                          runs on hosted APIs reject temperature, so demanding it",
+    "                          there scores a model down for a knob it does not have.",
+    "    agentic_run         - only when the run used a tool-using scaffold",
+    "    never               - retired; keeps the slot visible in this file as history",
+    "  A slot that does not apply is shown as `n/a` and LEAVES THE DENOMINATOR.",
+    "  A slot whose applicability cannot be determined is shown as `unknown` and",
+    "  also leaves the denominator: absence of a knob must never read as absence",
+    "  of rigour.",
+    "",
+    "Score = disclosed / applicable. Surfaces should show both numbers, because a",
+    "variable denominator makes a bare percentage hard to compare across pages.",
+    "",
+    "DEFINED BUT NOT SCORED: `prompt_format` and `model_build` (applies=\"never\").",
+    "Both genuinely change a score \u2014 few-shot count, chat template, dtype and",
+    "revision all move numbers, on generative runs as much as on log-prob ones.",
+    "They are off because almost nothing in the corpus reports them, so switching",
+    "them on marks nearly every page down at once. Flip `applies` to \"always\" when",
+    "you want that; the swissai_apertus_evals records are the template for what a",
+    "source that does report them looks like (output_type, lm_eval_task,",
+    "num_fewshot, fewshot_as_multiturn, chat_template_sha, prompt_template).",
+    "",
+    "OPEN QUESTION: `scoring_variant` is asked only of log-prob runs, where raw vs",
+    "length-normalised accuracy is the classic ambiguity. The fields above are NOT",
+    "asked of either mode yet. Asking them of log-prob runs only would hold the two",
+    "modes to different standards for fields that affect both \u2014 which is why they",
+    "are off for everyone rather than on for one.",
+    "",
+    "NOT SCORED (on purpose): `standard_error`, `confidence_interval` and the",
+    "other uncertainty statistics. They tell a reader how much to trust the",
+    "number, which matters \u2014 but they are not inputs somebody needs in order to",
+    "re-run the evaluation, and reproducibility is about re-running it. They",
+    "surface under \"Also reported\".",
+    "",
+    "NOT SCORED (on purpose): `prompt_template` and `num_few_shot` are reported",
+    "by some sources and show up under \"Also reported\" in the per-row panel. They",
+    "are a real reproducibility input, but only 414 of 83,842 rows carry a prompt",
+    "template, so scoring them today would mark almost every page down for one",
+    "field. Add a `prompting` slot here when the corpus supports it.",
+    "",
+    "SCOPE NOTE: `attempts` is currently scored only for agentic runs. Repeat",
+    "count arguably matters for every evaluation; widening it to \"always\" is a",
+    "one-word edit here, but it adds a slot almost nothing in the corpus",
+    "discloses, so every page's score would drop. Decide that deliberately."
+  ],
+  "slots": [
+    {
+      "id": "decoding",
+      "label": "Decoding",
+      "hint": "Sampling controls a re-runner has to match. Absent by nature on log-prob scoring (nothing is sampled) and on hosted reasoning APIs (they reject them).",
+      "applies": "sampling_controlled",
+      "satisfied_by": [
+        "generation_args.temperature",
+        "generation_args.top_p",
+        "generation_args.top_k",
+        "protocol.temperature",
+        "protocol.top_p",
+        "generation_config.additional_details.temperature_raw",
+        "generation_config.additional_details.temperature"
+      ]
+    },
+    {
+      "id": "reasoning_budget",
+      "label": "Reasoning budget",
+      "hint": "How much thinking the model was allowed before answering.",
+      "applies": "reasoning_run",
+      "satisfied_by": [
+        "protocol.reasoning_effort",
+        "protocol.reasoning_tokens",
+        "generation_args.reasoning",
+        "generation_config.additional_details.effort",
+        "generation_config.additional_details.reasoning_effort"
+      ]
+    },
+    {
+      "id": "length",
+      "label": "Length limit",
+      "hint": "Where generation was cut off \u2014 tokens, messages or steps. A log-prob run generates nothing, so it has no length limit to state.",
+      "applies": "generative_run",
+      "satisfied_by": [
+        "generation_args.max_tokens",
+        "protocol.token_limit",
+        "limits.token_limit",
+        "limits.max_tokens",
+        "limits.message_limit",
+        "limits.max_messages"
+      ]
+    },
+    {
+      "id": "harness",
+      "label": "Harness",
+      "hint": "WHICH scaffold, agent or eval library produced the run \u2014 named, so somebody can obtain it. A property of the harness is not its identity: `compaction: off` says nothing about what you would have to install.",
+      "applies": "always",
+      "satisfied_by": [
+        "protocol.scaffold",
+        "row.eval_library",
+        "row.eval_library_version",
+        "agent.eval_plan",
+        "agent.agentic_eval_config",
+        "generation_config.additional_details.lm_eval_task",
+        "generation_config.additional_details.harness",
+        "generation_config.additional_details.framework"
+      ]
+    },
+    {
+      "id": "harness_pin",
+      "label": "Harness version",
+      "hint": "Which version or task config of that harness. `eval_library` is populated on 99% of rows, so naming the library alone would hand almost every page a free slot \u2014 but \"lm-evaluation-harness\" without a version or task id is not something you can re-run.",
+      "applies": "always",
+      "satisfied_by": [
+        "row.eval_library_version",
+        "generation_config.additional_details.eval_library_version",
+        "generation_config.additional_details.harness_version",
+        "generation_config.additional_details.lm_eval_task",
+        "generation_config.additional_details.model_sha",
+        "generation_config.additional_details.revision",
+        "protocol.harness_version"
+      ]
+    },
+    {
+      "id": "context_handling",
+      "label": "Context handling",
+      "hint": "What happened when the transcript outgrew the window \u2014 compaction, truncation, or nothing.",
+      "applies": "agentic_run",
+      "satisfied_by": [
+        "protocol.compaction",
+        "protocol.context_management",
+        "limits.compaction",
+        "limits.truncation"
+      ]
+    },
+    {
+      "id": "test_set",
+      "label": "Test set",
+      "hint": "How many items the score covers, and which split \u2014 a score over 7 tasks and one over 86 are not the same measurement.",
+      "applies": "always",
+      "satisfied_by": [
+        "score.sample_size",
+        "protocol.n_tasks",
+        "protocol.split",
+        "row.split",
+        "row.n_tasks",
+        "generation_config.additional_details.eval_split",
+        "generation_config.additional_details.subset",
+        "generation_config.additional_details.n_samples"
+      ]
+    },
+    {
+      "id": "attempts",
+      "label": "Attempts",
+      "hint": "How many times the evaluation was run \u2014 repeated trajectories, epochs or samples the reported score pools over. Not the number of tasks.",
+      "applies": "agentic_run",
+      "satisfied_by": [
+        "protocol.attempts",
+        "protocol.epochs",
+        "protocol.n_trajectories",
+        "protocol.num_runs",
+        "protocol.samples",
+        "row.attempts",
+        "row.num_runs",
+        "limits.attempts",
+        "limits.epochs",
+        "generation_config.num_runs",
+        "generation_config.additional_details.repeats",
+        "generation_config.additional_details.max_attempts",
+        "generation_config.additional_details.num_runs"
+      ]
+    },
+    {
+      "id": "scoring_variant",
+      "label": "Scoring variant",
+      "hint": "Raw vs length-normalised accuracy. On the same log-prob run the two differ by a median of 3.3 points, so the number is ambiguous without it.",
+      "applies": "log_prob_run",
+      "satisfied_by": [
+        "row.metric_id",
+        "generation_config.additional_details.acc_norm",
+        "protocol.scoring_variant"
+      ]
+    },
+    {
+      "id": "prompt_format",
+      "label": "Prompt format",
+      "hint": "The prompt and answer-choice templates (doc_to_text / doc_to_choice), few-shot count, and whether a chat template was applied. Chat template alone moves MMLU-Pro by up to 3.6 points.",
+      "applies": "never",
+      "satisfied_by": [
+        "generation_config.prompt_template",
+        "generation_config.num_few_shot",
+        "generation_config.additional_details.num_fewshot",
+        "generation_config.additional_details.fewshot_as_multiturn",
+        "generation_config.additional_details.chat_template_sha",
+        "generation_config.additional_details.doc_to_text",
+        "generation_config.additional_details.prompt_style"
+      ]
+    },
+    {
+      "id": "model_build",
+      "label": "Model build",
+      "hint": "Which weights exactly \u2014 revision/commit and numeric precision. Two runs of 'the same model' at different dtype are not the same run.",
+      "applies": "never",
+      "satisfied_by": [
+        "generation_config.additional_details.model_sha",
+        "generation_config.additional_details.model_dtype",
+        "model.revision",
+        "model.precision"
+      ]
+    }
+  ],
+  "applicability": {
+    "_readme": [
+      "Evidence used by the named rules above.",
+      "",
+      "SCORING MODE is the first question, because it decides which knobs exist at",
+      "all. About 25% of the corpus (~19k of 78k triples) is scored from",
+      "LOG-PROBABILITIES rather than generated text: the harness scores the model's",
+      "likelihood over fixed answer choices and nothing is sampled. Those runs have",
+      "no temperature and no max_tokens, so the old rule could never pass them and",
+      "counted every one as a gap.",
+      "",
+      "Detect it from `output_type` (multiple_choice / loglikelihood /",
+      "loglikelihood_rolling are log-prob; generate_until is generative), or from a",
+      "reward model's `model_type`. NEVER infer it from the benchmark name \u2014 helm_*",
+      "does multiple choice by generating the answer letter, which is generative.",
+      "",
+      "Where it lives today: swissai_apertus_evals puts output_type in",
+      "generation_config.additional_details; reward-bench puts model_type in",
+      "model_info.additional_details. HF Open LLM v2 (~19k rows) does NOT carry it in",
+      "the EEE record at all \u2014 it is only in the harness dumps",
+      "(open-llm-leaderboard/results, configs[<task>].output_type), so those rows",
+      "resolve to UNKNOWN mode and their sampling/length slots drop out of the",
+      "denominator rather than counting against them. Ingesting output_type in the",
+      "producer is the durable fix.",
+      "",
+      "`reasoning_markers` decide whether a run was a reasoning run; when none are",
+      "present the run's type is UNKNOWN, not 'not reasoning' \u2014 the registry carries",
+      "no reasoning flag today (checked 2026-09-21: canonical_models.tags/metadata",
+      "hold HF pipeline tags, licences and download counts only). Adding",
+      "`supports_temperature` upstream in evaleval/entity-registry-data would let",
+      "this be decided from the model rather than inferred per row."
+    ],
+    "reasoning_markers": [
+      "protocol.reasoning_effort",
+      "protocol.reasoning_tokens",
+      "generation_args.reasoning"
+    ],
+    "agentic_markers": [
+      "protocol.scaffold",
+      "protocol.compaction",
+      "agent.eval_plan",
+      "agent.agentic_eval_config",
+      "limits.message_limit",
+      "limits.max_messages"
+    ],
+    "open_weights_implies_sampling_controlled": false,
+    "scoring_mode": {
+      "output_type_paths": [
+        "generation_config.additional_details.output_type",
+        "row.output_type",
+        "protocol.output_type"
+      ],
+      "log_prob_output_types": [
+        "multiple_choice",
+        "loglikelihood",
+        "loglikelihood_rolling"
+      ],
+      "generative_output_types": [
+        "generate_until",
+        "generate",
+        "generation"
+      ],
+      "model_type_paths": [
+        "model.additional_details.model_type",
+        "row.model_type"
+      ],
+      "log_prob_model_types": [
+        "Seq. Classifier",
+        "Custom Classifier",
+        "DPO"
+      ],
+      "generative_model_types": [
+        "Generative",
+        "Generative RM"
+      ]
+    }
+  }
+}

@@ -120,7 +120,12 @@ describe("BenchmarkSignalsStrip — headline-only aggregates", () => {
 
     // The judge rows must not change any page-level number.
     expect(withJudges).toEqual(headlineOnly)
-    expect(withJudges).toContain("Every reported score has a complete generation config.")
+    // The fixture discloses temperature and max_tokens, which the OLD rule
+    // called a complete setup because those were the only two questions it
+    // asked. Under the slot rule it still has to say which harness produced
+    // the run, which version of it, and over how many items — so "complete"
+    // is no longer the right word for it.
+    expect(withJudges).toContain("2 of 5 applicable setup questions are answered.")
     // The old behaviour read "1 of 3 triples document the full setup."
     expect(withJudges).not.toContain("of 3 triples")
   })
