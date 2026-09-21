@@ -39,6 +39,15 @@ describe("summariseScores", () => {
     expect(s.ci95).toBeCloseTo(0.50824, 5)
   })
 
+  it("still computes the interval for two runs, so callers can decide", () => {
+    // The arithmetic is right; it is the DISPLAY that must not show
+    // "0.45 ± 0.57" for a 0.50 / 0.41 pair. summariseScores reports it and
+    // the leaderboard suppresses it below three runs.
+    const s = summariseScores([0.5, 0.41])!
+    expect(s.n).toBe(2)
+    expect(s.ci95!).toBeGreaterThan(0.5)
+  })
+
   it("gives no interval for a single run", () => {
     const s = summariseScores([0.42])!
     expect(s.mean).toBe(0.42)

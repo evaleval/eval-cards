@@ -1137,13 +1137,29 @@ export function EvalDetail({
     return tally
   }, [leaderboardRows])
 
-  // A model and the judge / protocol readings sitting beneath it move
-  // together. Sorting the flattened row list would immediately break that:
-  // reversing it alone puts every secondary row ABOVE its own headline.
-  const leaderboardGroups = useMemo(
-    () => groupByHeadlineModel(opennessVisibleRows, (row) => row.modelResult),
-    [opennessVisibleRows]
-  )
+  // Every reading of one model belongs to that model's row, whatever its
+  // shape: a protocol arm, a second judge, or — on a MERGED page — another
+  // source's measurement of the same model. Grouping cannot key off
+  // `is_headline` here: merged pages mark every row headline (one per
+  // source), so a headline-led grouping would leave each source on its own
+  // row and fold nothing. Model identity is the only key that holds across
+  // both page shapes; on a per-source page the producer already guarantees
+  // one headline per model, so this groups exactly as before.
+  const leaderboardGroups = useMemo(() => {
+    const byModel = new Map<string, LeaderboardRow[]>()
+    const order: string[] = []
+    for (const row of opennessVisibleRows) {
+      const key = modelGroupKey(row.modelResult)
+      const existing = byModel.get(key)
+      if (existing) {
+        existing.push(row)
+      } else {
+        byModel.set(key, [row])
+        order.push(key)
+      }
+    }
+    return order.map((key) => byModel.get(key)!)
+  }, [opennessVisibleRows])
 
   // One row per MODEL. A study that ran a model under many
   // configurations produced many readings of one model, and listing them
@@ -2304,6 +2320,18 @@ export function EvalDetail({
                   // A judge column earns its place only when the fold's
                   // readings actually differ by judge.
                   const foldHasJudgeLabels = fold.members.some((member) => member.judgeLabel)
+                  // On a merged page a fold's readings are different SOURCES
+                  // measuring the same model, and the source is the only thing
+                  // telling them apart — without it the run list is a column of
+                  // unexplained numbers.
+                  const foldSourceOf = (row: LeaderboardRow) =>
+                    row.modelResult.evaluator_display_name?.trim() ||
+                    row.modelResult.source_metadata.source_name?.trim() ||
+                    row.modelResult.source_metadata.source_organization_name?.trim() ||
+                    row.modelResult.merged_source_slug ||
+                    null
+                  const foldHasSources =
+                    new Set(fold.members.map((member) => foldSourceOf(member) ?? "")).size > 1
                   const isExpanded = expandedRows[key] ?? false
                   const slices = modelResult.score_details.details
                     ? Object.entries(modelResult.score_details.details).filter(([, value]) => typeof value === "number")
@@ -2496,7 +2524,13 @@ export function EvalDetail({
                           <div className="flex items-baseline justify-end gap-2 tabular-nums" style={{ fontSize: 15, fontWeight: 600 }}>
                             <span>
                               {formatRawScore(fold.foldedScore, undefined)}
-                              {fold.ci95 != null && (
+                              {/* Two readings do not support an interval: the
+                                  t-multiplier for one degree of freedom is
+                                  12.7, so a 0.50/0.41 pair renders as
+                                  "0.45 ± 0.57" — wider than the scale, partly
+                                  below zero, and read by nobody as "we have two
+                                  numbers". Show the two numbers instead. */}
+                              {fold.ci95 != null && fold.runCount >= 3 && (
                                 <span style={{ fontSize: 11, fontWeight: 500, color: "var(--fg-muted)" }}>
                                   {" ± "}
                                   {formatRawScore(fold.ci95, undefined)}
@@ -2516,10 +2550,16 @@ export function EvalDetail({
                             <div
                               className="mt-0.5 text-right"
                               style={{ fontSize: 10, color: "var(--fg-subtle)" }}
-                              title={`Mean of this model's ${fold.runCount} runs on this page (range ${formatRawScore(fold.minScore, undefined)}–${formatRawScore(fold.maxScore, undefined)})${fold.assistedCount > 0 ? `, including ${fold.assistedCount} assisted ${fold.assistedCount === 1 ? "run" : "runs"}` : ""}. The interval is the 95% spread ACROSS those runs — they are different configurations, not repeated samples, so it measures how much the setup moved the score, not sampling error. Expand the row to see every run.`}
+                              title={`Mean of this model's ${fold.runCount} runs on this page (range ${formatRawScore(fold.minScore, undefined)}–${formatRawScore(fold.maxScore, undefined)})${fold.assistedCount > 0 ? `, including ${fold.assistedCount} assisted ${fold.assistedCount === 1 ? "run" : "runs"}` : ""}. ${
+                                fold.runCount >= 3
+                                  ? "The interval is the 95% spread ACROSS those runs — they are different configurations or sources, not repeated samples, so it measures how much the setup moved the score, not sampling error."
+                                  : "Two readings do not support an interval, so both are shown instead."
+                              } Expand the row to see every one.`}
                             >
                               mean of {fold.runCount} runs
-                              {fold.ci95 != null && " · 95% across runs"}
+                              {fold.runCount >= 3
+                                ? fold.ci95 != null && " · 95% across runs"
+                                : ` · ${formatRawScore(fold.minScore, undefined)} and ${formatRawScore(fold.maxScore, undefined)}`}
                             </div>
                           )}
                           <div
@@ -2652,7 +2692,7 @@ export function EvalDetail({
                                     className="font-mono uppercase"
                                     style={{ fontSize: 10, letterSpacing: "0.14em", color: "var(--fg-subtle)" }}
                                   >
-                                    Runs on this page
+                                    {foldHasSources ? "Sources on this page" : "Runs on this page"}
                                   </div>
                                   {/* No commentary: each run's own
                                       conditions and its own score. The
@@ -2661,6 +2701,7 @@ export function EvalDetail({
                                     <table className="ec-htable">
                                       <thead>
                                         <tr>
+                                          {foldHasSources && <th>Source</th>}
                                           {protocolColumns.map((column) => (
                                             <th key={`fold-head-${key}-${column.key}`}>
                                               {column.label}
@@ -2674,6 +2715,11 @@ export function EvalDetail({
                                       <tbody>
                                         {foldMemberRows(fold).map((member) => (
                                           <tr key={`fold-run-${member.key}`}>
+                                            {foldHasSources && (
+                                              <td className="text-[12px]" style={{ color: "var(--fg-muted)" }}>
+                                                {foldSourceOf(member) ?? "—"}
+                                              </td>
+                                            )}
                                             {protocolColumns.map((column) => {
                                               const value = formatProtocolValue(
                                                 member.modelResult.protocol_condition,
