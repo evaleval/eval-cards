@@ -406,13 +406,12 @@ describe("chooseProtocolColumns", () => {
     expect(columns.map((c) => c.key)).toEqual(["token_limit", "reasoning_tokens"])
   })
 
-  it("includes feedback — nothing else on the page records the answer oracle", () => {
+  it("never adds a feedback column \u2014 the assisted badge already says it", () => {
     const columns = chooseProtocolColumns(
       [cond({ feedback: "none" }), cond({ feedback: "answer_feedback" })],
       axes.filter((axis) => !axis.unit),
     )
-    expect(columns.map((c) => c.key)).toEqual(["feedback"])
-    expect(columns[0].label).toBe("Feedback")
+    expect(columns).toEqual([])
   })
 
   it("treats a missing key and an explicit null as one reading", () => {

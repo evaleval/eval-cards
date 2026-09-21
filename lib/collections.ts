@@ -150,11 +150,12 @@ export interface StudyRef {
   family_key?: string
 }
 
-/** Nothing is excluded. `feedback` used to be, because an ASSISTED badge
- *  carried it; the badge is gone (the run list states conditions rather
- *  than commenting on them), so the axis has to appear here or the fact
- *  that a run had an answer oracle disappears from the page. */
-const PROTOCOL_COLUMN_EXCLUDED = new Set<string>()
+/** Feedback is already carried by the ASSISTED badge on the model cell,
+ *  by the same badge in a folded row's run list, and by the folded row's
+ *  count of the assisted runs beneath it. A column would say the same
+ *  thing a fourth time, and say it loudest in the narrow layout, where
+ *  every axis costs a line. */
+const PROTOCOL_COLUMN_EXCLUDED = new Set(["feedback"])
 
 const PROTOCOL_COLUMN_LABELS: Record<string, string> = {
   feedback: "Feedback",

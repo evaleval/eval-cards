@@ -10,6 +10,11 @@ import { setSearchParams } from "./next-navigation-stub"
 
 vi.mock("next/navigation", () => import("./next-navigation-stub"))
 
+/** The separator the unranked-row tooltips already use. Spelled by code
+ *  point so this file adds none of its own. */
+const DASH = "\u2014"
+
+
 // A protocol-varied study (the AISI inference-scaling shape) repeats one
 // model name down the page: nine "Claude Opus 4.6" rows are nine runs at
 // different reasoning budgets. Only the headline run is ranked, so the
@@ -138,11 +143,12 @@ describe("EvalDetail leaderboard — folded model rows", () => {
     expect(html).toContain("Compaction")
     expect(html).toContain("Thinking tokens")
     expect(html).toContain("Effort")
-    // The answer oracle is an axis the study varied, so it earns a
-    // column of its own rather than living on a badge.
-    expect(html).toContain("Feedback")
-    // A constant scaffold explains nothing.
+    // A constant scaffold explains nothing, and the answer oracle is
+    // already on the assisted badge and in the assisted-run count, so
+    // neither earns a column.
     expect(html).not.toContain("Scaffold")
+    expect(html).not.toContain(">Feedback<")
+    expect(html).not.toContain("Feedback:")
 
     // Cell values carry the declared unit, and the effort words are
     // humanised.
@@ -260,6 +266,33 @@ describe("EvalDetail leaderboard — folded model rows", () => {
     expect(html).toContain("Effort")
   })
 
+  it("states the answer oracle once, not once per layout", () => {
+    const html = render(summaryWith(OPUS_PAGE))
+
+    // The folded row counts the assisted runs it lists, and the run list
+    // badges them. A Feedback column would be the same fact a third and
+    // fourth time, and in the narrow layout it costs a whole line.
+    expect(html).toContain("1 assisted run also listed")
+    expect(html).not.toContain(">Feedback<")
+    expect(html).not.toContain("Feedback:")
+    expect(html).not.toContain("Answer feedback")
+  })
+
+  it("badges an assisted run without spelling out its feedback value", () => {
+    setSearchParams("protocol.reasoning_tokens=number%3A32000")
+    try {
+      const html = render(summaryWith(OPUS_PAGE))
+      // One of the three matching runs is assisted, and the badge is the
+      // only thing that says so.
+      expect(html).toContain("assisted")
+      expect(html).not.toContain("Answer feedback")
+      expect(html).not.toContain(">Feedback<")
+      expect(html).not.toContain("Feedback:")
+    } finally {
+      setSearchParams()
+    }
+  })
+
   it("reports the headline run's score and standing, never a statistic across the runs", () => {
     const html = render(summaryWith(OPUS_PAGE))
 
@@ -321,8 +354,8 @@ describe("EvalDetail leaderboard — folded model rows", () => {
       // standing it had in the full field; the other two never take one.
       expect(html.match(/#1/g) ?? []).toHaveLength(1)
       expect(html).not.toContain("#2")
-      expect(html).toContain("Another run of the same model — shown, not ranked")
-      expect(html).toContain("Assisted run (answer feedback) — shown, not ranked")
+      expect(html).toContain(`Another run of the same model ${DASH} shown, not ranked`)
+      expect(html).toContain(`Assisted run (answer feedback) ${DASH} shown, not ranked`)
       // A run list, not a folded row.
       expect(html).not.toContain("across 5 runs")
       expect(html).toContain("Show one row per model")
