@@ -2669,7 +2669,7 @@ export function EvalDetail({
                   >
                     Rank
                   </th>
-                  <th style={{ minWidth: 260 }}>
+                  <th style={{ minWidth: 176 }}>
                     <SortableTh
                       label="Model"
                       active={userRowSort.key === "model"}
@@ -2677,7 +2677,7 @@ export function EvalDetail({
                       onClick={() => cycleRowSort("model")}
                     />
                   </th>
-                  <th className="hidden lg:table-cell" style={{ minWidth: 160 }}>
+                  <th className="hidden lg:table-cell" style={{ minWidth: 112 }}>
                     <SortableTh
                       label={isResearchView ? "Developer" : "Provider"}
                       active={userRowSort.key === "developer"}
@@ -2691,8 +2691,8 @@ export function EvalDetail({
                     return (
                       <th
                         key={`protocol-head-${column.key}`}
-                        className="hidden lg:table-cell"
-                        style={{ minWidth: 124 }}
+                        className="hidden lg:table-cell ec-axis"
+                        style={{ minWidth: 86 }}
                         aria-sort={
                           active
                             ? userRowSort.dir === "asc"
@@ -2711,7 +2711,7 @@ export function EvalDetail({
                       </th>
                     )
                   })}
-                  <th className="num" style={{ minWidth: 200 }}>
+                  <th className="num" style={{ minWidth: 136 }}>
                     <SortableTh
                       label={lb.metric_config.unit ?? "Score"}
                       active={userRowSort.key === "score"}
@@ -2724,7 +2724,7 @@ export function EvalDetail({
                       }
                     />
                   </th>
-                  <th className="hidden lg:table-cell" style={{ width: 110 }}>
+                  <th className="hidden lg:table-cell" style={{ width: 104 }}>
                     <SortableTh
                       label="Evaluator"
                       active={userRowSort.key === "evaluator"}
@@ -2733,7 +2733,7 @@ export function EvalDetail({
                       title="Sort by evaluator relationship (1st-party first)"
                     />
                   </th>
-                  <th className="num hidden lg:table-cell" style={{ width: 100 }}>
+                  <th className="num hidden lg:table-cell" style={{ width: 112 }}>
                     <SortableTh
                       label="Source"
                       active={userRowSort.key === "source"}
@@ -2741,7 +2741,11 @@ export function EvalDetail({
                       onClick={() => cycleRowSort("source")}
                     />
                   </th>
-                  <th className="hidden lg:table-cell num" style={{ width: 110 }}>
+                  {/* Released is the first column to go when the
+                      protocol axes need the room: a narrow desktop keeps
+                      the reading and who reported it, and the release
+                      date is one click away on the model page. */}
+                  <th className="hidden xl:table-cell num" style={{ width: 96 }}>
                     <SortableTh
                       label="Released"
                       active={userRowSort.key === "released"}
@@ -2965,8 +2969,8 @@ export function EvalDetail({
                           return (
                             <td
                               key={`protocol-cell-${key}-${column.key}`}
-                              className="hidden lg:table-cell align-top font-mono"
-                              style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                              className="hidden lg:table-cell align-top font-mono ec-axis"
+                              style={{ fontSize: 11, lineHeight: 1.35 }}
                             >
                               {isFolded ? (
                                 <span
@@ -3066,6 +3070,7 @@ export function EvalDetail({
                               fontSize: 9.5,
                               padding: "2px 6px",
                               letterSpacing: "0.08em",
+                              whiteSpace: "nowrap",
                               background: isThirdParty ? "var(--accent)" : "var(--bg-surface)",
                               color: isThirdParty ? "var(--accent-fg)" : "var(--fg-muted)",
                               border: isThirdParty ? "none" : "1px solid var(--border-soft)",
@@ -3119,7 +3124,7 @@ export function EvalDetail({
                         </td>
 
                         <td
-                          className="num hidden lg:table-cell align-top font-mono tabular-nums"
+                          className="num hidden xl:table-cell align-top font-mono tabular-nums"
                           style={{ fontSize: 11, color: "var(--fg-muted)" }}
                         >
                           {modelResult.model_info.release_date
@@ -3131,7 +3136,14 @@ export function EvalDetail({
 
                       {isExpanded && (
                         <tr>
-                          <td colSpan={7} style={{ background: "var(--bg-warm)", padding: 0 }}>
+                          {/* Rank, Model, Developer, Score, Evaluator,
+                              Source, Released — plus one column per
+                              protocol axis, or the panel stops short of
+                              the table's right edge. */}
+                          <td
+                            colSpan={7 + protocolColumns.length}
+                            style={{ background: "var(--bg-warm)", padding: 0 }}
+                          >
                             <div className="space-y-5 px-4 py-5 sm:px-6">
                               {isFolded && (
                                 <div className="space-y-2">
@@ -3235,6 +3247,7 @@ export function EvalDetail({
                                           {protocolColumns.map((column) => (
                                             <th
                                               key={`fold-head-${key}-${column.key}`}
+                                              className="ec-axis"
                                               title={protocolHeaderTitle(column, Boolean(summary.merged_view))}
                                             >
                                               {column.label}
@@ -3275,7 +3288,7 @@ export function EvalDetail({
                                             {protocolColumns.map((column) => (
                                               <td
                                                 key={`fold-cell-${member.key}-${column.key}`}
-                                                className="font-mono text-[12px]"
+                                                className="font-mono text-[12px] ec-axis"
                                               >
                                                 <ProtocolValueText
                                                   reading={protocolReading(member.modelResult, column)}
@@ -3480,7 +3493,10 @@ export function EvalDetail({
                 })}
                 {leaderboardRows.length === 0 && (
                   <tr>
-                    <td colSpan={7} style={{ padding: "32px 16px", textAlign: "center", color: "var(--fg-muted)" }}>
+                    <td
+                      colSpan={7 + protocolColumns.length}
+                      style={{ padding: "32px 16px", textAlign: "center", color: "var(--fg-muted)" }}
+                    >
                       No leaderboard entries match the selected parameter range.
                     </td>
                   </tr>

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { ArrowUpRight, ChevronDown, ChevronRight, ChevronUp } from "lucide-react"
 
 import type { HierarchyBenchmark, HierarchyComposite, HierarchyFamily } from "@/lib/backend-artifacts"
+import { candidateBenchmarkKeys } from "@/lib/benchmark-metadata-utils"
 import { formatTagLabel } from "@/lib/benchmark-tags"
 import type { BenchmarkCard } from "@/lib/benchmark-schema"
 import type { BenchmarkEvalListItem } from "@/lib/eval-processing"
@@ -88,6 +89,42 @@ interface AccordionSection {
   leaves: LeafEntry[]
 }
 
+/**
+ * A card for one hierarchy node.
+ *
+ * Card keys are normalized benchmark NAMES ("swe bench pro"), while a
+ * hierarchy node is keyed by slug ("swe-bench-pro") and its eval ids
+ * carry a source prefix ("aisi-inference-scaling%2Fswe-bench-pro"). A
+ * raw index into the card map therefore misses every node whose slug
+ * spells its name with hyphens, which is why some tiles showed an
+ * overview and their neighbours showed none. Normalize each name the
+ * node offers and take the first exact hit — no fuzzy substring step,
+ * so a node with no card of its own never borrows a neighbour's
+ * description.
+ */
+function findLeafCard(
+  cards: Record<string, BenchmarkCard> | undefined,
+  names: (string | null | undefined)[],
+): BenchmarkCard | undefined {
+  if (!cards) return undefined
+  for (const name of names) {
+    if (!name) continue
+    for (const key of candidateBenchmarkKeys(name)) {
+      const card = cards[key]
+      if (card) return card
+    }
+  }
+  return undefined
+}
+
+/** The benchmark's own name inside a per-source eval id, e.g.
+ *  "aisi-inference-scaling%2Fswe-bench-pro" → "swe-bench-pro". */
+function evalIdLeafName(evalId: string): string {
+  const decoded = decodeLoose(evalId)
+  const parts = decoded.split("/")
+  return parts[parts.length - 1] ?? decoded
+}
+
 function buildLeafEntry(
   benchmark: HierarchyBenchmark,
   famKey: string,
@@ -101,16 +138,14 @@ function buildLeafEntry(
 
   const collected = new Set<string>()
   for (const d of benchmark.tags?.domains ?? []) collected.add(d.toLowerCase())
-  const cardByKey = benchmarkCards?.[benchmark.key]
-  for (const d of cardByKey?.benchmark_details?.domains ?? []) collected.add(d.toLowerCase())
-  for (const id of ids) {
-    for (const d of benchmarkCards?.[id]?.benchmark_details?.domains ?? []) collected.add(d.toLowerCase())
-  }
+  const card = findLeafCard(benchmarkCards, [
+    benchmark.key,
+    benchmark.display_name,
+    ...ids.map(evalIdLeafName),
+  ])
+  for (const d of card?.benchmark_details?.domains ?? []) collected.add(d.toLowerCase())
 
-  const description =
-    cardByKey?.benchmark_details?.overview ??
-    benchmarkCards?.[ids[0]]?.benchmark_details?.overview ??
-    null
+  const description = card?.benchmark_details?.overview ?? null
 
   return {
     id: ids[0],
@@ -168,7 +203,9 @@ function collectFamilySections(
       if (entry) leaves.push(entry)
     }
     if (leaves.length === 0) continue
-    const compDesc = benchmarkCards?.[composite.key]?.benchmark_details?.overview ?? null
+    const compDesc =
+      findLeafCard(benchmarkCards, [composite.key, composite.display_name])?.benchmark_details
+        ?.overview ?? null
     sections.push({
       type: "composite",
       key: composite.key,
