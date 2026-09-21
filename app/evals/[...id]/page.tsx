@@ -12,9 +12,19 @@ import { ParamRangePicker } from "@/components/param-range-picker"
 import { useAudienceMode } from "@/components/audience-mode-provider"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
 import type { ScaffoldContextPayload } from "@/lib/collections"
-import { buildCrossSourceContext, type CrossSourceRow } from "@/lib/cross-source-context"
+import {
+  buildCrossSourceContext,
+  crossSourceRowsFromMerged,
+  mergedPayloadIsComparable,
+} from "@/lib/cross-source-context"
 import { compositeScoresByModel } from "@/lib/eval-processing"
-import { fetchComparisonIndex, fetchEvalHierarchy, fetchEvalSummary } from "@/lib/dashboard-data-client"
+import { isMergedBenchmarkSummary } from "@/lib/merged-adapter"
+import {
+  fetchComparisonIndex,
+  fetchEvalHierarchy,
+  fetchEvalSummary,
+  fetchMergedBenchmarkSummary,
+} from "@/lib/dashboard-data-client"
 import { humanizeEvaluationId, isMergedEvalId, routeIdFromSegments, routeIdToPath } from "@/lib/utils"
 import { PARAM_RANGE_MAX_INDEX, parseParamsBillionsFromModelName, paramStepToNumeric } from "@/lib/param-range"
 import type { ComparisonIndex, EvalHierarchy } from "@/lib/backend-artifacts"
@@ -66,36 +76,25 @@ export default function EvalDetailPage() {
   // Only ~250 of 1,218 benchmarks have a second source at all; the rest
   // resolve to null and the Context view simply never appears. The curated
   // study sidecar, where one exists, takes precedence inside EvalDetail.
+  //
+  // Browser-only and off the critical path: the leaderboard renders with
+  // no strip, and a slow or failed fetch leaves it that way.
   useEffect(() => {
+    setCrossSourceContext(null)
     const benchmarkId = summary?.benchmark_id
-    if (!benchmarkId || !summary || summary.collection?.context) {
-      setCrossSourceContext(null)
-      return
-    }
+    const metricId = summary?.primary_metric_id
+    if (!summary || !benchmarkId || !metricId || summary.collection?.context) return
+    // Nothing to ask for when this benchmark has no sibling source, which
+    // is most of them, or when the page reports one slice rather than the
+    // benchmark the merged payload pools.
+    if ((summary.source_options?.sources.length ?? 0) < 2 || summary.is_slice) return
     let cancelled = false
-    fetch(`/api/eval-summary?id=${encodeURIComponent(benchmarkId)}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((merged) => {
-        if (cancelled || !merged?.merged || !Array.isArray(merged.results)) return
-        const rows: CrossSourceRow[] = merged.results
-          .filter((row: Record<string, unknown>) => row.is_headline !== false)
-          .map((row: Record<string, unknown>) => {
-            const modelInfo = (row.model_info ?? {}) as { name?: string; id?: string }
-            // The canonical score is the only one comparable across
-            // sources; a published 68.5 and a published 0.685 are the same
-            // measurement on two scales.
-            const score = row.score_canonical ?? row.score
-            return {
-              modelKey: String(row.model_key ?? row.model_route_id ?? modelInfo.id ?? ""),
-              displayName: modelInfo.name ?? String(row.model_key ?? ""),
-              score: typeof score === "number" ? score : Number.NaN,
-              sourceSlug: String(row.composite_slug ?? ""),
-              sourceLabel: String(row.composite_display_name ?? row.composite_slug ?? ""),
-              runDate: typeof row.evaluation_timestamp === "string" ? row.evaluation_timestamp : null,
-            }
-          })
+    fetchMergedBenchmarkSummary(benchmarkId, { metricId })
+      .then((payload) => {
+        if (cancelled || !isMergedBenchmarkSummary(payload)) return
+        if (!mergedPayloadIsComparable(payload, { benchmarkId, metricId })) return
         setCrossSourceContext(
-          buildCrossSourceContext(rows, {
+          buildCrossSourceContext(crossSourceRowsFromMerged(payload), {
             subjectSourceSlug: summary.composite_benchmark_key,
             subjectLabel: "This source",
             benchmarkLabel: summary.evaluation_name,

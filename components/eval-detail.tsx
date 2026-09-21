@@ -1166,7 +1166,13 @@ export function EvalDetail({
   // cross-source payload the caller derived from other sources' rows. The
   // sidecar wins: it carries scaffold names, harvest dates and the
   // with-oracle companion that the derived one cannot.
-  const scaffoldContext = summary.collection?.context ?? crossSourceContext ?? undefined
+  //
+  // A merged page gets neither. Its rows are already one per model and
+  // source, so every reading the strip would draw is a row the reader can
+  // see, and the strip would only redraw the table above it.
+  const scaffoldContext = summary.merged_view
+    ? undefined
+    : (summary.collection?.context ?? crossSourceContext ?? undefined)
 
   // Optional user-driven sort. `default` keeps the score-ordered rows
   // the ranker already produced. The rank label is always by score
@@ -1489,6 +1495,11 @@ export function EvalDetail({
       lb.metric_config.lower_is_better
         ? a.modelResult.score - b.modelResult.score
         : b.modelResult.score - a.modelResult.score
+    )
+
+  const foldUnassistedRows = (fold: LeaderboardFold) =>
+    foldMemberRows(fold).filter(
+      (member) => !isAssistedResult(member.modelResult.protocol_condition)
     )
 
   /** The axis summary a folded row shows in place of one run's value:
@@ -3138,7 +3149,12 @@ export function EvalDetail({
                                             background: "var(--border-soft)",
                                           }}
                                         />
-                                        {foldMemberRows(fold).map((member) => {
+                                        {/* The range this strip spans is the
+                                            unassisted runs', so those are the
+                                            runs it ticks: a score reached with
+                                            the answer oracle is not one of the
+                                            readings being compared. */}
+                                        {foldUnassistedRows(fold).map((member) => {
                                           const span = fold.maxScore - fold.minScore
                                           const pct =
                                             ((member.modelResult.score - fold.minScore) / span) * 100

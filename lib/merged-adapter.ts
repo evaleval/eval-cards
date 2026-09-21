@@ -48,7 +48,7 @@ export function isMergedBenchmarkSummary(payload: unknown): payload is MergedBen
  * too — the merged page pools ONE observation per (model,
  * source), and a model's three judge readings are not three sources.
  */
-function convertedRows(merged: MergedBenchmarkSummary): MergedObservationRow[] {
+export function convertedRows(merged: MergedBenchmarkSummary): MergedObservationRow[] {
   return merged.results.filter(
     (row) =>
       isHeadlineResult(row) &&

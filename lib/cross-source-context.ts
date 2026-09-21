@@ -18,6 +18,8 @@
  * inference budget do to this score?". Hence `subjectLabel`.
  */
 import type { ScaffoldContextModel, ScaffoldContextPayload } from "@/lib/collections"
+import type { MergedBenchmarkSummary } from "@/lib/eval-processing"
+import { convertedRows } from "@/lib/merged-adapter"
 
 export interface CrossSourceRow {
   /** Stable model identity — the same key across sources. */
@@ -78,9 +80,14 @@ export function buildCrossSourceContext(
   const modelsWithoutContext: string[] = []
 
   for (const [modelKey, modelRows] of byModel) {
-    const subjectRow =
-      modelRows.find((row) => row.sourceSlug === subjectSlug) ?? modelRows[0]
-    const others = modelRows.filter((row) => row !== subjectRow)
+    const subjectRow = modelRows.find((row) => row.sourceSlug === subjectSlug)
+    // A model the subject source never measured has no mark of its own,
+    // and drawing another source's reading in its place would put that
+    // source's number under this page's label.
+    if (!subjectRow) continue
+    // Whatever else the subject source published for this model is still
+    // this page speaking, not somebody else measuring it.
+    const others = modelRows.filter((row) => row.sourceSlug !== subjectRow.sourceSlug)
 
     if (others.length < MIN_COMPARISON_POINTS) {
       modelsWithoutContext.push(subjectRow.displayName)
@@ -139,6 +146,68 @@ export function buildCrossSourceContext(
     modelsWithoutAssisted: [],
     subjectLabel: options.subjectLabel ?? "This source",
   }
+}
+
+/**
+ * Whether a merged payload answers the same question the page does.
+ *
+ * A merged payload is already one metric, one benchmark and one grain, so
+ * it is the payload as a whole that either matches the page or does not:
+ * a different metric, a benchmark the id resolved to by another route, or
+ * one slice's rows standing in for the whole benchmark all put two
+ * different measurements on one axis. Mismatch means no strip rather than
+ * a strip with a footnote.
+ */
+export function mergedPayloadIsComparable(
+  merged: Pick<MergedBenchmarkSummary, "benchmark_id" | "selected_metric_id" | "grain">,
+  page: { benchmarkId: string; metricId: string },
+): boolean {
+  return (
+    merged.benchmark_id === page.benchmarkId &&
+    merged.selected_metric_id === page.metricId &&
+    merged.grain === "benchmark"
+  )
+}
+
+/**
+ * The merged payload's observations as comparison rows, one per (source,
+ * model).
+ *
+ * `convertedRows` is the merged page's own pool, and the three things it
+ * drops are the three that would each be a measurement this is not: a
+ * non-headline row (a losing judge panel or protocol arm is another
+ * reading of one cell, not another run), an answer-feedback row (a score
+ * reached by being told when the answer was right), and a row the
+ * producer could not put on the canonical scale (a published number on a
+ * scale of its own).
+ *
+ * Echo republications survive that pool by design, because the merged
+ * page wants them visible, so the first reading each source gives a model
+ * is the one kept. A source disagreeing with itself is still one source,
+ * and the merged query has already ordered its rows by canonical score in
+ * the metric's direction.
+ */
+export function crossSourceRowsFromMerged(merged: MergedBenchmarkSummary): CrossSourceRow[] {
+  const seen = new Set<string>()
+  const rows: CrossSourceRow[] = []
+  for (const observation of convertedRows(merged)) {
+    const modelKey =
+      observation.model_key ?? observation.model_route_id ?? observation.model_info?.id ?? ""
+    const sourceSlug = observation.composite_slug ?? ""
+    if (!modelKey || !sourceSlug) continue
+    const reading = `${sourceSlug}\u0000${modelKey}`
+    if (seen.has(reading)) continue
+    seen.add(reading)
+    rows.push({
+      modelKey,
+      displayName: observation.model_info?.name ?? modelKey,
+      score: observation.score_canonical as number,
+      sourceSlug,
+      sourceLabel: observation.composite_display_name ?? sourceSlug,
+      runDate: observation.evaluation_timestamp ?? null,
+    })
+  }
+  return rows
 }
 
 /** The source reporting the most models here. Ties break on slug so the
