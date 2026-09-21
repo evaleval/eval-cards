@@ -1181,6 +1181,16 @@ export function EvalDetail({
   const contextLoader = summary.merged_view || scaffoldContext
     ? undefined
     : crossSourceContextLoader
+  // The derived payload is the whole benchmark at this page's own grain.
+  // A sibling split or a subtask selection replaces the scores beside it
+  // while the strip would go on showing the benchmark's, and the
+  // multi-metric branch renders no distribution panel to carry it at all.
+  // The curated payload is the page's own either way.
+  const contextApplies =
+    scaffoldContext != null ||
+    (!hasMultiMetricLeaderboard &&
+      lb.evaluation_id === summary.evaluation_id &&
+      activeSlice === ALL_SLICE_KEY)
 
   // Optional user-driven sort. `default` keeps the score-ordered rows
   // the ranker already produced. The rank label is always by score
@@ -2440,6 +2450,7 @@ export function EvalDetail({
                 }]}
                 context={scaffoldContext}
                 contextLoader={contextLoader}
+                contextApplies={contextApplies}
               />
             </div>
           )}

@@ -930,6 +930,12 @@ export interface ScaffoldContextPayload {
    *  question — whether this source's number is an outlier, not what a
    *  budget did to it. */
   subjectLabel?: string | null
+  /** What scale the marks are on. The curated study payload leaves it
+   *  unset: its numbers are fractions of tasks solved, drawn as
+   *  percentages. A derived payload carries the registry's canonical
+   *  scale for the page's metric, which is a fraction for some metrics
+   *  and 0-100 or wider for others, so it says which. */
+  scoreScale?: "fraction" | "raw" | null
   /** Snapshot id of the harvest the external points come from. */
   harvestedAt: string
   officialTaskCount: number

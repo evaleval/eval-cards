@@ -60,6 +60,12 @@ interface ScoreDistributionProps {
    *  comparable measurements, which the panel says rather than treats as
    *  a failure. */
   contextLoader?: (signal: AbortSignal) => Promise<ScaffoldContextPayload | null>
+  /** Whether the Context view still describes what the panel is showing.
+   *  False hides the chip and falls the panel back to the distribution,
+   *  without discarding a payload already fetched: the caller switched
+   *  the scores beside it to a subtask or a sibling split, and may switch
+   *  back. Defaults to true. */
+  contextApplies?: boolean
 }
 
 interface SummaryStats {
@@ -156,6 +162,7 @@ export function ScoreDistribution({
   showViewToggle = true,
   context,
   contextLoader,
+  contextApplies = true,
 }: ScoreDistributionProps) {
   // Normalize: either we got a single series (via values) or many.
   const seriesList: ScoreSeries[] = useMemo(() => {
@@ -214,7 +221,8 @@ export function ScoreDistribution({
   const [loadedContext, setLoadedContext] = useState<ScaffoldContextPayload | null>(null)
   const [contextLoad, setContextLoad] = useState<"idle" | "loading" | "settled">("idle")
   const activeContext = context ?? loadedContext ?? undefined
-  const canShowContext = (activeContext?.models.length ?? 0) > 0 || contextLoader != null
+  const canShowContext =
+    contextApplies && ((activeContext?.models.length ?? 0) > 0 || contextLoader != null)
   // The chip's tooltip states the claim before the payload can, and a
   // loader only ever builds the per-source one.
   const contextSubject =
@@ -1042,15 +1050,22 @@ function FrontierPlot({ events, samples, unit, lowerIsBetter, label }: FrontierP
 //     task-coverage differences remain visible as provenance.
 // ---------------------------------------------------------------------------
 
-function formatAccuracyPct(value: number): string {
-  return `${(value * 100).toFixed(1)}%`
+const PERCENT_TICK_STEPS = [0.005, 0.01, 0.02, 0.025, 0.05, 0.1, 0.2, 0.25, 0.5]
+
+/** The percent ladder shifted to whatever decade the span lives in. */
+function decadeTickSteps(span: number): number[] {
+  const decade = 10 ** Math.floor(Math.log10(span))
+  return [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5].map((step) => step * decade)
 }
 
-/** Round percent ticks inside the padded range (3–6 of them). */
-function contextTicks(lo: number, hi: number): number[] {
+/** Round ticks inside the padded range (3–6 of them). A fraction scale
+ *  gets the percent ladder the study plot has always used; any other
+ *  scale gets a decade ladder, because the percent one would put four
+ *  hundred ticks on a 0–100 axis. */
+function contextTicks(lo: number, hi: number, asPercent: boolean): number[] {
   const span = hi - lo
   if (!(span > 0)) return [lo]
-  const steps = [0.005, 0.01, 0.02, 0.025, 0.05, 0.1, 0.2, 0.25, 0.5]
+  const steps = asPercent ? PERCENT_TICK_STEPS : decadeTickSteps(span)
   const step = steps.find((s) => span / s <= 6) ?? steps[steps.length - 1]
   const ticks: number[] = []
   for (let t = Math.ceil(lo / step) * step; t <= hi + 1e-9; t += step) {
@@ -1141,6 +1156,22 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
   // source". Same picture, different claim — the label is what stops the
   // second being read as the first.
   const subject = context.subjectLabel ?? "This study"
+  // The curated study's marks are fractions of tasks solved and read as
+  // percentages. A derived payload says which scale its numbers are on,
+  // because they are whatever the registry's canonical scale for the
+  // metric is: a canonical 60.2 drawn as "6020.0%" is a different claim.
+  const asPercent = context.scoreScale !== "raw"
+  const formatScore = (value: number) =>
+    asPercent ? `${(value * 100).toFixed(1)}%` : value.toFixed(2)
+  /** How many tasks a mark stands for, when the payload counted them. A
+   *  derived payload does not, and inventing "0 tasks" reads as a fact. */
+  const tasksSuffix = (nTasks: number, separator: string) =>
+    nTasks > 0 ? `${separator}${nTasks} tasks` : ""
+  // "No feedback" distinguishes the study's two arms. A payload with no
+  // oracle companion has one arm, and the mark is simply the subject's.
+  const noFeedbackTitle = context.subjectLabel
+    ? context.subjectLabel
+    : "Current study (no feedback)"
 
   // Hover is addressed by (strip, mark) so the tooltip can be positioned
   // on the same percentage scale as the mark it describes — no
@@ -1168,7 +1199,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
   const xLo = dataLo - spread * 0.08
   const xHi = dataHi + spread * 0.08
   const xPct = (value: number) => ((value - xLo) / (xHi - xLo)) * 100
-  const ticks = contextTicks(xLo, xHi)
+  const ticks = contextTicks(xLo, xHi, asPercent)
 
   const anyAssisted = models.some((model) => model.assisted != null)
 
@@ -1187,7 +1218,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
               </div>
               <div
                 role="img"
-                aria-label={`${model.displayName}: ${subject.toLowerCase()}'s score ${formatAccuracyPct(model.score)}${model.scoreSe != null ? ` ± ${formatAccuracyPct(model.scoreSe)}` : ""} over ${model.nTasks} tasks${model.assisted ? `, with oracle feedback ${formatAccuracyPct(model.assisted.score)} over ${model.assisted.nTasks} tasks` : ""}, ${model.points.length} external ${model.points.length === 1 ? "measurement" : "measurements"} from ${formatAccuracyPct(Math.min(...model.points.map((p) => p.score), model.score))} to ${formatAccuracyPct(Math.max(...model.points.map((p) => p.score), model.score))}`}
+                aria-label={`${model.displayName}: ${subject.toLowerCase()}'s score ${formatScore(model.score)}${model.scoreSe != null ? ` ± ${formatScore(model.scoreSe)}` : ""}${tasksSuffix(model.nTasks, " over ")}${model.assisted ? `, with oracle feedback ${formatScore(model.assisted.score)}${tasksSuffix(model.assisted.nTasks, " over ")}` : ""}, ${model.points.length} external ${model.points.length === 1 ? "measurement" : "measurements"} from ${formatScore(Math.min(...model.points.map((p) => p.score), model.score))} to ${formatScore(Math.max(...model.points.map((p) => p.score), model.score))}`}
                 style={{ position: "relative", flex: 1, height: STRIP_HEIGHT }}
               >
                 {/* Strip baseline */}
@@ -1235,7 +1266,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
                   <button
                     key={`${point.scaffold ?? point.source ?? "measurement"}-${index}`}
                     type="button"
-                    aria-label={`${point.scaffold ? `${point.scaffold} · ` : ""}${formatAccuracyPct(point.score)}${
+                    aria-label={`${point.scaffold ? `${point.scaffold} · ` : ""}${formatScore(point.score)}${
                       point.source ? ` · Source: ${point.source}` : ""
                     }${point.runDate ? ` · ${point.runDate}` : ""}`}
                     onMouseEnter={() => setHover({ modelKey: model.key, mark: "point", index })}
@@ -1272,7 +1303,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
                 {model.assisted && (
                   <button
                     type="button"
-                    aria-label={`${subject} (oracle feedback) · ${formatAccuracyPct(model.assisted.score)}${model.assisted.scoreSe != null ? ` ± ${formatAccuracyPct(model.assisted.scoreSe)}` : ""} · ${model.assisted.nTasks} tasks`}
+                    aria-label={`${subject} (oracle feedback) · ${formatScore(model.assisted.score)}${model.assisted.scoreSe != null ? ` ± ${formatScore(model.assisted.scoreSe)}` : ""}${tasksSuffix(model.assisted.nTasks, " · ")}`}
                     onMouseEnter={() => setHover({ modelKey: model.key, mark: "assisted" })}
                     onFocus={() => setHover({ modelKey: model.key, mark: "assisted" })}
                     onBlur={() => setHover(null)}
@@ -1303,7 +1334,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
                 {/* Canonical study score. Always a served fact_results number. */}
                 <button
                   type="button"
-                  aria-label={`Current study (no feedback) · ${formatAccuracyPct(model.score)}${model.scoreSe != null ? ` ± ${formatAccuracyPct(model.scoreSe)}` : ""} · ${model.nTasks} tasks`}
+                  aria-label={`${noFeedbackTitle} · ${formatScore(model.score)}${model.scoreSe != null ? ` ± ${formatScore(model.scoreSe)}` : ""}${tasksSuffix(model.nTasks, " · ")}`}
                   onMouseEnter={() => setHover({ modelKey: model.key, mark: "study" })}
                   onFocus={() => setHover({ modelKey: model.key, mark: "study" })}
                   onBlur={() => setHover(null)}
@@ -1333,8 +1364,8 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
                 {hover?.modelKey === model.key && hover.mark === "study" && (
                   <ContextTooltip
                     leftPct={xPct(model.score)}
-                    title="Current study (no feedback)"
-                    meta={`${formatAccuracyPct(model.score)}${model.scoreSe != null ? ` ± ${formatAccuracyPct(model.scoreSe)}` : ""} · ${model.nTasks} tasks`}
+                    title={noFeedbackTitle}
+                    meta={`${formatScore(model.score)}${model.scoreSe != null ? ` ± ${formatScore(model.scoreSe)}` : ""}${tasksSuffix(model.nTasks, " · ")}`}
                     modelName={model.displayName}
                   />
                 )}
@@ -1342,7 +1373,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
                   <ContextTooltip
                     leftPct={xPct(model.assisted.score)}
                     title={`${subject} (oracle feedback)`}
-                    meta={`${formatAccuracyPct(model.assisted.score)}${model.assisted.scoreSe != null ? ` ± ${formatAccuracyPct(model.assisted.scoreSe)}` : ""} · ${model.assisted.nTasks} tasks`}
+                    meta={`${formatScore(model.assisted.score)}${model.assisted.scoreSe != null ? ` ± ${formatScore(model.assisted.scoreSe)}` : ""}${tasksSuffix(model.assisted.nTasks, " · ")}`}
                     modelName={model.displayName}
                   />
                 )}
@@ -1353,9 +1384,9 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
                       leftPct={xPct(model.points[hover.index].score)}
                       title={model.points[hover.index].scaffold}
                       meta={[
-                        formatAccuracyPct(model.points[hover.index].score) +
+                        formatScore(model.points[hover.index].score) +
                           (model.points[hover.index].scoreSe != null
-                            ? ` ± ${formatAccuracyPct(model.points[hover.index].scoreSe ?? 0)}`
+                            ? ` ± ${formatScore(model.points[hover.index].scoreSe ?? 0)}`
                             : ""),
                         model.points[hover.index].runDate,
                       ]
@@ -1402,7 +1433,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
                 letterSpacing: "0.06em",
               }}
             >
-              {formatAccuracyPct(tick)}
+              {formatScore(tick)}
             </div>
           ))}
         </div>
@@ -1413,8 +1444,15 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
         style={{ fontSize: 10, letterSpacing: "0.04em", color: "var(--fg-muted)" }}
       >
         <div>
-          X-axis: binary run success rates. Runs may differ in setup (e.g. scaffolds,
-          budgets, task coverage, and submission protocols).
+          {/* The study's numbers are its own run success rates and the axis
+              can say so. A derived payload is whatever the registry's
+              canonical scale for the page's metric happens to be, which
+              the axis must not name even when it reads as a percentage. */}
+          {context.subjectLabel
+            ? "X-axis: reported score, on this metric's canonical scale."
+            : "X-axis: binary run success rates."}{" "}
+          Runs may differ in setup (e.g. scaffolds, budgets, task coverage, and
+          submission protocols).
         </div>
         <div>
           Diamonds: {subject.toLowerCase()}&apos;s {anyAssisted ? "scores" : "score"}

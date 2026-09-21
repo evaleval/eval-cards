@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { AudienceModeProvider } from "@/components/audience-mode-provider"
 import { EvalDetail } from "@/components/eval-detail"
+import { ContextPlot } from "@/components/score-distribution"
 import {
   buildCrossSourceContext,
   crossSourceRowsFromMerged,
@@ -142,6 +143,34 @@ describe("buildCrossSourceContext", () => {
         [
           row({ modelKey: "m1", score: 0.5, sourceSlug: "other" }),
           row({ modelKey: "m1", score: 0.4, sourceSlug: "third" }),
+        ],
+        { subjectSourceSlug: "mine" },
+      ),
+    ).toBeNull()
+  })
+
+  it("omits a source whose canonical numbers are on the other scale", () => {
+    // benchpress publishes scicode as 21 to 60.2 and Artificial Analysis
+    // publishes the same models as 0 to 0.602, both in the canonical
+    // column. Side by side they read as a hundredfold disagreement.
+    const payload = buildCrossSourceContext(
+      [
+        row({ modelKey: "m1", score: 0.52, sourceSlug: "mine", sourceLabel: "Mine" }),
+        row({ modelKey: "m1", score: 52.2, sourceSlug: "hundreds", sourceLabel: "Hundreds" }),
+        row({ modelKey: "m1", score: 0.48, sourceSlug: "other", sourceLabel: "Other" }),
+      ],
+      { subjectSourceSlug: "mine" },
+    )!
+    expect(payload.models[0].points.map((p) => p.source)).toEqual(["Other"])
+    expect(payload.contextSources.map((s) => s.id)).toEqual(["mine", "other"])
+  })
+
+  it("draws nothing when the only other source is on the other scale", () => {
+    expect(
+      buildCrossSourceContext(
+        [
+          row({ modelKey: "m1", score: 0.52, sourceSlug: "mine" }),
+          row({ modelKey: "m1", score: 52.2, sourceSlug: "hundreds" }),
         ],
         { subjectSourceSlug: "mine" },
       ),
@@ -397,5 +426,107 @@ describe("the Context view's scope", () => {
     const loader = vi.fn(async () => null)
     expect(renderWith({ merged_view: true }, loader)).not.toContain(">Context<")
     expect(loader).not.toHaveBeenCalled()
+  })
+
+  it("does not offer it on a multi-metric page", () => {
+    // That branch renders no distribution panel, so there is nothing for
+    // the chip to sit in and nothing worth fetching for.
+    const loader = vi.fn(async () => null)
+    const html = renderWith(
+      {
+        leaderboard_metrics: [
+          { column_key: "accuracy", display_name: "Accuracy" },
+          { column_key: "f1", display_name: "F1" },
+        ],
+        leaderboard_rows: [
+          {
+            model_info: { name: "Model A", id: "org/model-a" },
+            model_route_id: "org%2Fmodel-a",
+            values: { accuracy: 0.5, f1: 0.4 },
+          },
+        ],
+      },
+      loader,
+    )
+    expect(html).not.toContain(">Context<")
+    expect(loader).not.toHaveBeenCalled()
+  })
+
+  it("does not offer it while a sibling split is the active leaderboard", () => {
+    // The strip speaks for the benchmark the page fetched it for; the
+    // scores beside it would be the split's.
+    const loader = vi.fn(async () => null)
+    const summary = summaryWith({})
+    const html = renderToStaticMarkup(
+      createElement(
+        AudienceModeProvider,
+        null,
+        createElement(EvalDetail, {
+          summary,
+          activeSummary: summaryWith({ evaluation_id: "mine%2Fbench-fr" }),
+          crossSourceContextLoader: loader,
+        }),
+      ),
+    )
+    expect(html).not.toContain(">Context<")
+    expect(loader).not.toHaveBeenCalled()
+  })
+})
+
+// A canonical score is whatever the registry's scale for the metric is.
+// The study plot was written for one study's fractions; a derived payload
+// has to say which scale its numbers are on or 60.2 is drawn as 6020.0%.
+
+describe("the scale the strip draws on", () => {
+  const derived = (...scores: number[]) =>
+    buildCrossSourceContext(
+      scores.map((score, index) =>
+        row({
+          modelKey: "m1",
+          displayName: "Model One",
+          score,
+          sourceSlug: index === 0 ? "mine" : `other-${index}`,
+        }),
+      ),
+      { subjectSourceSlug: "mine", subjectLabel: "This source" },
+    )!
+
+  const plot = (payload: Parameters<typeof ContextPlot>[0]["context"]) =>
+    renderToStaticMarkup(createElement(ContextPlot, { context: payload }))
+
+  it("reads a canonical 0-100 metric as it is published", () => {
+    const payload = derived(85, 80, 60.2)
+    expect(payload.scoreScale).toBe("raw")
+    const html = plot(payload)
+    expect(html).toContain("85.00")
+    expect(html).not.toContain("8500.0%")
+    expect(html).toContain("reported score, on this metric&#x27;s canonical scale")
+  })
+
+  it("still reads a fraction metric as a percentage", () => {
+    const payload = derived(0.85, 0.8)
+    expect(payload.scoreScale).toBe("fraction")
+    const html = plot(payload)
+    expect(html).toContain("85.0%")
+    // Percent formatting is not the study's claim about what it measured.
+    expect(html).not.toContain("binary run success rates")
+  })
+
+  it("says nothing about task counts it never measured", () => {
+    expect(plot(derived(0.85, 0.8))).not.toContain("0 tasks")
+  })
+
+  it("leaves a curated payload's scale, wording and task counts alone", () => {
+    const curated = {
+      ...derived(0.85, 0.8),
+      subjectLabel: null,
+      scoreScale: null,
+      models: derived(0.85, 0.8).models.map((model) => ({ ...model, nTasks: 86 })),
+    }
+    const html = plot(curated)
+    expect(html).toContain("85.0%")
+    expect(html).toContain("Current study (no feedback)")
+    expect(html).toContain("86 tasks")
+    expect(html).toContain("binary run success rates")
   })
 })

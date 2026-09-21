@@ -65,16 +65,18 @@ export function buildCrossSourceContext(
   const usable = rows.filter((row) => Number.isFinite(row.score) && row.modelKey)
   if (usable.length === 0) return null
 
-  const byModel = new Map<string, CrossSourceRow[]>()
-  for (const row of usable) {
-    byModel.set(row.modelKey, [...(byModel.get(row.modelKey) ?? []), row])
-  }
-
   // On a merged page no source is "this" one. Anchoring every strip to the
   // same source keeps them comparable down the column; picking the one with
   // the widest coverage keeps the most strips anchored at all.
   const subjectSlug =
     options.subjectSourceSlug ?? widestCoverageSource(usable) ?? undefined
+
+  const comparable = onOneScale(usable, subjectSlug)
+
+  const byModel = new Map<string, CrossSourceRow[]>()
+  for (const row of comparable) {
+    byModel.set(row.modelKey, [...(byModel.get(row.modelKey) ?? []), row])
+  }
 
   const models: ScaffoldContextModel[] = []
   const modelsWithoutContext: string[] = []
@@ -127,11 +129,20 @@ export function buildCrossSourceContext(
   models.sort((a, b) => b.points.length - a.points.length)
 
   const sources = new Map<string, string>()
-  for (const row of usable) sources.set(row.sourceSlug, row.sourceLabel)
+  for (const row of comparable) sources.set(row.sourceSlug, row.sourceLabel)
 
   const sourceList = [...sources].map(([id, display_name]) => ({ id, display_name }))
 
+  // Same reading the merged page takes of the same numbers: the payload
+  // carries no declared bounds, so the scale comes off the canonical
+  // scores, and only a set that fits entirely in [0,1] is a fraction the
+  // plot may draw as a percentage. scicode's canonical scores run 0 to
+  // 60.2, and 60.2 shown as "6020.0%" is a different number.
+  const drawn = models.flatMap((model) => [model.score, ...model.points.map((p) => p.score)])
+  const scoreScale = drawn.every((value) => value >= 0 && value <= 1) ? "fraction" : "raw"
+
   return {
+    scoreScale,
     // Study-only instrumentation. Empty rather than invented: the captions
     // that read these degrade to saying nothing, which is correct here.
     harvestedAt: "",
@@ -208,6 +219,38 @@ export function crossSourceRowsFromMerged(merged: MergedBenchmarkSummary): Cross
     })
   }
   return rows
+}
+
+/**
+ * The rows that are on the page's own scale.
+ *
+ * `score_canonical` is meant to be one scale per metric, and for a named
+ * metric it is: every source reports mmlu-pro accuracy as a fraction. For
+ * the unnamed `score` metric it is not. In the current snapshot benchpress
+ * publishes scicode as 21 to 60.2 and Artificial Analysis publishes the
+ * same models as 0 to 0.602, both in the canonical column; drop, math and
+ * tau2-bench split the same way. Drawn on one axis those read as a
+ * hundredfold disagreement nobody measured, which is the loudest thing the
+ * plot can say and it would be false.
+ *
+ * A source reporting anything above 1 is not on the fraction scale, which
+ * is the same reading of the same numbers the merged page takes. A source
+ * on the other scale from the page's own is dropped rather than converted:
+ * the conversion is the producer's to make, and guessing it here would
+ * invent a measurement.
+ */
+function onOneScale(
+  rows: readonly CrossSourceRow[],
+  subjectSlug: string | undefined,
+): readonly CrossSourceRow[] {
+  const scaleOf = new Map<string, "fraction" | "raw">()
+  for (const row of rows) {
+    if (row.score > 1) scaleOf.set(row.sourceSlug, "raw")
+    else if (!scaleOf.has(row.sourceSlug)) scaleOf.set(row.sourceSlug, "fraction")
+  }
+  const subjectScale = subjectSlug ? scaleOf.get(subjectSlug) : undefined
+  if (!subjectScale) return rows
+  return rows.filter((row) => scaleOf.get(row.sourceSlug) === subjectScale)
 }
 
 /** The source reporting the most models here. Ties break on slug so the
