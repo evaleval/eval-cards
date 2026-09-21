@@ -279,9 +279,38 @@ describe("scoring mode", () => {
     expect(state(summary, "decoding")).toBe("missing")
   })
 
-  it("reads the canonical mode case-insensitively and trimmed", () => {
-    const summary = evaluateReproducibilitySlots({ row: { scoring_mode: "  LOG_PROB " } })
-    expect(state(summary, "decoding")).toBe("not_applicable")
+  it("takes only the producer's two exact strings as a classification", () => {
+    // The column's contract names `generative` and `log_prob`. A value that
+    // merely looks like one of them is not one, and must not be allowed to
+    // beat a heuristic that reads the row correctly.
+    for (const scoring_mode of ["  LOG_PROB ", "LOG_PROB", "log_prob ", "Log_Prob"]) {
+      const summary = evaluateReproducibilitySlots({
+        row: { scoring_mode },
+        generation_config: { additional_details: { output_type: "generate_until" } },
+      })
+      expect(state(summary, "decoding")).toBe("missing")
+      expect(state(summary, "length")).toBe("missing")
+    }
+    for (const scoring_mode of [" GENERATIVE ", "Generative"]) {
+      const summary = evaluateReproducibilitySlots({
+        row: { scoring_mode },
+        generation_config: { additional_details: { output_type: "multiple_choice" } },
+      })
+      expect(state(summary, "decoding")).toBe("not_applicable")
+    }
+    // The exact strings still win, in both directions.
+    expect(
+      state(evaluateReproducibilitySlots({ row: { scoring_mode: "log_prob" } }), "decoding"),
+    ).toBe("not_applicable")
+    expect(
+      state(
+        evaluateReproducibilitySlots({
+          row: { scoring_mode: "generative" },
+          generation_config: { additional_details: { output_type: "multiple_choice" } },
+        }),
+        "decoding",
+      ),
+    ).toBe("missing")
   })
 
   it("falls back to the heuristics when the canonical mode is absent or unusable", () => {

@@ -177,10 +177,13 @@ function scoringMode(evidence: ReproducibilityEvidence): "log_prob" | "generativ
     typeof value === "string" ? value.trim().toLowerCase() : null
 
   // The producer's own classification, read before anything inferred from the
-  // row's raw fields. Any other value falls through, so a snapshot without the
-  // column is classified exactly as it was before the column existed.
+  // row's raw fields. The contract names two exact strings, so they are
+  // compared exactly: trimming and folding case would let a value the
+  // producer never emits override a heuristic that reads the row correctly.
+  // Anything else falls through, so a snapshot without the column is
+  // classified exactly as it was before the column existed.
   for (const path of cfg.canonical_paths ?? []) {
-    const value = norm(resolvePath(evidence, path))
+    const value = resolvePath(evidence, path)
     if (value === "log_prob" || value === "generative") return value
   }
   for (const path of cfg.output_type_paths ?? []) {
