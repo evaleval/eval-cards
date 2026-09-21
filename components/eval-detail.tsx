@@ -65,6 +65,11 @@ import {
   scoreSortBaseDirection,
 } from "@/lib/eval-processing"
 import type { BenchmarkEvalSummary, ModelResultForBenchmark } from "@/lib/eval-processing"
+import {
+  chooseProtocolColumns,
+  formatProtocolValue,
+  type ProtocolColumn,
+} from "@/lib/collections"
 import { CollectionTrajectories } from "@/components/collection-trajectories"
 import { isRecognizedEvaluator } from "@/lib/evaluators"
 import { useEvaluatorSlug } from "@/components/org-metadata-provider"
@@ -962,6 +967,35 @@ export function EvalDetail({
   )
   const [includeAssistedInRanking, setIncludeAssistedInRanking] = useState(false)
   const [showAssistedRows, setShowAssistedRows] = useState(true)
+
+  // Protocol rows repeat the model name — nine "Claude Opus 4.6" rows on
+  // the AISI inference-scaling page are nine runs at different reasoning
+  // budgets, and with only the name and the metric in the cell they read
+  // as nine copies of one row with inexplicably different scores. Give
+  // each axis that actually varies its own column. Derived from the whole
+  // page's rows, not the visible page, so the table doesn't change shape
+  // as the reader pages or filters.
+  const protocolColumns = useMemo<ProtocolColumn[]>(
+    () =>
+      chooseProtocolColumns(
+        lb.model_results.map((result) => result.protocol_condition),
+        summary.collection?.protocol_axes,
+      ),
+    [lb.model_results, summary.collection?.protocol_axes]
+  )
+
+  /** The compact one-line form for the narrow table, which has no room
+   *  for a column per axis: "xhigh · 32k · on". */
+  const protocolSummaryFor = useMemo(
+    () => (result: ModelResultForBenchmark) => {
+      if (protocolColumns.length === 0) return null
+      const parts = protocolColumns
+        .map((column) => formatProtocolValue(result.protocol_condition, column))
+        .filter((part): part is string => part != null)
+      return parts.length > 0 ? parts.join(" · ") : null
+    },
+    [protocolColumns]
+  )
 
   const hasParameterData = useMemo(
     () => sortedResults.some((result) => getParamsBillions(result) != null),
@@ -2070,6 +2104,24 @@ export function EvalDetail({
                             )}
                           </div>
                         )}
+                        {/* No room for a column per axis here, so the
+                            varying axes collapse to one line — the
+                            narrow table still has to distinguish two
+                            rows that carry the same model name. */}
+                        {protocolSummaryFor(modelResult) && (
+                          <div
+                            className="font-mono"
+                            style={{ fontSize: 10, color: "var(--fg-subtle)" }}
+                            title={protocolColumns
+                              .map(
+                                (column) =>
+                                  `${column.label}: ${formatProtocolValue(modelResult.protocol_condition, column) ?? "not set"}`,
+                              )
+                              .join("\n")}
+                          >
+                            {protocolSummaryFor(modelResult)}
+                          </div>
+                        )}
                       </td>
                       <td
                         className="font-mono tabular-nums"
@@ -2126,6 +2178,16 @@ export function EvalDetail({
                       onClick={() => cycleRowSort("developer")}
                     />
                   </th>
+                  {protocolColumns.map((column) => (
+                    <th
+                      key={`protocol-head-${column.key}`}
+                      className="hidden lg:table-cell"
+                      style={{ width: 96 }}
+                      title={`Protocol axis "${column.key}"${column.unit ? ` (${column.unit})` : ""} — varies across this page's runs`}
+                    >
+                      {column.label}
+                    </th>
+                  ))}
                   <th className="num" style={{ minWidth: 200 }}>
                     <SortableTh
                       label={lb.metric_config.unit ?? "Score"}
@@ -2346,6 +2408,24 @@ export function EvalDetail({
                           </div>
                         </td>
 
+                        {protocolColumns.map((column) => {
+                          const value = formatProtocolValue(modelResult.protocol_condition, column)
+                          return (
+                            <td
+                              key={`protocol-cell-${key}-${column.key}`}
+                              className="hidden lg:table-cell align-top font-mono"
+                              style={{
+                                fontSize: 11,
+                                color: value == null ? "var(--fg-subtle)" : "var(--fg-muted)",
+                                whiteSpace: "nowrap",
+                              }}
+                              title={value == null ? `${column.label}: not set for this run` : undefined}
+                            >
+                              {value ?? "—"}
+                            </td>
+                          )
+                        })}
+
                         <td className="num align-top">
                           {/* Score with inline performance bar so the
                               previously-dedicated bar column can be
@@ -2478,7 +2558,7 @@ export function EvalDetail({
 
                       {isExpanded && (
                         <tr>
-                          <td colSpan={7} style={{ background: "var(--bg-warm)", padding: 0 }}>
+                          <td colSpan={7 + protocolColumns.length} style={{ background: "var(--bg-warm)", padding: 0 }}>
                             <div className="space-y-5 px-4 py-5 sm:px-6">
                               {/* The Model Profile / Provenance / Score Breakdown
                                   panels were removed — model metadata lives on
@@ -2672,7 +2752,7 @@ export function EvalDetail({
                 })}
                 {leaderboardRows.length === 0 && (
                   <tr>
-                    <td colSpan={7} style={{ padding: "32px 16px", textAlign: "center", color: "var(--fg-muted)" }}>
+                    <td colSpan={7 + protocolColumns.length} style={{ padding: "32px 16px", textAlign: "center", color: "var(--fg-muted)" }}>
                       No leaderboard entries match the selected parameter range.
                     </td>
                   </tr>

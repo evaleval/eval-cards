@@ -4,7 +4,9 @@ import {
   buildCollectionAttachment,
   buildScaffoldContext,
   chooseComputeAxis,
+  chooseProtocolColumns,
   feedbackConditionOf,
+  formatProtocolValue,
   type CollectionContextSidecar,
   type ScaffoldContextEntry,
   type ScaffoldContextSummaryInput,
@@ -322,5 +324,112 @@ describe("buildScaffoldContext (Context view payload, finding I1)", () => {
     expect(buildScaffoldContext(undefined, summary)).toBeNull()
     expect(buildScaffoldContext(null, summary)).toBeNull()
     expect(buildScaffoldContext({ ...entry, models: {} }, summary)).toBeNull()
+  })
+})
+
+
+describe("chooseProtocolColumns", () => {
+  const axes = [
+    { key: "scaffold", type: "categorical" },
+    { key: "compaction", type: "boolean" },
+    { key: "feedback", type: "categorical" },
+    { key: "token_limit", type: "int", unit: "tokens" },
+    { key: "reasoning_tokens", type: "int", unit: "tokens" },
+    { key: "reasoning_effort", type: "categorical" },
+  ]
+
+  it("keeps only the axes that vary across the page's rows", () => {
+    // The AISI shape: one scaffold everywhere, effort and thinking
+    // tokens are what separate the runs.
+    const columns = chooseProtocolColumns(
+      [
+        cond({ scaffold: "S-adaptive", feedback: "none", reasoning_effort: "high", reasoning_tokens: 32000 }),
+        cond({ scaffold: "S-adaptive", feedback: "none", reasoning_effort: "xhigh", reasoning_tokens: 32000 }),
+        cond({ scaffold: "S-adaptive", feedback: "none", reasoning_effort: "xhigh", reasoning_tokens: 64000 }),
+      ],
+      axes,
+    )
+    expect(columns.map((c) => c.key)).toEqual(["reasoning_tokens", "reasoning_effort"])
+    // Declared order is the study's, and the labels are readable.
+    expect(columns.map((c) => c.label)).toEqual(["Thinking tokens", "Effort"])
+  })
+
+  it("never adds a feedback column — the assisted badge already says it", () => {
+    const columns = chooseProtocolColumns(
+      [cond({ feedback: "none" }), cond({ feedback: "answer_feedback" })],
+      axes,
+    )
+    expect(columns).toEqual([])
+  })
+
+  it("treats a missing key and an explicit null as one reading", () => {
+    // Otherwise "absent" and "null" would look like two values and
+    // conjure a column that explains nothing.
+    const columns = chooseProtocolColumns(
+      [
+        cond({ scaffold: "S-adaptive", reasoning_effort: null }),
+        cond({ scaffold: "S-adaptive" }),
+      ],
+      axes,
+    )
+    expect(columns).toEqual([])
+  })
+
+  it("surfaces an axis the sidecar never declared", () => {
+    const columns = chooseProtocolColumns(
+      [cond({ retries: 1 }), cond({ retries: 3 })],
+      axes,
+    )
+    expect(columns.map((c) => c.key)).toEqual(["retries"])
+    expect(columns[0].label).toBe("Retries")
+  })
+
+  it("returns nothing when there is only one protocol row to explain", () => {
+    expect(chooseProtocolColumns([cond({ reasoning_effort: "high" })], axes)).toEqual([])
+    expect(chooseProtocolColumns([null, undefined], axes)).toEqual([])
+  })
+
+  it("caps the columns so the table stays readable", () => {
+    const many = chooseProtocolColumns(
+      [
+        cond({ a: 1, b: 1, c: 1, d: 1, e: 1, f: 1 }),
+        cond({ a: 2, b: 2, c: 2, d: 2, e: 2, f: 2 }),
+      ],
+      [],
+    )
+    expect(many).toHaveLength(4)
+  })
+})
+
+describe("formatProtocolValue", () => {
+  const column = (over: Record<string, unknown> = {}) => ({
+    key: "reasoning_tokens",
+    label: "Thinking tokens",
+    type: "int",
+    unit: "tokens",
+    ...over,
+  }) as Parameters<typeof formatProtocolValue>[1]
+
+  it("renders token counts compactly", () => {
+    expect(formatProtocolValue(cond({ reasoning_tokens: 32000 }), column())).toBe("32k")
+    expect(formatProtocolValue(cond({ reasoning_tokens: 10_000_000 }), column())).toBe("10M")
+    expect(formatProtocolValue(cond({ reasoning_tokens: 1500 }), column())).toBe("1.5k")
+  })
+
+  it("renders booleans, strings and unset values", () => {
+    const compaction = column({ key: "compaction", label: "Compaction", type: "boolean", unit: null })
+    expect(formatProtocolValue(cond({ compaction: true }), compaction)).toBe("on")
+    expect(formatProtocolValue(cond({ compaction: false }), compaction)).toBe("off")
+    const effort = column({ key: "reasoning_effort", label: "Effort", type: "categorical", unit: null })
+    expect(formatProtocolValue(cond({ reasoning_effort: "xhigh" }), effort)).toBe("xhigh")
+    // Null and absent are "the study did not set it here", not a value.
+    expect(formatProtocolValue(cond({ reasoning_effort: null }), effort)).toBeNull()
+    expect(formatProtocolValue(cond({}), effort)).toBeNull()
+    expect(formatProtocolValue(null, effort)).toBeNull()
+  })
+
+  it("leaves a plain number alone when the axis is not a count", () => {
+    const temp = column({ key: "temperature", label: "Temperature", type: "unknown", unit: null })
+    expect(formatProtocolValue(cond({ temperature: 2000 }), temp)).toBe("2000")
   })
 })
