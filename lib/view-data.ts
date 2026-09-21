@@ -7,6 +7,7 @@ import { fetchCollectionContext, fetchCollections, fetchHeadline } from "@/lib/s
 import {
   buildCollectionAttachment,
   buildScaffoldContext,
+  type CollectionsSidecarEntry,
   type FeedbackCondition,
 } from "@/lib/collections"
 import {
@@ -157,6 +158,7 @@ const MODEL_CELL_JOIN_COLUMNS = `
   e.family_display_name AS eval_family_display_name,
   e.is_slice AS eval_is_slice,
   e.parent_benchmark_id AS eval_parent_benchmark_id,
+  e.composite_slug AS eval_composite_slug,
   e.composite_display_name AS eval_composite_benchmark_name,
   CAST(to_json(e.derived_tags) AS VARCHAR) AS eval_derived_tags,
   CAST(to_json(e.metric_config) AS VARCHAR) AS eval_metric_config,
@@ -219,6 +221,7 @@ const EVAL_CELL_JOIN_COLUMNS = `
   e.family_display_name AS eval_family_display_name,
   e.is_slice AS eval_is_slice,
   e.parent_benchmark_id AS eval_parent_benchmark_id,
+  e.composite_slug AS eval_composite_slug,
   e.composite_display_name AS eval_composite_benchmark_name,
   CAST(to_json(e.derived_tags) AS VARCHAR) AS eval_derived_tags,
   CAST(to_json(e.metric_config) AS VARCHAR) AS eval_metric_config,
@@ -740,10 +743,14 @@ function reshapeCellToModelResult(row: Row): ModelResultForBenchmark {
     collection_id: optionalString(row.collection_id),
     protocol_condition: optionalString(row.protocol_condition) ?? undefined,
     judge_condition: optionalString(row.judge_condition) ?? undefined,
+    // The reproducibility slots ask which harness a re-runner would have
+    // to obtain and pin, so the row has to carry it.
+    eval_library: parseMaybeJson(row.eval_library) as ModelResultForBenchmark["eval_library"],
     // Always projected: the producer's column, or the rule derived from
     // the ranking on a snapshot that predates it.
     is_headline: row.is_headline == null ? undefined : Boolean(row.is_headline),
     metric_source_label: optionalString(row.metric_source_label),
+    scoring_mode: optionalString(row.scoring_mode),
     comparability_status: comparabilityStatusFromRow(row),
     score_published: optionalNumber(row.score_published),
     aggregate_components: asArray<NonNullable<ModelResultForBenchmark["aggregate_components"]>[number]>(
@@ -769,6 +776,7 @@ function reshapeCellToBenchmarkEvaluation(row: Row): BenchmarkEvaluation {
     canonical_display_name: optionalString(row.eval_canonical_display_name),
     derived_tags: coerceTags(row.eval_derived_tags ?? row.derived_tags),
     family_id: optionalString(row.eval_family_id),
+    composite_slug: optionalString(row.eval_composite_slug),
     benchmark_family_name: optionalString(row.eval_family_display_name),
     parent_benchmark_id: optionalString(row.eval_parent_benchmark_id),
     parent_benchmark_display_name: optionalString(row.eval_parent_benchmark_display_name),
@@ -785,11 +793,17 @@ function reshapeCellToBenchmarkEvaluation(row: Row): BenchmarkEvaluation {
     eval_library: evalLibrary as BenchmarkEvaluation["eval_library"],
     model_info: (modelInfo ?? modelInfoFromModelRow(row)) as ModelInfo,
     generation_config: generationConfig as BenchmarkEvaluation["generation_config"],
+    collection_id: optionalString(row.collection_id),
+    protocol_condition: optionalString(row.protocol_condition),
     evaluation_results: [result],
   }
 }
 
-function modelSummaryFromRows(modelRow: Row, cellRows: Row[]): ModelEvaluationSummary {
+function modelSummaryFromRows(
+  modelRow: Row,
+  cellRows: Row[],
+  collections?: Record<string, CollectionsSidecarEntry>,
+): ModelEvaluationSummary {
   // An evaluation can carry several tags, so it appears under each of its
   // tags (multi-membership), unlike the old single-category grouping.
   const evaluationsByTag: Record<string, BenchmarkEvaluation[]> = {}
@@ -818,6 +832,7 @@ function modelSummaryFromRows(modelRow: Row, cellRows: Row[]): ModelEvaluationSu
     reproducibility_summary: modelRow.reproducibility_summary,
     provenance_summary: modelRow.provenance_summary,
     comparability_summary: modelRow.comparability_summary,
+    collections,
   }
 
   const variants = asArray<Row>(modelRow.variants).map((variant, index) => ({
@@ -934,6 +949,7 @@ interface EvalResultsViewCapabilities {
   comparabilityStatus: boolean
   scorePublished: boolean
   divergenceFlags: boolean
+  scoringMode: boolean
 }
 
 /**
@@ -976,6 +992,7 @@ async function evalResultsViewCapabilities(): Promise<EvalResultsViewCapabilitie
     scorePublished: names.has("score_published"),
     divergenceFlags:
       names.has("has_variant_divergence") && names.has("has_cross_party_divergence"),
+    scoringMode: names.has("scoring_mode"),
   }
 }
 
@@ -1020,14 +1037,27 @@ function headlinePredicate(caps: EvalResultsViewCapabilities, indent = "       "
   return ""
 }
 
+function collectionRowColumns(caps: EvalResultsViewCapabilities) {
+  return caps.collections
+    ? "r.collection_id, r.protocol_condition"
+    : "CAST(NULL AS VARCHAR) AS collection_id, CAST(NULL AS VARCHAR) AS protocol_condition"
+}
+
+// How the producer classified the run: `generative`, `log_prob`, or NULL when
+// it could not tell. The reproducibility slots read it in preference to
+// anything they can infer from a row's raw fields, and a snapshot without the
+// column reads as NULL and falls back to that inference.
+function scoringModeColumn(caps: EvalResultsViewCapabilities) {
+  return caps.scoringMode ? "r.scoring_mode" : "CAST(NULL AS VARCHAR) AS scoring_mode"
+}
+
 function additiveEvalRowColumns(caps: EvalResultsViewCapabilities) {
   return `
-  ${caps.collections
-    ? "r.collection_id, r.protocol_condition"
-    : "CAST(NULL AS VARCHAR) AS collection_id, CAST(NULL AS VARCHAR) AS protocol_condition"},
+  ${collectionRowColumns(caps)},
   ${caps.evaluatorDisplayName
     ? "r.evaluator_display_name"
-    : "CAST(NULL AS VARCHAR) AS evaluator_display_name"},${issue47Columns(caps)}`
+    : "CAST(NULL AS VARCHAR) AS evaluator_display_name"},
+  ${scoringModeColumn(caps)},${issue47Columns(caps)}`
 }
 
 function evalCellJoinColumns(caps: EvalResultsViewCapabilities) {
@@ -1089,8 +1119,10 @@ async function getModelEvaluationRows(modelKey: string): Promise<Row[]> {
   // name). Querying by model_id alone would silently miss unresolved models.
   // The model page summarises a model's standing, so it reads headline rows
   // only — a losing judge or protocol arm belongs on the benchmark page.
+  // The collection columns ride along so a headline row can still say the
+  // setting it was measured under; they do not widen what is selected.
   return readRows<Row>(
-    `SELECT ${modelCellJoinColumns(hasParentDisplayName)},${issue47Columns(caps)}
+    `SELECT ${modelCellJoinColumns(hasParentDisplayName)},${collectionRowColumns(caps)},${issue47Columns(caps)}
      FROM eval_results_view r
      LEFT JOIN evals_view e ON r.evaluation_id = e.evaluation_id
      WHERE r.model_key = ?
@@ -1163,6 +1195,44 @@ export async function getEvalListLiteData(): Promise<{
   totalModels: number
 }> {
   return getEvalListData()
+}
+
+// One query per process. The index is a few dozen strings that only
+// change when the snapshot does, and it is read on every request of the
+// segments that render evaluator links.
+let evaluatorNameIndexCache: Promise<string[]> | undefined
+
+/**
+ * Every reporting org that has an /evaluators/<slug> page: the same
+ * universe the slug map is built from, read straight off evals_view so a
+ * page can check a name against it without loading the whole eval list.
+ * Empty on a snapshot that cannot answer, and an empty index links
+ * nothing rather than linking everything.
+ */
+export async function getEvaluatorNameIndex(): Promise<string[]> {
+  if (!evaluatorNameIndexCache) {
+    evaluatorNameIndexCache = (async () => {
+      const rows = await readRows<{ name: string }>(
+        `SELECT DISTINCT unnest(evaluator_names) AS name
+         FROM evals_view
+         WHERE evaluator_names IS NOT NULL`
+      )
+      return rows
+        .map((row) => asString(row.name).trim())
+        .filter((name) => name.length > 0)
+        .sort((a, b) => a.localeCompare(b))
+    })().catch((err) => {
+      console.warn(
+        `[view-data] evaluator name index unavailable: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      )
+      // Don't pin a transient failure for the process lifetime.
+      evaluatorNameIndexCache = undefined
+      return [] as string[]
+    })
+  }
+  return evaluatorNameIndexCache
 }
 
 export async function getEvalList() {
@@ -1239,7 +1309,39 @@ export async function getModelSummaryById(routeId: string): Promise<ModelEvaluat
   if (!modelRow) return null
 
   const cellRows = await getModelEvaluationRows(asString(modelRow.model_key ?? modelRow.model_id, routeId))
-  return modelSummaryFromRows(modelRow, cellRows)
+  return modelSummaryFromRows(modelRow, cellRows, await curatedCollectionsForRows(cellRows))
+}
+
+/**
+ * The curated sidecar entries for the collections these rows belong to:
+ * what gives a row's protocol numbers their declared units and names the
+ * study it can be read against. Uncurated ids are left out, so an
+ * ordinary result stays ordinary. A missing or unreadable sidecar costs
+ * the labels, never the page.
+ */
+async function curatedCollectionsForRows(
+  rows: Row[],
+): Promise<Record<string, CollectionsSidecarEntry> | undefined> {
+  const ids = new Set(
+    rows.map((row) => optionalString(row.collection_id)).filter((id): id is string => Boolean(id)),
+  )
+  if (ids.size === 0) return undefined
+  try {
+    const entries = await fetchCollections()
+    let collections: Record<string, CollectionsSidecarEntry> | undefined
+    for (const id of ids) {
+      const entry = entries[id]
+      if (!entry?.curated) continue
+      collections = collections ?? {}
+      collections[id] = entry
+    }
+    return collections
+  } catch (err) {
+    console.warn(
+      `[view-data] collections lookup failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+    return undefined
+  }
 }
 
 // Build-time precomputed multi-metric / per-slice matrix produced by
@@ -1647,6 +1749,8 @@ const MERGED_RESULT_COLUMNS = `
   CAST(r.evaluation_timestamp AS VARCHAR) AS evaluation_timestamp,
   CAST(to_json(r.generation_config) AS VARCHAR) AS generation_config,
   CAST(to_json(r.source_metadata) AS VARCHAR) AS source_metadata,
+  CAST(to_json(r.source_data) AS VARCHAR) AS source_data,
+  CAST(to_json(r.eval_library) AS VARCHAR) AS eval_library,
   r.is_verified_evaluator
 `
 
@@ -1665,7 +1769,9 @@ function mergedObservationFromRow(row: Row): MergedObservationRow {
     scale_conversion: (optionalString(row.scale_conversion) ?? null) as MergedScaleConversion | null,
     evaluation_timestamp: asString(row.evaluation_timestamp, ""),
     source_metadata: sourceMetadataFromRow(row),
+    source_data: (parseMaybeJson(row.source_data) ?? undefined) as SourceData | undefined,
     generation_config: (generationConfig ?? undefined) as GenerationConfig | undefined,
+    eval_library: parseMaybeJson(row.eval_library) as MergedObservationRow["eval_library"],
     is_verified_evaluator:
       row.is_verified_evaluator == null ? undefined : Boolean(row.is_verified_evaluator),
     evaluator_display_name: optionalString(row.evaluator_display_name),
@@ -1675,6 +1781,7 @@ function mergedObservationFromRow(row: Row): MergedObservationRow {
     is_headline: row.is_headline == null ? undefined : Boolean(row.is_headline),
     metric_source_label: optionalString(row.metric_source_label),
     comparability_status: comparabilityStatusFromRow(row),
+    scoring_mode: optionalString(row.scoring_mode),
     score_published: optionalNumber(row.score_published),
   }
 }
@@ -1790,6 +1897,33 @@ export async function getMergedBenchmarkSummary(
     benchmarkCard = (parseMaybeJson(cardRow.benchmark_card) ?? null) as BenchmarkCard | null
   }
 
+  // Curated-collection entries for the collections these rows belong to.
+  // The reader needs them to name the study a row comes from and to give
+  // its protocol numbers their declared units; uncurated entries carry
+  // neither, and every ordinary row has a collection_id.
+  const observations = resultRows.map(mergedObservationFromRow)
+  let collections: Record<string, CollectionsSidecarEntry> | undefined
+  try {
+    const ids = new Set(
+      observations.map((obs) => obs.collection_id).filter((id): id is string => Boolean(id)),
+    )
+    if (ids.size > 0) {
+      const entries = await fetchCollections()
+      for (const id of ids) {
+        const entry = entries[id]
+        if (!entry?.curated) continue
+        collections = collections ?? {}
+        collections[id] = entry
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `[view-data] merged collections lookup failed for ${benchmarkId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
+  }
+
   return {
     merged: true,
     evaluation_id: asString(row.evaluation_id),
@@ -1813,12 +1947,13 @@ export async function getMergedBenchmarkSummary(
     selected_metric_id: selectedMetricId,
     selected_lower_is_better: selectedLowerIsBetter,
     selected_slice_id: selectedSliceId,
-    results: resultRows.map(mergedObservationFromRow),
+    results: observations,
     // Same batched models_view lookup the per-source page runs: a merged
     // page carries judged rows too, and without the map every one of them
     // labels its judge with a raw canonical id.
     judge_display_names: await fetchJudgeDisplayNames(resultRows),
     benchmark_card: benchmarkCard,
+    collections,
   }
 }
 

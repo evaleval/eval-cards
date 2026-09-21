@@ -40,6 +40,7 @@ import {
   ChevronDown, ChevronUp, BarChart3, Award, AlertTriangle, ArrowUpRight,
   Cpu, Tag, Globe, Network, Activity, MessageSquare, Clock, Hash, Layers, Search, FlaskConical, Scale, BookOpenText, Plus, X, List, LayoutGrid
 } from "lucide-react"
+import { RunProtocolSummary } from "@/components/protocol-axis-fields"
 import type { BenchmarkCard, BenchmarkEvaluation, EvalTag, EvaluationResult } from "@/lib/benchmark-schema"
 import { getTagColor as getCategoryTone, inferTagsFromBenchmark } from "@/lib/benchmark-schema"
 import { formatTagLabel } from "@/lib/benchmark-tags"
@@ -3188,6 +3189,9 @@ export function BenchmarkDetail({
           evalSummaryId: id,
           temperature: gc?.generation_args?.temperature ?? null,
           maxTokens: gc?.generation_args?.max_tokens ?? null,
+          collectionId: variant.evaluation.collection_id ?? null,
+          protocolCondition: variant.evaluation.protocol_condition ?? null,
+          studyFamilyKey: variant.evaluation.composite_slug ?? null,
           annotations: variant.result.evalcards?.annotations ?? null,
         })
       }
@@ -3213,11 +3217,24 @@ export function BenchmarkDetail({
         metricName: primary.metricLabel,
         temperature: gc?.generation_args?.temperature ?? null,
         maxTokens: gc?.generation_args?.max_tokens ?? null,
+        collectionId: primary.evaluation.collection_id ?? null,
+        protocolCondition: primary.evaluation.protocol_condition ?? null,
+        studyFamilyKey: primary.evaluation.composite_slug ?? null,
         annotations: primary.result.evalcards?.annotations ?? null,
       })
     }
     return { candidates, joinRows }
   }, [benchmarkGroups])
+
+  // The family keys /evals?family= can actually resolve: the cleaned
+  // hierarchy nests and drops composites, and the listing matches
+  // top-level keys exactly, so a study name only links where its key is
+  // one of these. Empty while the hierarchy loads, which costs the link
+  // and nothing else.
+  const topLevelFamilyKeys = useMemo(
+    () => new Set((evalHierarchy?.families ?? []).map((family) => family.key)),
+    [evalHierarchy],
+  )
 
   // Cross-suite overlaps table data — see lib/overlaps.ts for the row
   // semantics (multi-family rows via benchmark_index + comparison-index,
@@ -5760,6 +5777,17 @@ export function BenchmarkDetail({
                                   </dd>
                                 </dl>
                               </div>
+                              <RunProtocolSummary
+                                collectionId={app.collectionId}
+                                protocolCondition={app.protocolCondition}
+                                familyKey={
+                                  app.studyFamilyKey && topLevelFamilyKeys.has(app.studyFamilyKey)
+                                    ? app.studyFamilyKey
+                                    : null
+                                }
+                                evalSummaryId={app.evalSummaryId}
+                                collections={summary.collections}
+                              />
                             </div>
                           )
                         })}

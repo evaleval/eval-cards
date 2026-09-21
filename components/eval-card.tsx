@@ -19,7 +19,7 @@ import {
 } from "lucide-react"
 import Link from "next/link"
 import { routeIdToPath } from "@/lib/utils"
-import { useEvaluatorSlug } from "@/components/org-metadata-provider"
+import { useEvaluatorSlug, useKnownEvaluator } from "@/components/org-metadata-provider"
 import { isRecognizedEvaluator } from "@/lib/evaluators"
 import type { BenchmarkEvalListItem } from "@/lib/eval-processing"
 import { getTagColor, tagLabel } from "@/lib/benchmark-schema"
@@ -60,6 +60,7 @@ interface EvalCardProps {
 export function EvalCard({ summary, delayMs = 0 }: EvalCardProps) {
   const router = useRouter()
   const slugFor = useEvaluatorSlug()
+  const isKnownEvaluator = useKnownEvaluator()
   const { mode } = useAudienceMode()
   const isResearchView = mode === "research"
   // A null normalised score (metric without bounds, or nothing to normalise)
@@ -278,13 +279,19 @@ export function EvalCard({ summary, delayMs = 0 }: EvalCardProps) {
                       : summary.evaluator_names.map((name, i) => (
                           <span key={name} className="inline-flex items-center">
                             {i > 0 ? ", " : null}
-                            <Link
-                              href={`/evaluators/${slugFor(name)}`}
-                              className="hover:text-[color:var(--accent)] hover:underline"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              {name}
-                            </Link>
+                            {/* Only an org with an evaluator page links;
+                                anything else stays plain text. */}
+                            {!isKnownEvaluator(name) ? (
+                              <span>{name}</span>
+                            ) : (
+                              <Link
+                                href={`/evaluators/${slugFor(name)}`}
+                                className="hover:text-[color:var(--accent)] hover:underline"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                {name}
+                              </Link>
+                            )}
                             <VerifiedBadge
                               verified={verifiedEvaluators.has(name)}
                               recognized={isRecognizedEvaluator(name)}

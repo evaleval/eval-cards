@@ -1,6 +1,11 @@
 import type { Metadata } from "next"
 
-import { getEvalSummaryById, getMergedBenchmarkSummary } from "@/lib/data-backend"
+import { EvaluatorIndexProvider } from "@/components/org-metadata-provider"
+import {
+  getEvalSummaryById,
+  getEvaluatorNameIndex,
+  getMergedBenchmarkSummary,
+} from "@/lib/data-backend"
 import { isMergedEvalId, routeIdFromSegments, routeIdToPath } from "@/lib/utils"
 
 /**
@@ -74,8 +79,15 @@ export async function generateMetadata(props: {
   }
 }
 
-export default function EvalDetailLayout({
+/**
+ * The benchmark page names the orgs that reported each result and links
+ * them to their evaluator pages, so this segment (and only this one)
+ * carries the index those links are checked against. Cached per process,
+ * so it is one small query rather than one per request.
+ */
+export default async function EvalDetailLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  return children
+  const evaluatorNames = await getEvaluatorNameIndex().catch(() => [] as string[])
+  return <EvaluatorIndexProvider names={evaluatorNames}>{children}</EvaluatorIndexProvider>
 }

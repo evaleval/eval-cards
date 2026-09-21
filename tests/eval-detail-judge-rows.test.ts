@@ -1,15 +1,20 @@
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { AudienceModeProvider } from "@/components/audience-mode-provider"
 import { EvalDetail } from "@/components/eval-detail"
 import type { BenchmarkEvalSummary, ModelResultForBenchmark } from "@/lib/eval-processing"
 
+vi.mock("next/navigation", () => import("./next-navigation-stub"))
+
 // The leaderboard ranks CLIENT-side, so a NULL backend rank is not enough
 // on its own: these render the real component and read the rows it emits.
 // One ranked row per model, the model's other judge readings beneath it,
-// unranked and labelled.
+// unranked and labelled. A judged page folds nothing: a second judge
+// panel is another reading of the same cell, not another run of the
+// model, so it keeps its own row whether or not the page also varies a
+// protocol.
 
 function result(overrides: Partial<ModelResultForBenchmark>): ModelResultForBenchmark {
   const score = overrides.score ?? 0.8
@@ -174,9 +179,13 @@ describe("EvalDetail leaderboard rows — judge and protocol readings", () => {
     // takes one, and the assisted 0.95 never outranks Model A.
     expect(html.match(/#1/g) ?? []).toHaveLength(1)
     expect(html).not.toContain("#3")
-    expect(html).toContain("assisted")
     expect(html).toContain("Study-specific protocol")
-    expect(html).toContain("Assisted run (answer feedback) — shown, not ranked")
+    // The page varies a protocol, so Model B's runs fold. The assisted
+    // 0.95 is inside that fold, counted in neither its score nor its
+    // range, and the row says so rather than hiding it.
+    expect(html).toContain("1 assisted run also listed")
+    // The judge reading is not a run of the model, so it stays its own
+    // row rather than folding into Model A's number.
     expect(html).toContain("Another judge&#x27;s reading of the same model — shown, not ranked")
 
     // Because the backend already withheld the rank, the control cannot

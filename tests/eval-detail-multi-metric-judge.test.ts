@@ -1,6 +1,6 @@
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { AudienceModeProvider } from "@/components/audience-mode-provider"
 import { EvalDetail } from "@/components/eval-detail"
@@ -9,6 +9,8 @@ import type {
   BenchmarkLeaderboardRow,
   ModelResultForBenchmark,
 } from "@/lib/eval-processing"
+
+vi.mock("next/navigation", () => import("./next-navigation-stub"))
 
 // An eval with more than one root metric renders the model × metric pivot
 // instead of the per-row leaderboard. The pivot keeps one row per model, so

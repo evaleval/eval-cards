@@ -34,7 +34,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { cn, formatDateISO, humanizeEvaluationId, routeIdFromModelId, routeIdToPath } from "@/lib/utils"
+import { cn, familyEvalsHref, formatDateISO, humanizeEvaluationId, routeIdFromModelId, routeIdToPath } from "@/lib/utils"
 import {
   AlertTriangle,
   BarChart3,
@@ -60,19 +60,40 @@ import {
   judgeCellSummary,
   judgeConditionSummary,
   modelGroupKey,
-  orderGroupsByScore,
+  observationKey,
   primaryMetricColumnKey,
   scoreSortBaseDirection,
+  scoreStandings,
+  summariseScoreSpread,
 } from "@/lib/eval-processing"
 import type { BenchmarkEvalSummary, ModelResultForBenchmark } from "@/lib/eval-processing"
 import {
   chooseProtocolColumns,
-  formatProtocolValue,
+  compareProtocolRows,
+  compareProtocolTuples,
+  declaredAxisKeys,
+  declaredKeysOf,
+  protocolFilterOptions,
+  protocolValueId,
+  readProtocolAxis,
+  summariseProtocolReadings,
+  unionProtocolAxes,
+  type ProtocolAxisReading,
   type ProtocolColumn,
+  type StudyRef,
 } from "@/lib/collections"
+import { useProtocolFilters } from "@/lib/use-protocol-filters"
+import {
+  ProtocolFilters,
+  ProtocolNarrowItems,
+  ProtocolNarrowRanges,
+  ProtocolSortButton,
+  ProtocolValueText,
+  protocolHeaderTitle,
+} from "@/components/protocol-axis-fields"
 import { CollectionTrajectories } from "@/components/collection-trajectories"
 import { isRecognizedEvaluator } from "@/lib/evaluators"
-import { useEvaluatorSlug } from "@/components/org-metadata-provider"
+import { EvaluatorName, useKnownEvaluator } from "@/components/org-metadata-provider"
 import type { ComparisonIndex, EvalHierarchy } from "@/lib/backend-artifacts"
 import type { HierarchyEvalLocation } from "@/lib/hierarchy-lookup"
 import { PolicyOverview } from "@/components/policy-overview"
@@ -126,6 +147,29 @@ interface EvalDetailProps {
    *  per-source evaluation_id in scope here, so MergedBenchmarkView
    *  passes the resolved per-source href down. */
   studySourceHref?: string
+}
+
+/** One model's folded leaderboard row: the run it reports, and every
+ *  run listed beneath it. */
+interface LeaderboardFold {
+  key: string
+  /** The headline run's standing, assigned once on the readings. A fold
+   *  never carries a rank of its own. */
+  rank: number
+  /** The pipeline's designated reading for this model: the row whose
+   *  score, standing and metadata the folded row shows. The producer
+   *  picks it (best non-assisted arm, or the preferred judge panel). */
+  headlineRow: LeaderboardRow
+  /** Every run of this model the fold stands for, headline included. */
+  members: LeaderboardRow[]
+  /** The headline run's score: the number the row reports. */
+  score: number
+  normalizedScore: number
+  /** How many UNASSISTED runs the range below spans. */
+  runCount: number
+  minScore: number
+  maxScore: number
+  assistedCount: number
 }
 
 interface LeaderboardRow {
@@ -448,39 +492,6 @@ function formatMetadataValue(value: unknown): string {
 // shared YYYY-MM-DD implementation lives in `lib/utils` so model-page
 // and other surfaces format identically.
 const formatDate = formatDateISO
-
-/**
- * Render an evaluator org name. When `linkName` is a known evaluator (a
- * de-aliased name with a /evaluators/<slug> page) the name links there;
- * otherwise it renders as plain text so we never emit a broken link. The
- * slug uses the shared, deterministic `evaluatorSlug` base helper.
- */
-function EvaluatorName({
-  display,
-  linkName,
-  className,
-  style,
-}: {
-  display: React.ReactNode
-  linkName: string | null
-  className?: string
-  style?: React.CSSProperties
-}) {
-  const slugFor = useEvaluatorSlug()
-  if (!linkName) {
-    return <span className={className} style={style}>{display}</span>
-  }
-  return (
-    <Link
-      href={`/evaluators/${slugFor(linkName)}`}
-      className={cn("hover:text-[color:var(--accent)] hover:underline", className)}
-      style={style}
-      onClick={(e) => e.stopPropagation()}
-    >
-      {display}
-    </Link>
-  )
-}
 
 /**
  * Render a benchmark-card field path (e.g. `methodology.metrics`,
@@ -881,12 +892,65 @@ export function EvalDetail({
     return (modelId: string) => names[modelId] ?? modelId
   }, [lb.judge_display_names, summary.judge_display_names])
 
+  // Protocol rows repeat the model name: nine "Claude Opus 4.6" rows on
+  // the AISI inference-scaling page are nine runs at different reasoning
+  // budgets, and with only the name and the metric in the cell they read
+  // as nine copies of one row with inexplicably different scores. So the
+  // budgets the study declares a unit for are always on the row, and every
+  // other axis earns a column by varying. Derived from the whole page's
+  // rows, not the visible page, so the table doesn't change shape as the
+  // reader pages or filters.
+  //
+  // A merged page's rows can come from several collections, so the
+  // descriptors are the union of their declared axes and each row is read
+  // against its OWN collection's keys: a row from a source that never ran
+  // the study says "Not applicable", not "Not reported".
+  const axesByCollection = summary.protocol_axes_by_collection
+  const declaredAxes = useMemo(
+    () =>
+      axesByCollection
+        ? unionProtocolAxes(axesByCollection)
+        : summary.collection?.protocol_axes,
+    [axesByCollection, summary.collection?.protocol_axes]
+  )
+  const protocolColumns = useMemo<ProtocolColumn[]>(
+    () =>
+      chooseProtocolColumns(
+        lb.model_results.map((result) => result.protocol_condition),
+        declaredAxes,
+      ),
+    [lb.model_results, declaredAxes]
+  )
+
+  // A per-source study page declares one axis list for every row, so a
+  // row with no protocol of its own is still a row the declared budgets
+  // apply to: it reads "Not reported", never "Not applicable".
+  const pageDeclaredKeys = useMemo(() => {
+    if (axesByCollection) return null
+    const keys = declaredKeysOf(summary.collection?.protocol_axes)
+    // Nothing declared means nothing to judge a row against, which is the
+    // reading readProtocolAxis already makes from the row alone.
+    return keys.size > 0 ? keys : null
+  }, [axesByCollection, summary.collection?.protocol_axes])
+  const protocolReading = useMemo(
+    () => (result: ModelResultForBenchmark, column: ProtocolColumn): ProtocolAxisReading =>
+      readProtocolAxis(
+        result.protocol_condition,
+        column,
+        axesByCollection
+          ? declaredAxisKeys(axesByCollection, result.collection_id)
+          : pageDeclaredKeys,
+      ),
+    [axesByCollection, pageDeclaredKeys]
+  )
+
   // The view ships one row per (model, protocol arm, judge
   // panel) and marks ONE of them as the model's headline reading. Sort
   // and rank the headline rows; each model's other rows follow directly
-  // beneath their headline, in the order the producer served them, and
-  // never take a rank. On snapshots predating the column every row is a
-  // headline, so this is the old flat ordering exactly.
+  // beneath their headline, ordered by their declared protocol tuple so
+  // two equivalent payloads present them identically, and never take a
+  // rank. On snapshots predating the column every row is a headline, so
+  // this is the old flat ordering exactly.
   const sortedResults = useMemo(() => {
     const sourceResults = slicedScoreByRoute
       ? lb.model_results
@@ -914,22 +978,27 @@ export function EvalDetail({
       lb.metric_config.lower_is_better ? a.score - b.score : b.score - a.score
     )
 
+    const orderSecondary = (rows: ModelResultForBenchmark[]) =>
+      [...rows].sort((a, b) =>
+        compareProtocolTuples(a.protocol_condition, b.protocol_condition, protocolColumns),
+      )
+
     const ordered: ModelResultForBenchmark[] = []
     for (const result of headline) {
       ordered.push(result)
       const key = modelGroupKey(result)
       const secondary = secondaryByModel.get(key)
       if (secondary) {
-        ordered.push(...secondary)
+        ordered.push(...orderSecondary(secondary))
         secondaryByModel.delete(key)
       }
     }
     // A non-headline row whose model has no headline row on this page
     // (e.g. the headline lives on another metric) still deserves to be
     // readable, so keep it at the end rather than dropping it.
-    for (const secondary of secondaryByModel.values()) ordered.push(...secondary)
+    for (const secondary of secondaryByModel.values()) ordered.push(...orderSecondary(secondary))
     return ordered
-  }, [lb.model_results, lb.metric_config.lower_is_better, slicedScoreByRoute])
+  }, [lb.model_results, lb.metric_config.lower_is_better, protocolColumns, slicedScoreByRoute])
 
   const [showUnknownSize, setShowUnknownSize] = useState(true)
 
@@ -968,34 +1037,22 @@ export function EvalDetail({
   const [includeAssistedInRanking, setIncludeAssistedInRanking] = useState(false)
   const [showAssistedRows, setShowAssistedRows] = useState(true)
 
-  // Protocol rows repeat the model name — nine "Claude Opus 4.6" rows on
-  // the AISI inference-scaling page are nine runs at different reasoning
-  // budgets, and with only the name and the metric in the cell they read
-  // as nine copies of one row with inexplicably different scores. Give
-  // each axis that actually varies its own column. Derived from the whole
-  // page's rows, not the visible page, so the table doesn't change shape
-  // as the reader pages or filters.
-  const protocolColumns = useMemo<ProtocolColumn[]>(
-    () =>
-      chooseProtocolColumns(
-        lb.model_results.map((result) => result.protocol_condition),
-        summary.collection?.protocol_axes,
-      ),
-    [lb.model_results, summary.collection?.protocol_axes]
+  // Protocol filters live in the URL, alongside the metric and slice
+  // controls, so a filtered leaderboard is a link someone can send and
+  // changing the metric does not silently drop the selection. Only axes
+  // this page actually has a column for are honoured.
+  const protocolAxisKeys = useMemo(
+    () => protocolColumns.map((column) => column.key),
+    [protocolColumns],
   )
+  const {
+    selected: protocolFilters,
+    activeCount: protocolFilterCount,
+    toggle: toggleProtocolFilter,
+    clear: clearProtocolFilters,
+  } = useProtocolFilters(protocolAxisKeys)
 
-  /** The compact one-line form for the narrow table, which has no room
-   *  for a column per axis: "xhigh · 32k · on". */
-  const protocolSummaryFor = useMemo(
-    () => (result: ModelResultForBenchmark) => {
-      if (protocolColumns.length === 0) return null
-      const parts = protocolColumns
-        .map((column) => formatProtocolValue(result.protocol_condition, column))
-        .filter((part): part is string => part != null)
-      return parts.length > 0 ? parts.join(" · ") : null
-    },
-    [protocolColumns]
-  )
+  const hasProtocolColumns = protocolColumns.length > 0
 
   const hasParameterData = useMemo(
     () => sortedResults.some((result) => getParamsBillions(result) != null),
@@ -1028,34 +1085,41 @@ export function EvalDetail({
     sortedResults,
   ])
 
+  // One standing per model, assigned here on the individual readings and
+  // never recomputed: a folded row reports the standing of the run the
+  // producer picked, and the flat view shows the same number on the same
+  // run.
   const leaderboardRows = useMemo<LeaderboardRow[]>(() => {
-    let currentRank = 0
-    let previousScore: number | null = null
-    let rankedCount = 0
+    // Assisted runs are visible but take no rank unless the reader
+    // explicitly re-includes them. Non-headline rows (a losing judge
+    // panel or protocol arm) are never ranked: the backend serves them a
+    // NULL rank and the reader must not see the same model twice in the
+    // standings.
+    const ranks = scoreStandings(
+      filteredResults,
+      (result) => result.score,
+      (result) =>
+        isHeadlineResult(result) &&
+        (includeAssistedInRanking || !isAssistedResult(result.protocol_condition)),
+    )
+
+    // A row's key has to name the OBSERVATION, not its position: the
+    // reader's expanded rows survive a filter, a sort and the fold/flat
+    // switch, and a key built from an array index reattaches that state
+    // to whichever reading lands at the same offset. Two byte-identical
+    // observations (a merged page's echo rows) still need distinct keys,
+    // so a repeat carries an occurrence suffix.
+    const seen = new Map<string, number>()
 
     return filteredResults.map((modelResult, index) => {
-      // Assisted runs are visible but take no rank (rank 0 sentinel)
-      // unless the reader explicitly re-includes them. Non-headline rows
-      // (a losing judge panel or protocol arm) are never ranked — the
-      // backend serves them a NULL rank and the reader must not see the
-      // same model twice in the standings.
-      const unranked =
-        !isHeadlineResult(modelResult) ||
-        (!includeAssistedInRanking && isAssistedResult(modelResult.protocol_condition))
-      let rank = 0
-      if (!unranked) {
-        rankedCount += 1
-        if (previousScore === null || Math.abs(modelResult.score - previousScore) > 1e-9) {
-          currentRank = rankedCount
-          previousScore = modelResult.score
-        }
-        rank = currentRank
-      }
-
+      const rank = ranks[index]
       const judge = judgeConditionSummary(modelResult.judge_condition, judgeDisplayName)
+      const identity = observationKey(modelResult)
+      const occurrence = seen.get(identity) ?? 0
+      seen.set(identity, occurrence + 1)
 
       return {
-        key: `${modelResult.model_info.id}-${index}`,
+        key: occurrence === 0 ? identity : `${identity}|#${occurrence}`,
         rank,
         modelResult,
         normalizedScore: normalizeScore(modelResult.score),
@@ -1084,13 +1148,6 @@ export function EvalDetail({
     [leaderboardRows]
   )
 
-  // The models line counts the page's STANDINGS, not its table rows: a
-  // model's judge and protocol rows are extra readings of the same model.
-  const rankedRowCount = useMemo(
-    () => leaderboardRows.filter((r) => r.rank > 0).length,
-    [leaderboardRows]
-  )
-
   // Context view: the study's own score for each model placed among the
   // community's published measurements. Server-built and pre-joined by
   // the producer; null unless this exact (collection, benchmark) pair
@@ -1110,11 +1167,37 @@ export function EvalDetail({
     | "source"
     | "released"
     | "updated"
+    /** One protocol axis, keyed by its study key. */
+    | `protocol:${string}`
   const [userRowSort, setUserRowSort] = useState<{ key: RowSortKey; dir: "asc" | "desc" }>(
     { key: "default", dir: "desc" },
   )
+  const sortedProtocolColumn =
+    userRowSort.key.startsWith("protocol:")
+      ? protocolColumns.find(
+          (column) => column.key === userRowSort.key.slice("protocol:".length),
+        ) ?? null
+      : null
 
   const [openness, setOpenness] = useState<ModelOpenness[]>([...MODEL_OPENNESS_ORDER])
+
+  // Whether a model's weights are open is a fact about the MODEL, so the
+  // filter decides whole model groups and reads the producer's headline
+  // reading to decide them. Judging each reading on its own row-local
+  // metadata could drop a model's headline and leave one of its
+  // secondary runs standing in for it in the fold.
+  const opennessByModel = useMemo(() => {
+    const byModel = new Map<string, unknown>()
+    const fromHeadline = new Set<string>()
+    for (const row of leaderboardRows) {
+      const key = modelGroupKey(row.modelResult)
+      const headline = isHeadlineResult(row.modelResult)
+      if (fromHeadline.has(key) || (byModel.has(key) && !headline)) continue
+      byModel.set(key, row.modelResult.model_info?.open_weights)
+      if (headline) fromHeadline.add(key)
+    }
+    return byModel
+  }, [leaderboardRows])
 
   // Weights filter narrows which standings are DISPLAYED; it deliberately
   // does not re-rank. A model's rank is its position in the full standings,
@@ -1123,9 +1206,12 @@ export function EvalDetail({
   const opennessVisibleRows = useMemo(
     () =>
       leaderboardRows.filter((row) =>
-        matchesOpenness(row.modelResult.model_info?.open_weights, openness)
+        matchesOpenness(
+          opennessByModel.get(modelGroupKey(row.modelResult)),
+          openness,
+        )
       ),
-    [leaderboardRows, openness]
+    [leaderboardRows, opennessByModel, openness]
   )
 
   const opennessCounts = useMemo(() => {
@@ -1137,25 +1223,176 @@ export function EvalDetail({
     return tally
   }, [leaderboardRows])
 
+  // Protocol filters narrow the same way the weights filter does: after
+  // ranking, before pagination, so a filtered page still reports each
+  // model's standing in the full field.
+  const visibleRows = useMemo(() => {
+    const active = protocolColumns
+      .map((column) => ({ column, ids: protocolFilters.get(column.key) ?? [] }))
+      .filter(({ ids }) => ids.length > 0)
+    if (active.length === 0) return opennessVisibleRows
+    return opennessVisibleRows.filter((row) =>
+      active.every(({ column, ids }) =>
+        ids.includes(protocolValueId(protocolReading(row.modelResult, column))),
+      ),
+    )
+  }, [opennessVisibleRows, protocolColumns, protocolFilters, protocolReading])
+
+  const protocolOptionsFor = useMemo(() => {
+    const cache = new Map<string, ReturnType<typeof protocolFilterOptions>>()
+    return (column: ProtocolColumn) => {
+      const cached = cache.get(column.key)
+      if (cached) return cached
+      const options = protocolFilterOptions(
+        leaderboardRows.map((row) => protocolReading(row.modelResult, column)),
+        column,
+      )
+      cache.set(column.key, options)
+      return options
+    }
+  }, [leaderboardRows, protocolReading])
+
   // A model and the judge / protocol readings sitting beneath it move
   // together. Sorting the flattened row list would immediately break that:
   // reversing it alone puts every secondary row ABOVE its own headline.
   const leaderboardGroups = useMemo(
-    () => groupByHeadlineModel(opennessVisibleRows, (row) => row.modelResult),
-    [opennessVisibleRows]
+    () => groupByHeadlineModel(visibleRows, (row) => row.modelResult),
+    [visibleRows]
   )
 
+  // Folding is a per-source presentation: a study that ran one model
+  // under many configurations produced many readings of one model, and
+  // listing them all at top level made the standings unreadable. A
+  // MERGED page's repeated rows are different SOURCES measuring the same
+  // model, which share no protocol and no score to collapse to, so they
+  // stay one row per source and model.
+  const canFoldRows = !summary.merged_view && hasProtocolRows
+  const [foldRows, setFoldRows] = useState(true)
+  // Sorting or filtering by a protocol axis asks a question about the
+  // runs, which a row standing for all of them cannot answer, so either
+  // switches the table to the flat all-runs view. Ranks live on the
+  // readings, so neither view renumbers anything.
+  const flatRunView =
+    !canFoldRows || !foldRows || sortedProtocolColumn != null || protocolFilterCount > 0
+
+  /** A reading shown on its own: the flat view's rows, and the judge
+   *  readings a fold does not absorb. */
+  const soloFold = (row: LeaderboardRow): LeaderboardFold => ({
+    key: row.key,
+    rank: row.rank,
+    headlineRow: row,
+    members: [row],
+    score: row.modelResult.score,
+    normalizedScore: row.normalizedScore,
+    runCount: 1,
+    minScore: row.modelResult.score,
+    maxScore: row.modelResult.score,
+    assistedCount: isAssistedResult(row.modelResult.protocol_condition) ? 1 : 0,
+  })
+
+  /**
+   * One model's folded row.
+   *
+   * The score and the rank are the producer's headline run's, never a
+   * statistic computed across the fold: the members are different
+   * CONFIGURATIONS (token budget, thinking tokens, effort, answer
+   * oracle), not repeated samples of one quantity, so averaging them
+   * would report a number no run produced and rank it against models
+   * that happen to have been run fewer times.
+   *
+   * The range beneath it is descriptive only, and spans the UNASSISTED
+   * runs: a score the model reached by being told when its answer was
+   * correct says nothing about how far the study's budgets moved it.
+   * Assisted runs stay in the member list, badged.
+   */
+  const buildFold = (headlineRow: LeaderboardRow, members: LeaderboardRow[]): LeaderboardFold => {
+    const unassisted = members.filter(
+      (row) => !isAssistedResult(row.modelResult.protocol_condition)
+    )
+    const spread = summariseScoreSpread(unassisted.map((row) => row.modelResult.score))
+    const score = headlineRow.modelResult.score
+    return {
+      key: headlineRow.key,
+      rank: headlineRow.rank,
+      headlineRow,
+      members,
+      score,
+      normalizedScore: normalizeScore(score),
+      runCount: spread?.n ?? 0,
+      minScore: spread?.min ?? score,
+      maxScore: spread?.max ?? score,
+      assistedCount: members.length - unassisted.length,
+    }
+  }
+
+  /**
+   * Split a model's readings into the runs its folded row stands for and
+   * the alternate judge panels it does not.
+   *
+   * A second judge panel is not another run of the model: it is another
+   * reading of the same cell, and the producer already picked which
+   * panel the model's number comes from. Those readings therefore keep
+   * their own rows, unranked and labelled, exactly as they are without
+   * folding.
+   */
+  const splitFoldMembers = (members: LeaderboardRow[]) => {
+    const headlineRow = members.find((row) => isHeadlineResult(row.modelResult))
+    // No headline means no reading the producer picked, and a fold has
+    // nothing to report without one. Promoting `members[0]` would put a
+    // secondary run's score and standing on a row that reads as the
+    // model's, so the members stay flat and unranked instead.
+    if (!headlineRow) return null
+    const panel = headlineRow.modelResult.judge_condition ?? null
+    const runs: LeaderboardRow[] = []
+    const judgeReadings: LeaderboardRow[] = []
+    for (const row of members) {
+      if (row !== headlineRow && (row.modelResult.judge_condition ?? null) !== panel) {
+        judgeReadings.push(row)
+      } else {
+        runs.push(row)
+      }
+    }
+    return { headlineRow, runs, judgeReadings }
+  }
+
+  const foldedLeaderboardGroups = useMemo<LeaderboardFold[]>(() => {
+    if (flatRunView) return visibleRows.map(soloFold)
+    const folds: LeaderboardFold[] = []
+    for (const members of leaderboardGroups) {
+      const split = splitFoldMembers(members)
+      if (!split) {
+        for (const row of members) folds.push(soloFold(row))
+        continue
+      }
+      folds.push(buildFold(split.headlineRow, split.runs))
+      for (const reading of split.judgeReadings) folds.push(soloFold(reading))
+    }
+    return folds
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flatRunView, leaderboardGroups, visibleRows, normalizeScore])
+
   const orderedLeaderboardRows = useMemo(() => {
-    if (userRowSort.key === "default") return opennessVisibleRows
-    // `leaderboardGroups` is already "best first" — descending for
-    // higher-is-better metrics, ascending for lower-is-better. Sorting
-    // by score just toggles that order verbatim, group by group.
+    // A protocol axis is the one sort that reads a run rather than a
+    // model, so it sorts the flat reading list the switch above already
+    // put on screen. Ranks are assigned on the readings, so ordering by
+    // budget renumbers nothing.
+    if (sortedProtocolColumn) {
+      const column = sortedProtocolColumn
+      const dir = userRowSort.dir
+      return visibleRows
+        .map((row, index) => ({ row: row.modelResult, index, source: row }))
+        .sort((a, b) => compareProtocolRows(a, b, column, dir, protocolReading))
+        .map(({ source }) => soloFold(source))
+    }
+    // The rows are already "best first": descending for higher-is-better
+    // metrics, ascending for lower-is-better. Sorting by score just
+    // toggles that order verbatim.
+    if (userRowSort.key === "default") return foldedLeaderboardGroups
     if (userRowSort.key === "score") {
-      return orderGroupsByScore(
-        leaderboardGroups,
-        userRowSort.dir,
-        lb.metric_config.lower_is_better,
-      )
+      const best = scoreSortBaseDirection(lb.metric_config.lower_is_better)
+      return userRowSort.dir === best
+        ? foldedLeaderboardGroups
+        : [...foldedLeaderboardGroups].reverse()
     }
     const parseTs = (d?: string | null): number | null => {
       if (!d) return null
@@ -1175,11 +1412,12 @@ export function EvalDetail({
 
     const dirSign = userRowSort.dir === "asc" ? 1 : -1
 
-    // Every comparator reads the group's HEADLINE row, so a model sorts
-    // by its own standing and its extra readings follow it.
-    return [...leaderboardGroups].sort((a, b) => {
-      const ma = a[0].modelResult
-      const mb = b[0].modelResult
+    // Every comparator reads the fold's HEADLINE row, so a model sorts
+    // by its own metadata rather than by whichever reading happens to
+    // sit first.
+    return [...foldedLeaderboardGroups].sort((a, b) => {
+      const ma = a.headlineRow.modelResult
+      const mb = b.headlineRow.modelResult
       let cmp = 0
       switch (userRowSort.key) {
         case "model":
@@ -1218,17 +1456,62 @@ export function EvalDetail({
       // Stable name fallback so equal keys don't shuffle on re-render.
       if (cmp === 0) cmp = (ma.model_info.name ?? "").localeCompare(mb.model_info.name ?? "")
       return cmp * dirSign
-    }).flat()
-  }, [leaderboardGroups, opennessVisibleRows, userRowSort, lb.metric_config.lower_is_better])
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    foldedLeaderboardGroups,
+    visibleRows,
+    userRowSort,
+    sortedProtocolColumn,
+    protocolReading,
+    lb.metric_config.lower_is_better,
+  ])
 
-  // A page that carries a model's extra readings is NOT a flat score
-  // ordering: the rows are grouped, each model's other runs trailing its
-  // headline row. Two bits of the header depend on knowing that — the
-  // score column must not claim a sort the rows don't follow, and the
-  // rank column has to explain its blanks.
-  const hasSubordinateRows = useMemo(
-    () => orderedLeaderboardRows.some((row) => row.rank === 0),
-    [orderedLeaderboardRows]
+  /** One fold's readings, best first. No tags and no commentary: the
+   *  list shows each run's own conditions and its own score, and lets
+   *  the reader draw the comparison. */
+  const foldMemberRows = (fold: LeaderboardFold) =>
+    [...fold.members].sort((a, b) =>
+      lb.metric_config.lower_is_better
+        ? a.modelResult.score - b.modelResult.score
+        : b.modelResult.score - a.modelResult.score
+    )
+
+  /** The axis summary a folded row shows in place of one run's value:
+   *  the study's own range across the runs the row stands for. */
+  const foldProtocolSummary = (fold: LeaderboardFold, column: ProtocolColumn) =>
+    summariseProtocolReadings(
+      fold.members.map((member) => protocolReading(member.modelResult, column)),
+      column,
+    )
+
+  /** Where the study's unassisted runs of this model landed, and how
+   *  many assisted runs sit beside them. Descriptive only: no mean, no
+   *  interval, because the runs are different configurations rather
+   *  than repeated samples of one quantity. */
+  const foldRangeLabel = (fold: LeaderboardFold): string | null => {
+    const parts: string[] = []
+    if (fold.runCount > 1) {
+      parts.push(
+        fold.maxScore - fold.minScore > 1e-9
+          ? `${formatRawScore(fold.minScore)} to ${formatRawScore(fold.maxScore)} across ${fold.runCount} runs`
+          : `${formatRawScore(fold.minScore)} across ${fold.runCount} runs`,
+      )
+    }
+    if (fold.assistedCount > 0) {
+      parts.push(
+        `${fold.assistedCount} assisted ${fold.assistedCount === 1 ? "run" : "runs"} also listed`,
+      )
+    }
+    return parts.length > 0 ? parts.join(" · ") : null
+  }
+
+  // The models line counts the page's STANDINGS, not its table rows: a
+  // model's judge and protocol readings are extra readings of the same
+  // model, and only one of them carries the standing.
+  const rankedRowCount = useMemo(
+    () => leaderboardRows.filter((r) => r.rank > 0).length,
+    [leaderboardRows]
   )
 
   const LEADERBOARD_PAGE_SIZE = 50
@@ -1237,11 +1520,34 @@ export function EvalDetail({
     [orderedLeaderboardRows, leaderboardPage]
   )
 
+  // A narrowed table starts at its own first page: keeping the reader on
+  // page 3 of a selection that may be one page long shows nothing.
+  const protocolFilterKey = useMemo(
+    () =>
+      Array.from(protocolFilters.entries())
+        .map(([axis, ids]) => `${axis}=${[...ids].sort().join(",")}`)
+        .sort()
+        .join("&"),
+    [protocolFilters],
+  )
+  // A page number and an expanded row both describe the rows currently on
+  // screen. Narrowing the selection, or switching between one row per
+  // model and one row per run, replaces those rows, so both are reset
+  // rather than carried across to whatever now sits at the same offset.
+  useEffect(() => {
+    setLeaderboardPage(1)
+    setExpandedRows({})
+  }, [protocolFilterKey, flatRunView])
+
   // First click on a column picks a sensible initial direction (alpha
   // for text, "best/most-recent first" for numeric/date). Second click
   // flips. Third click returns to the page's natural order.
   const naturalDir = (key: Exclude<RowSortKey, "default">): "asc" | "desc" =>
-    key === "model" || key === "developer" || key === "evaluator" || key === "source"
+    key === "model" ||
+    key === "developer" ||
+    key === "evaluator" ||
+    key === "source" ||
+    key.startsWith("protocol:")
       ? "asc"
       : "desc"
 
@@ -1267,13 +1573,10 @@ export function EvalDetail({
 
   const rowSortIndicator = (key: Exclude<RowSortKey, "default">): "↑" | "↓" | null => {
     if (key === "score") {
-      // In the default order the rows are grouped by model, so a page
-      // with subordinate rows reads 0.96, 0.60, 0.73, 1.00 … — an arrow
-      // there promises a descent the column visibly does not make.
-      if (userRowSort.key === "default") {
-        if (hasSubordinateRows) return null
-        return scoreBaseDir === "asc" ? "↑" : "↓"
-      }
+      // The default order is one folded row per model, strictly by the
+      // number each reports — a real score ordering, so the arrow is
+      // honest again.
+      if (userRowSort.key === "default") return scoreBaseDir === "asc" ? "↑" : "↓"
       if (userRowSort.key === "score") return userRowSort.dir === "asc" ? "↑" : "↓"
       return null
     }
@@ -1355,14 +1658,60 @@ export function EvalDetail({
   // per-row Source value is the *raw* source name (e.g. "crfm"), which can be
   // an alias of a de-aliased evaluator ("Stanford CRFM"); when it doesn't match
   // directly but the eval has exactly one evaluator, that row unambiguously
-  // belongs to it, so we link to the sole evaluator.
-  const soleEvaluator =
-    knownEvaluatorByLower.size === 1 ? Array.from(knownEvaluatorByLower.values())[0] : null
+  // belongs to it, so we link to the sole evaluator, but only once that
+  // sole value is itself an org with an evaluator page, or the fallback
+  // sends every row's Source cell to whatever single string the page
+  // happens to carry.
+  const isKnownEvaluator = useKnownEvaluator()
+  const soleEvaluator = (() => {
+    if (knownEvaluatorByLower.size !== 1) return null
+    const only = Array.from(knownEvaluatorByLower.values())[0]
+    if (!isKnownEvaluator(only)) return null
+    return only
+  })()
   const resolveEvaluatorName = (raw: string | undefined | null): string | null => {
     const t = (raw ?? "").trim()
     if (!t) return null
     return knownEvaluatorByLower.get(t.toLowerCase()) ?? soleEvaluator
   }
+
+  // The curated studies this page's results belong to. A per-source page
+  // has one, carried by its collection attachment; a merged page names
+  // the studies its visible rows come from without taking on the
+  // attachment, which is what gates the study-only panels.
+  const studyAttributions = useMemo<StudyRef[]>(() => {
+    if (summary.collection?.curated) {
+      return [
+        {
+          collection_id: summary.collection.collection_id,
+          name: summary.collection.display_name,
+          url: summary.collection.url,
+          // The study's listing is the composite it published under, the
+          // same key the merged page reads off its rows. `family_id` is
+          // the BENCHMARK's family (this page's benchmark, shared with
+          // every other source of it), which would send the reader to a
+          // listing the study is only one entry of.
+          family_key: summary.composite_slug ?? summary.composite_benchmark_key ?? undefined,
+        },
+      ]
+    }
+    return summary.study_refs ?? []
+  }, [summary.collection, summary.study_refs, summary.composite_slug, summary.composite_benchmark_key])
+
+  // The study name only links where the key is a family the listing can
+  // actually resolve: cleanHierarchy can nest or drop a composite, and
+  // `?family=` matches top-level keys exactly, so an unresolvable key
+  // would leave the reader on the full unfiltered list. The hierarchy
+  // arrives after first paint, so the name starts as text and becomes a
+  // link in place.
+  const topLevelFamilyKeys = useMemo(
+    () => new Set((evalHierarchy?.families ?? []).map((family) => family.key)),
+    [evalHierarchy]
+  )
+  const studyListingHref = (study: StudyRef): string | null =>
+    study.family_key && topLevelFamilyKeys.has(study.family_key)
+      ? familyEvalsHref(study.family_key)
+      : null
 
   const heroLede = isResearchView
     ? summary.metric_config.evaluation_description
@@ -1434,26 +1783,42 @@ export function EvalDetail({
             </>
           )}
         </div>
-        {/* Study attribution, curated collections only. */}
-        {summary.collection?.curated && (
+        {/* Study attribution, curated collections only. A study is what a
+            result is PART OF; the org that ran it is named above. */}
+        {studyAttributions.length > 0 && (
           <div className="-mt-3 mb-6 text-[13px]" style={{ color: "var(--fg-muted)" }}>
-            Part of{" "}
-            <span style={{ fontWeight: 600, color: "var(--fg)" }}>
-              {summary.collection.display_name}
-            </span>
-            {summary.collection.url && (
-              <>
-                {" · "}
-                <a
-                  href={summary.collection.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="underline underline-offset-2 hover:text-[color:var(--accent)]"
-                >
-                  paper ↗
-                </a>
-              </>
-            )}
+            {studyAttributions.map((study) => {
+              const listingHref = studyListingHref(study)
+              return (
+              <div key={study.collection_id}>
+                Part of{" "}
+                {listingHref ? (
+                  <Link
+                    href={listingHref}
+                    className="underline underline-offset-2 hover:text-[color:var(--accent)]"
+                    style={{ fontWeight: 600, color: "var(--fg)" }}
+                  >
+                    {study.name}
+                  </Link>
+                ) : (
+                  <span style={{ fontWeight: 600, color: "var(--fg)" }}>{study.name}</span>
+                )}
+                {study.url && (
+                  <>
+                    {" · "}
+                    <a
+                      href={study.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline underline-offset-2 hover:text-[color:var(--accent)]"
+                    >
+                      paper ↗
+                    </a>
+                  </>
+                )}
+              </div>
+              )
+            })}
           </div>
         )}
         {/* Summary view renders the description inside the "At a glance"
@@ -1842,6 +2207,70 @@ export function EvalDetail({
             />
           )}
 
+          {/* Protocol-axis filters. Narrow the standings by the setting a
+              run used; the selection rides the URL so the narrowed view
+              is a link. */}
+          {hasProtocolColumns && (
+            <div className="mb-4">
+              <ProtocolFilters
+                columns={protocolColumns}
+                optionsFor={protocolOptionsFor}
+                selected={protocolFilters}
+                activeCount={protocolFilterCount}
+                onToggle={toggleProtocolFilter}
+                onClear={clearProtocolFilters}
+              />
+              {summary.merged_view && studySourceHref && (
+                <p className="mt-2 text-[12px]" style={{ color: "var(--fg-muted)" }}>
+                  This page carries one headline protocol point per source and model.{" "}
+                  <Link
+                    href={studySourceHref}
+                    className="underline underline-offset-2 hover:text-[color:var(--accent)]"
+                    style={{ color: "var(--fg)" }}
+                  >
+                    View all protocol points
+                  </Link>
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Folded rows versus every run. A folded row reports the
+              producer's headline run, so the switch changes what is
+              listed, never a score or a standing. */}
+          {canFoldRows && (
+            <div
+              className="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px]"
+              style={{ color: "var(--fg-muted)" }}
+            >
+              <span>
+                {flatRunView
+                  ? sortedProtocolColumn || protocolFilterCount > 0
+                    ? "Sorting or filtering by a protocol setting asks about runs, so every run is listed."
+                    : "Every run the study reported is listed."
+                  : "One row per model, with that model's runs behind the row's expander."}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (flatRunView) {
+                    setFoldRows(true)
+                    clearProtocolFilters()
+                    setUserRowSort((prev) =>
+                      prev.key.startsWith("protocol:") ? { key: "default", dir: "desc" } : prev,
+                    )
+                  } else {
+                    setFoldRows(false)
+                  }
+                }}
+                className="underline underline-offset-2 hover:text-[color:var(--accent)]"
+                style={{ color: "var(--fg)" }}
+              >
+                {flatRunView ? "Show one row per model" : "Show every run"}
+              </button>
+            </div>
+          )}
+
           {/* Subtask split picker for evals like Global MMLU Lite where
               the splits live as subtasks of a single eval (not as
               separate eval IDs the page-level SplitPicker can swap to).
@@ -2071,7 +2500,10 @@ export function EvalDetail({
                   </tr>
                 </thead>
                 <tbody>
-                  {pagedLeaderboardRows.map(({ key, rank, modelResult, judgeLabel, judgeTooltip }) => (
+                  {pagedLeaderboardRows.map((fold) => {
+                  const { key, rank } = fold
+                  const { modelResult, judgeLabel, judgeTooltip } = fold.headlineRow
+                  return (
                     <tr
                       key={key}
                       style={{
@@ -2088,17 +2520,9 @@ export function EvalDetail({
                           fontWeight: rank === 1 ? 600 : 500,
                         }}
                       >
-                        {rank === 0 ? "↳" : rank}
+                        {rank === 0 ? "—" : rank}
                       </td>
-                      <td
-                        style={{
-                          padding: "10px 8px",
-                          color: "var(--fg)",
-                          ...(rank === 0
-                            ? { paddingLeft: 18, borderLeft: "2px solid var(--border-soft)" }
-                            : undefined),
-                        }}
-                      >
+                      <td style={{ padding: "10px 8px", color: "var(--fg)" }}>
                         <Link
                           href={`/models/${routeIdToPath(modelResult.model_route_id ?? routeIdFromModelId(modelResult.model_group_id))}`}
                           className="hover:text-[color:var(--accent)] transition-colors"
@@ -2128,23 +2552,23 @@ export function EvalDetail({
                             )}
                           </div>
                         )}
-                        {/* No room for a column per axis here, so the
-                            varying axes collapse to one line — the
-                            narrow table still has to distinguish two
-                            rows that carry the same model name. */}
-                        {protocolSummaryFor(modelResult) && (
-                          <div
-                            className="font-mono"
-                            style={{ fontSize: 10, color: "var(--fg-subtle)" }}
-                            title={protocolColumns
-                              .map(
-                                (column) =>
-                                  `${column.label}: ${formatProtocolValue(modelResult.protocol_condition, column) ?? "not set"}`,
-                              )
-                              .join("\n")}
-                          >
-                            {protocolSummaryFor(modelResult)}
-                          </div>
+                        {/* No room for a column per axis here, so each
+                            axis becomes a labelled item, because the
+                            table still has to distinguish two rows that
+                            carry the same model name, and an unlabelled
+                            "32k" does not say which budget it is. A row
+                            standing for several runs shows the range
+                            instead of one run's value. */}
+                        {fold.members.length > 1 ? (
+                          <ProtocolNarrowRanges
+                            columns={protocolColumns}
+                            summaryFor={(column) => foldProtocolSummary(fold, column)}
+                          />
+                        ) : (
+                          <ProtocolNarrowItems
+                            columns={protocolColumns}
+                            readingFor={(column) => protocolReading(modelResult, column)}
+                          />
                         )}
                       </td>
                       <td
@@ -2161,10 +2585,18 @@ export function EvalDetail({
                         {/* Unit suffix omitted — already shown in the
                             column header so it doesn't need to repeat
                             on every row. */}
-                        {formatRawScore(modelResult.score)}
+                        {formatRawScore(fold.score)}
+                        {foldRangeLabel(fold) && (
+                          <div
+                            className="font-mono"
+                            style={{ fontSize: 9, fontWeight: 400, color: "var(--fg-subtle)" }}
+                          >
+                            {foldRangeLabel(fold)}
+                          </div>
+                        )}
                       </td>
                     </tr>
-                  ))}
+                  )})}
                   {pagedLeaderboardRows.length === 0 && (
                     <tr>
                       <td
@@ -2188,11 +2620,7 @@ export function EvalDetail({
                   <th
                     style={{ width: 64 }}
                     className="num"
-                    title={
-                      hasSubordinateRows
-                        ? "One rank per model — its standing on this metric. A model's other runs are shown beneath it, marked ↳ and unranked."
-                        : undefined
-                    }
+                    title="One rank per model, by the score its row reports."
                   >
                     Rank
                   </th>
@@ -2212,16 +2640,32 @@ export function EvalDetail({
                       onClick={() => cycleRowSort("developer")}
                     />
                   </th>
-                  {protocolColumns.map((column) => (
-                    <th
-                      key={`protocol-head-${column.key}`}
-                      className="hidden lg:table-cell"
-                      style={{ width: 96 }}
-                      title={`Protocol axis "${column.key}"${column.unit ? ` (${column.unit})` : ""} — varies across this page's runs`}
-                    >
-                      {column.label}
-                    </th>
-                  ))}
+                  {protocolColumns.map((column) => {
+                    const sortKey: RowSortKey = `protocol:${column.key}`
+                    const active = userRowSort.key === sortKey
+                    return (
+                      <th
+                        key={`protocol-head-${column.key}`}
+                        className="hidden lg:table-cell"
+                        style={{ minWidth: 124 }}
+                        aria-sort={
+                          active
+                            ? userRowSort.dir === "asc"
+                              ? "ascending"
+                              : "descending"
+                            : "none"
+                        }
+                      >
+                        <ProtocolSortButton
+                          label={column.label}
+                          active={active}
+                          indicator={rowSortIndicator(sortKey)}
+                          onClick={() => cycleRowSort(sortKey)}
+                          title={protocolHeaderTitle(column, Boolean(summary.merged_view))}
+                        />
+                      </th>
+                    )
+                  })}
                   <th className="num" style={{ minWidth: 200 }}>
                     <SortableTh
                       label={lb.metric_config.unit ?? "Score"}
@@ -2229,8 +2673,8 @@ export function EvalDetail({
                       indicator={rowSortIndicator("score")}
                       onClick={() => cycleRowSort("score")}
                       title={
-                        hasSubordinateRows && userRowSort.key === "default"
-                          ? "Grouped by model: each model's other runs follow its ranked row. Click to sort every group by score."
+                        protocolColumns.length > 0
+                          ? "The run the producer picked as this model's headline reading. Expand a row to see every run the study reported."
                           : "Sort by score"
                       }
                     />
@@ -2264,12 +2708,32 @@ export function EvalDetail({
                 </tr>
               </thead>
               <tbody>
-                {pagedLeaderboardRows.map(({ key, rank, modelResult, normalizedScore, judgeLabel, judgeTooltip }) => {
+                {pagedLeaderboardRows.map((fold) => {
+                  const { key, rank, normalizedScore } = fold
+                  const { modelResult, judgeLabel, judgeTooltip } = fold.headlineRow
+                  const isFolded = fold.members.length > 1
+                  // A judge column earns its place only when the fold's
+                  // readings actually differ by judge.
+                  const foldHasJudgeLabels = fold.members.some((member) => member.judgeLabel)
+                  // On a merged page a fold's readings are different SOURCES
+                  // measuring the same model, and the source is the only thing
+                  // telling them apart — without it the run list is a column of
+                  // unexplained numbers.
+                  const foldSourceOf = (row: LeaderboardRow) =>
+                    row.modelResult.evaluator_display_name?.trim() ||
+                    row.modelResult.source_metadata.source_name?.trim() ||
+                    row.modelResult.source_metadata.source_organization_name?.trim() ||
+                    row.modelResult.merged_source_slug ||
+                    null
+                  const foldHasSources =
+                    new Set(fold.members.map((member) => foldSourceOf(member) ?? "")).size > 1
+                  const foldHasAssisted = fold.assistedCount > 0
                   const isExpanded = expandedRows[key] ?? false
                   const slices = modelResult.score_details.details
                     ? Object.entries(modelResult.score_details.details).filter(([, value]) => typeof value === "number")
                     : []
                   const hasExpandableDetails =
+                    isFolded ||
                     isResearchView ||
                     (modelResult.aggregate_components && modelResult.aggregate_components.length > 1) ||
                     slices.length > 1
@@ -2351,24 +2815,14 @@ export function EvalDetail({
                               fontWeight: isTopRank ? 600 : 500,
                               color: rank === 0 ? "var(--fg-subtle)" : rankColor,
                             }}
-                            title={rank === 0 ? unrankedReason : undefined}
                             aria-label={rank === 0 ? unrankedReason : `Rank ${rank}`}
+                            title={rank === 0 ? unrankedReason : undefined}
                           >
-                            {rank === 0 ? "↳" : `#${rank}`}
+                            {rank === 0 ? "—" : `#${rank}`}
                           </span>
                         </td>
 
-                        <td
-                          className="align-top whitespace-normal"
-                          style={
-                            rank === 0
-                              ? {
-                                  paddingLeft: 18,
-                                  borderLeft: "2px solid var(--border-soft)",
-                                }
-                              : undefined
-                          }
-                        >
+                        <td className="align-top whitespace-normal">
                           <div className="flex items-start gap-1.5 leading-tight">
                             {hasExpandableDetails && (
                               <button
@@ -2458,19 +2912,30 @@ export function EvalDetail({
                         </td>
 
                         {protocolColumns.map((column) => {
-                          const value = formatProtocolValue(modelResult.protocol_condition, column)
+                          // A row standing for several runs has no single
+                          // value for an axis the study varied, so the cell
+                          // states the range those runs covered rather than
+                          // one member's setting.
+                          const summary = isFolded ? foldProtocolSummary(fold, column) : null
                           return (
                             <td
                               key={`protocol-cell-${key}-${column.key}`}
                               className="hidden lg:table-cell align-top font-mono"
-                              style={{
-                                fontSize: 11,
-                                color: value == null ? "var(--fg-subtle)" : "var(--fg-muted)",
-                                whiteSpace: "nowrap",
-                              }}
-                              title={value == null ? `${column.label}: not set for this run` : undefined}
+                              style={{ fontSize: 11, whiteSpace: "nowrap" }}
                             >
-                              {value ?? "—"}
+                              {isFolded ? (
+                                <span
+                                  title={summary?.title ?? "Not applicable"}
+                                  style={{ color: summary ? "var(--fg)" : "var(--fg-subtle)" }}
+                                >
+                                  {summary?.text ?? "Not applicable"}
+                                </span>
+                              ) : (
+                                <ProtocolValueText
+                                  reading={protocolReading(modelResult, column)}
+                                  column={column}
+                                />
+                              )}
                             </td>
                           )
                         })}
@@ -2483,8 +2948,22 @@ export function EvalDetail({
                               setup or a differing dataset name when
                               available; otherwise it's omitted. */}
                           <div className="flex items-baseline justify-end gap-2 tabular-nums" style={{ fontSize: 15, fontWeight: 600 }}>
-                            <span>{formatRawScore(modelResult.score, undefined)}</span>
+                            <span>{formatRawScore(fold.score, undefined)}</span>
                           </div>
+                          {isFolded && foldRangeLabel(fold) && (
+                            // The row reports ONE run's score, so it has to
+                            // say where the study's other runs of this model
+                            // landed. A range, not a statistic: the runs are
+                            // different configurations, and an assisted run
+                            // is not evidence about the rest.
+                            <div
+                              className="mt-0.5 text-right"
+                              style={{ fontSize: 10, color: "var(--fg-subtle)" }}
+                              title={`This row reports the run the producer picked as ${modelResult.model_info.name}'s headline reading on this page. Expand it to see every run the study reported.`}
+                            >
+                              {foldRangeLabel(fold)}
+                            </div>
+                          )}
                           <div
                             className="mt-1 hidden md:block"
                             style={{
@@ -2607,18 +3086,92 @@ export function EvalDetail({
 
                       {isExpanded && (
                         <tr>
-                          <td colSpan={7 + protocolColumns.length} style={{ background: "var(--bg-warm)", padding: 0 }}>
+                          <td colSpan={7} style={{ background: "var(--bg-warm)", padding: 0 }}>
                             <div className="space-y-5 px-4 py-5 sm:px-6">
-                              {/* The Model Profile / Provenance / Score Breakdown
-                                  panels were removed — model metadata lives on
-                                  the model page (the model name in the row is
-                                  a link), provenance is already in the
-                                  EVALUATOR + SOURCE columns, and metric scale /
-                                  score type are constants surfaced in the
-                                  Metric Specification block above the
-                                  leaderboard. The expanded row now focuses
-                                  exclusively on the per-result reproducibility
-                                  setup. */}
+                              {isFolded && (
+                                <div className="space-y-2">
+                                  <div
+                                    className="font-mono uppercase"
+                                    style={{ fontSize: 10, letterSpacing: "0.14em", color: "var(--fg-subtle)" }}
+                                  >
+                                    {foldHasSources ? "Sources on this page" : "Runs on this page"}
+                                  </div>
+                                  {/* No commentary: each run's own
+                                      conditions and its own score, read
+                                      and formatted exactly as the main
+                                      table reads them. */}
+                                  <div className="overflow-x-auto" style={{ border: "1px solid var(--border-soft)" }}>
+                                    <table className="ec-htable">
+                                      <thead>
+                                        <tr>
+                                          {foldHasSources && <th>Source</th>}
+                                          {foldHasAssisted && <th>Run</th>}
+                                          {protocolColumns.map((column) => (
+                                            <th
+                                              key={`fold-head-${key}-${column.key}`}
+                                              title={protocolHeaderTitle(column, Boolean(summary.merged_view))}
+                                            >
+                                              {column.label}
+                                            </th>
+                                          ))}
+                                          {foldHasJudgeLabels && <th>Judge</th>}
+                                          <th className="num">{lb.metric_config.unit ?? "Score"}</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {foldMemberRows(fold).map((member) => (
+                                          <tr key={`fold-run-${member.key}`}>
+                                            {foldHasSources && (
+                                              <td className="text-[12px]" style={{ color: "var(--fg-muted)" }}>
+                                                {foldSourceOf(member) ?? "—"}
+                                              </td>
+                                            )}
+                                            {foldHasAssisted && (
+                                              <td>
+                                                {isAssistedResult(member.modelResult.protocol_condition) ? (
+                                                  <span
+                                                    className="inline-block font-mono uppercase"
+                                                    style={{
+                                                      fontSize: 9,
+                                                      letterSpacing: "0.08em",
+                                                      color: "var(--fg)",
+                                                      border: "1px solid var(--fg-muted)",
+                                                      borderRadius: 3,
+                                                      padding: "1px 5px",
+                                                    }}
+                                                    title="The model was told when its answer was correct (oracle answer feedback). Never counted in the row's score, rank or range."
+                                                  >
+                                                    assisted
+                                                  </span>
+                                                ) : null}
+                                              </td>
+                                            )}
+                                            {protocolColumns.map((column) => (
+                                              <td
+                                                key={`fold-cell-${member.key}-${column.key}`}
+                                                className="font-mono text-[12px]"
+                                              >
+                                                <ProtocolValueText
+                                                  reading={protocolReading(member.modelResult, column)}
+                                                  column={column}
+                                                />
+                                              </td>
+                                            ))}
+                                            {foldHasJudgeLabels && (
+                                              <td className="text-[12px]" style={{ color: "var(--fg-muted)" }}>
+                                                {member.judgeLabel ?? "—"}
+                                              </td>
+                                            )}
+                                            <td className="num font-mono tabular-nums text-[13px]" style={{ color: "var(--fg)" }}>
+                                              {formatRawScore(member.modelResult.score)}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                </div>
+                              )}
 
                               {modelResult.aggregate_components && modelResult.aggregate_components.length > 1 && (
                                 <div className="space-y-2">
@@ -2801,7 +3354,7 @@ export function EvalDetail({
                 })}
                 {leaderboardRows.length === 0 && (
                   <tr>
-                    <td colSpan={7 + protocolColumns.length} style={{ padding: "32px 16px", textAlign: "center", color: "var(--fg-muted)" }}>
+                    <td colSpan={7} style={{ padding: "32px 16px", textAlign: "center", color: "var(--fg-muted)" }}>
                       No leaderboard entries match the selected parameter range.
                     </td>
                   </tr>
@@ -2810,7 +3363,7 @@ export function EvalDetail({
             </table>
             </div>
 
-            {pagedLeaderboardRows.length < leaderboardRows.length && (
+            {pagedLeaderboardRows.length < orderedLeaderboardRows.length && (
               <div
                 style={{
                   borderTop: "1px solid var(--border-soft)",
@@ -2824,7 +3377,7 @@ export function EvalDetail({
                   className="btn-ec outline"
                   onClick={() => setLeaderboardPage((p) => p + 1)}
                 >
-                  Load more ({leaderboardRows.length - pagedLeaderboardRows.length} remaining)
+                  Load more ({orderedLeaderboardRows.length - pagedLeaderboardRows.length} remaining)
                 </button>
               </div>
             )}
@@ -2884,8 +3437,15 @@ function MultiMetricLeaderboard({
     }
     return m
   }, [summary.evaluator_names])
-  const soleEvaluator =
-    knownEvaluatorByLower.size === 1 ? Array.from(knownEvaluatorByLower.values())[0] : null
+  // The sole-evaluator fallback only holds when that sole value is itself
+  // an org with an evaluator page.
+  const isKnownEvaluator = useKnownEvaluator()
+  const soleEvaluator = (() => {
+    if (knownEvaluatorByLower.size !== 1) return null
+    const only = Array.from(knownEvaluatorByLower.values())[0]
+    if (!isKnownEvaluator(only)) return null
+    return only
+  })()
   const resolveEvaluatorName = (raw: string | undefined | null): string | null => {
     const t = (raw ?? "").trim()
     if (!t) return null

@@ -8,6 +8,7 @@
 import type {
   BenchmarkCard,
   BenchmarkEvaluation,
+  EvalLibrary,
   EvalTag,
   GenerationConfig,
   ModelInfo,
@@ -24,7 +25,12 @@ import type {
   RowAnnotations,
   SignalSummaries,
 } from './backend-artifacts'
-import type { CollectionAttachment } from './collections'
+import type {
+  CollectionAttachment,
+  CollectionsSidecarEntry,
+  ProtocolAxesByCollection,
+  StudyRef,
+} from './collections'
 
 export type { BenchmarkCard }
 export type { ModelEvaluationSummary }
@@ -44,6 +50,31 @@ export function isAssistedResult(protocolCondition: string | null | undefined): 
   } catch {
     return false
   }
+}
+
+export interface ScoreSpread {
+  /** How many scores the range spans. */
+  n: number
+  min: number
+  max: number
+}
+
+/**
+ * Where a model's runs on one page landed: the smallest and the largest,
+ * and how many there were.
+ *
+ * Descriptive only, and deliberately so. The runs are different
+ * CONFIGURATIONS (token budget, thinking tokens, effort, answer oracle),
+ * not repeated draws of one quantity, so there is no population to
+ * estimate and no sampling error to bound. An interval computed from
+ * them would narrow as the study added design points while the observed
+ * range stayed as wide, and would then be read as a claim about the
+ * model's ability. The observed endpoints make no such claim.
+ */
+export function summariseScoreSpread(values: readonly number[]): ScoreSpread | null {
+  const finite = values.filter((value) => Number.isFinite(value))
+  if (finite.length === 0) return null
+  return { n: finite.length, min: Math.min(...finite), max: Math.max(...finite) }
 }
 
 /** A parsed `judge_condition`. `judges` holds the canonical
@@ -210,6 +241,33 @@ export function isHeadlineResult(result: {
   return result.is_headline !== false
 }
 
+/**
+ * Score standings for rows already in score order: one rank per ranked
+ * row, ties sharing a rank, and 0 for every row the caller says takes no
+ * rank (an assisted run, a losing judge panel, a secondary protocol
+ * point). The standing is the model's position in the field, so it is
+ * assigned once here and never recomputed from a row's display position.
+ */
+export function scoreStandings<T>(
+  rows: T[],
+  score: (row: T) => number,
+  ranked: (row: T) => boolean,
+): number[] {
+  let currentRank = 0
+  let previousScore: number | null = null
+  let rankedCount = 0
+  return rows.map((row) => {
+    if (!ranked(row)) return 0
+    rankedCount += 1
+    const value = score(row)
+    if (previousScore === null || Math.abs(value - previousScore) > 1e-9) {
+      currentRank = rankedCount
+      previousScore = value
+    }
+    return currentRank
+  })
+}
+
 /** The identity a model's rows group under: the producer's route id when
  *  it resolved one, else whatever identifies the model at all. */
 export function modelGroupKey(result: {
@@ -217,6 +275,24 @@ export function modelGroupKey(result: {
   model_info?: { id?: string; name?: string }
 }): string {
   return result.model_route_id ?? result.model_info?.id ?? result.model_info?.name ?? ""
+}
+
+/**
+ * A stable identity for one observation: the model, the source it came
+ * from, the protocol point it ran at, the judge panel that scored it and
+ * the source's own label for the number. Everything the page can use to
+ * tell two readings of the same model apart, and nothing that depends on
+ * where the reading currently sits in the table.
+ */
+export function observationKey(result: ModelResultForBenchmark): string {
+  return [
+    result.model_route_id ?? result.model_info?.id ?? result.model_info?.name ?? "",
+    result.merged_source_slug ?? result.source_metadata?.source_name ?? "",
+    result.collection_id ?? "",
+    result.protocol_condition ?? "",
+    result.judge_condition ?? "",
+    result.metric_source_label ?? "",
+  ].join("|")
 }
 
 /**
@@ -361,6 +437,16 @@ export interface ModelResultForBenchmark {
   /** The source's own label for the published number (`gpt_score`).
    *  Display and provenance only — never a key. */
   metric_source_label?: string | null
+  /** The harness that produced the run, and its version when the source
+   *  named one. Carried on the row because the reproducibility slots ask
+   *  which harness a re-runner would have to obtain and pin. */
+  eval_library?: EvalLibrary | null
+  /** How the score was produced: `generative` when the model wrote the
+   *  answer, `log_prob` when the harness scored likelihoods over fixed
+   *  choices. The producer's own classification, so it outranks anything
+   *  inferred from a row's raw fields; absent on a snapshot predating the
+   *  column, and null when the producer could not classify the row. */
+  scoring_mode?: string | null
   /** The row's comparability verdict; only `ok` groups were assessed. */
   comparability_status?: ComparabilityStatus | null
   /** The number the source published, before any canonical-scale
@@ -482,6 +568,13 @@ export interface BenchmarkEvalSummary extends SignalSummaries {
    *  gates every collection surface off merged summaries. Per-source
    *  embeds carry it and render the study surfaces deliberately. */
   collection?: CollectionAttachment
+  /** Curated studies the visible rows come from. Attribution only, and
+   *  the one study surface a merged summary carries. */
+  study_refs?: StudyRef[]
+  /** Declared protocol axes keyed by collection id, for a page whose rows
+   *  span several collections. Descriptor lookup only: it gives a row's
+   *  numbers their unit and says which axes apply to which row. */
+  protocol_axes_by_collection?: ProtocolAxesByCollection
   /** Source ↔ merged switcher data for per-source pages.
    *  Absent when the page has neither a merged page nor sibling sources,
    *  and on old snapshots. */
@@ -632,7 +725,13 @@ export interface MergedObservationRow {
   scale_conversion: MergedScaleConversion | null
   evaluation_timestamp: string
   source_metadata: SourceMetadata
+  /** The row's own upstream dataset provenance (repo, url, version,
+   *  sample count). Absent when the fact row carries none. */
+  source_data?: SourceData
   generation_config?: GenerationConfig
+  /** Same meaning as on ModelResultForBenchmark: the harness the
+   *  reproducibility slots ask a re-runner to obtain and pin. */
+  eval_library?: EvalLibrary | null
   is_verified_evaluator?: boolean
   /** De-aliased evaluator identity (canonical display when resolvable). */
   evaluator_display_name?: string
@@ -648,6 +747,8 @@ export interface MergedObservationRow {
   is_headline?: boolean | null
   metric_source_label?: string | null
   comparability_status?: ComparabilityStatus | null
+  /** Same meaning as on ModelResultForBenchmark. */
+  scoring_mode?: string | null
   /** The number the source published, before any canonical-scale
    *  conversion applied to `score`. */
   score_published?: number
@@ -691,6 +792,11 @@ export interface MergedBenchmarkSummary {
   /** The benchmark's card, sourced from a per-source instantiation that
    *  authored one (preferring a source that reports the preferred metric). */
   benchmark_card?: BenchmarkCard | null
+  /** `collections.json` entries for the curated collections these rows
+   *  belong to, keyed by collection_id. Lets the reader name the study a
+   *  row comes from and give its protocol numbers their declared units
+   *  without a second fetch. */
+  collections?: Record<string, CollectionsSidecarEntry>
 }
 
 /**

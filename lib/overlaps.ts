@@ -42,6 +42,14 @@ export interface OverlapAppearance {
   unit: string | null
   temperature?: number | null
   maxTokens?: number | null
+  /** The study this appearance was reported under, the run's own protocol
+   *  settings, and the benchmark family the study's rows sit under.
+   *  Distinct from `maxTokens`, which is the generic generation argument:
+   *  a study's token budget is a different quantity and is read through
+   *  the study's own declared axes. */
+  collectionId?: string | null
+  protocolCondition?: string | null
+  studyFamilyKey?: string | null
   annotations?: RowAnnotations | null
   /** "comparison-index" appearances have a per-eval leaderboard to link to;
    *  "summary" appearances come from the model's own result rows and don't. */
@@ -80,6 +88,9 @@ export interface OverlapSummaryJoinRow {
   evalSummaryId: string
   temperature: number | null
   maxTokens: number | null
+  collectionId?: string | null
+  protocolCondition?: string | null
+  studyFamilyKey?: string | null
   annotations: RowAnnotations | null
 }
 
@@ -99,6 +110,9 @@ export interface OverlapSummaryCandidate {
   metricName: string
   temperature: number | null
   maxTokens: number | null
+  collectionId?: string | null
+  protocolCondition?: string | null
+  studyFamilyKey?: string | null
   annotations: RowAnnotations | null
 }
 
@@ -292,6 +306,9 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
               unit,
               temperature,
               maxTokens,
+              collectionId: fallback?.collectionId ?? null,
+              protocolCondition: fallback?.protocolCondition ?? null,
+              studyFamilyKey: fallback?.studyFamilyKey ?? null,
               annotations: fallback ? fallback.annotations : null,
               sourceKind: "comparison-index",
               scoreCanonical: cellInfo.scoreCanonical,
@@ -473,6 +490,9 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
           unit: c.unit,
           temperature: c.temperature,
           maxTokens: c.maxTokens,
+          collectionId: c.collectionId ?? null,
+          protocolCondition: c.protocolCondition ?? null,
+          studyFamilyKey: c.studyFamilyKey ?? null,
           annotations: c.annotations,
           sourceKind: "summary",
         },

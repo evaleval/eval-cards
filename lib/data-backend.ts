@@ -1,5 +1,7 @@
 import "server-only"
 
+import { cache } from "react"
+
 import type { BackendManifestStatus } from "@/lib/backend-artifacts"
 import { cleanHierarchy } from "@/lib/clean-hierarchy"
 import { getEvalsForEvaluator, isRecognizedEvaluator } from "@/lib/evaluators"
@@ -54,6 +56,10 @@ export async function getEvalList() {
   return (await viewBackend()).getEvalList()
 }
 
+export async function getEvaluatorNameIndex() {
+  return (await viewBackend()).getEvaluatorNameIndex()
+}
+
 export async function getDashboardData() {
   return (await viewBackend()).getDashboardData()
 }
@@ -98,7 +104,7 @@ export async function getEvalTrajectories(evalId: string) {
  * verifiedCount spans both trust tiers (blue verified-for-this-eval and grey
  * recognized-source), matching the evaluator page header.
  */
-export async function getEvaluatorSummaryBySlug(slug: string) {
+export const getEvaluatorSummaryBySlug = cache(async (slug: string) => {
   const [list, orgMeta] = await Promise.all([
     getEvalListLiteData(),
     getOrganizationsData().catch(() => ({})),
@@ -113,7 +119,7 @@ export async function getEvaluatorSummaryBySlug(slug: string) {
   }
 
   return { name, isVerified, evalCount: evals.length, verifiedCount }
-}
+})
 
 export async function getBackendManifestData() {
   return (await sidecars()).fetchManifest()
