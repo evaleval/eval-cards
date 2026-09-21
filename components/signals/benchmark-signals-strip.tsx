@@ -29,18 +29,21 @@ function headlineResults(summary: BenchmarkEvalSummary): ModelResultForBenchmark
   return (summary.model_results ?? []).filter(isHeadlineResult)
 }
 import {
+  heuristicToScale,
   mergeRegistryBounds,
   resolveCanonicalScaleGroup,
   type CanonicalScaleCell,
 } from "@/lib/score-scale"
+import { computeSaturationMetrics, type SaturationCategory } from "@/lib/saturation"
 
-type SignalId = "reproducibility" | "completeness" | "provenance" | "comparability"
+type SignalId = "reproducibility" | "completeness" | "provenance" | "comparability" | "saturation"
 
 const SIGNAL_GLYPHS: Record<SignalId, string> = {
   reproducibility: "R",
   completeness: "C",
   provenance: "P",
   comparability: "X",
+  saturation: "S",
 }
 
 const SIGNAL_NAMES: Record<SignalId, string> = {
@@ -48,6 +51,7 @@ const SIGNAL_NAMES: Record<SignalId, string> = {
   completeness: "Completeness",
   provenance: "Provenance",
   comparability: "Comparability",
+  saturation: "Saturation",
 }
 
 const SIGNAL_ASKS: Record<SignalId, string> = {
@@ -55,6 +59,7 @@ const SIGNAL_ASKS: Record<SignalId, string> = {
   completeness: "How much of the benchmark card is filled in?",
   provenance: "Who reported these scores and how many parties have replicated?",
   comparability: "Where multiple sources report the same benchmark, do their numbers agree?",
+  saturation: "Are the top models still statistically distinguishable, or has this benchmark topped out?",
 }
 
 /**
@@ -147,12 +152,14 @@ export function BenchmarkSignalsStrip({
   const comp = useMemo(() => deriveCompleteness(summary), [summary])
   const prov = useMemo(() => deriveProvenance(summary, crossSuite), [summary, crossSuite])
   const cmp = useMemo(() => deriveComparability(summary, crossSuite), [summary, crossSuite])
+  const sat = useMemo(() => deriveSaturation(summary), [summary])
 
   const signals: Record<SignalId, DerivedSignal> = {
     reproducibility: repro,
     completeness: comp,
     provenance: prov,
     comparability: cmp,
+    saturation: sat,
   }
 
   return (
@@ -170,6 +177,7 @@ export function BenchmarkSignalsStrip({
         <SignalRow id="completeness" {...comp} onOpen={() => setOpenSignal("completeness")} />
         <SignalRow id="provenance" {...prov} onOpen={() => setOpenSignal("provenance")} />
         <SignalRow id="comparability" {...cmp} onOpen={() => setOpenSignal("comparability")} />
+        <SignalRow id="saturation" {...sat} onOpen={() => setOpenSignal("saturation")} />
       </div>
 
       <Dialog open={openSignal !== null} onOpenChange={(open) => !open && setOpenSignal(null)}>
@@ -1201,6 +1209,149 @@ function CrossSuiteBreakdown({ aggregate }: { aggregate: CrossSuiteAggregate }) 
       )}
     </div>
   )
+}
+
+// Saturation, ported from evaleval/benchmark-saturation
+
+const SATURATION_TARGET_N = 5
+const SATURATION_MIN_MODELS = 3
+
+const SATURATION_CATEGORY_LABEL: Record<SaturationCategory, string> = {
+  very_low: "very low",
+  low: "low",
+  moderate: "moderate",
+  high: "high",
+  very_high: "very high",
+}
+
+function normalizeScoreToFraction(
+  score: number,
+  metricConfig: BenchmarkEvalSummary["metric_config"] | undefined,
+): number | null {
+  if (typeof score !== "number" || !Number.isFinite(score)) return null
+  const min = metricConfig?.min_score
+  const max = metricConfig?.max_score
+  if (typeof min === "number" && typeof max === "number" && max > min) {
+    const clamped = Math.min(1, Math.max(0, (score - min) / (max - min)))
+    return metricConfig?.lower_is_better ? 1 - clamped : clamped
+  }
+  return Math.min(1, Math.max(0, heuristicToScale(score, false)))
+}
+
+function sourceDataSamplesNumber(sourceData: ModelResultForBenchmark["source_data"]): number | undefined {
+  if (!sourceData || Array.isArray(sourceData)) return undefined
+  const n = (sourceData as { samples_number?: unknown }).samples_number
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+function resolveTestSetSize(results: ModelResultForBenchmark[]): number | null {
+  const counts = new Map<number, number>()
+  for (const r of results) {
+    const n = r.score_details?.sample_size ?? sourceDataSamplesNumber(r.source_data)
+    if (typeof n === "number" && Number.isFinite(n) && n > 0) {
+      counts.set(n, (counts.get(n) ?? 0) + 1)
+    }
+  }
+  let best: number | null = null
+  let bestCount = 0
+  for (const [n, count] of counts) {
+    if (count > bestCount) {
+      best = n
+      bestCount = count
+    }
+  }
+  return best
+}
+
+function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
+  const triples = headlineResults(summary)
+
+  const scored: number[] = []
+  for (const t of triples) {
+    const norm = normalizeScoreToFraction(t.score, summary.metric_config)
+    if (norm != null) scored.push(norm)
+  }
+
+  const topN = Math.min(SATURATION_TARGET_N, scored.length)
+
+  const formula =
+    "S_index = exp(-R_norm²); R_norm = (s1 − sN) / SE_Δ; SE_Δ ≈ sqrt(SE(s1)² + SE(sN)²); " +
+    "SE(s) ≈ sqrt(s(1−s) / n_eff); n_eff = test_set_size^0.5. Ported from evaleval/benchmark-saturation."
+
+  if (topN < SATURATION_MIN_MODELS) {
+    return {
+      statValue: "—",
+      statUnit: "",
+      headline:
+        scored.length === 0
+          ? "No reported scores yet."
+          : `Only ${scored.length} model${scored.length === 1 ? "" : "s"} reported — need at least ${SATURATION_MIN_MODELS}.`,
+      detail: "",
+      breakdown: {
+        formula,
+        inputs: [{ label: "Models with a scoreable result", value: scored.length.toString() }],
+        empty: "Not enough reported models to compute a saturation index.",
+      },
+    }
+  }
+
+  const testSetSize = resolveTestSetSize(triples)
+  if (testSetSize == null) {
+    return {
+      statValue: "—",
+      statUnit: "",
+      headline: "No test-set size is recorded for this benchmark.",
+      detail: "",
+      breakdown: {
+        formula,
+        inputs: [{ label: "Models with a scoreable result", value: scored.length.toString() }],
+        empty:
+          "This benchmark doesn't report a sample_size or samples_number, so a saturation index can't be computed.",
+      },
+    }
+  }
+
+  const metrics = computeSaturationMetrics(scored, testSetSize, topN)
+  const categoryLabel = SATURATION_CATEGORY_LABEL[metrics.category]
+
+  const headline =
+    metrics.category === "very_low" || metrics.category === "low"
+      ? `Top ${topN} models remain statistically distinguishable.`
+      : metrics.category === "moderate"
+      ? `Top ${topN} models are starting to cluster together.`
+      : metrics.category === "high"
+      ? `Top ${topN} models are largely indistinguishable.`
+      : `Top ${topN} models are statistically indistinguishable.`
+
+  const detail = `${topN} models · #1 ${formatNumber(metrics.s1)} vs #${topN} ${formatNumber(metrics.sN)}${
+    metrics.isStatisticallySimilar ? " · within noise" : ""
+  }`
+
+  return {
+    statValue: pctNum(metrics.sIndex),
+    statUnit: "%",
+    headline,
+    detail,
+    breakdown: {
+      formula,
+      inputs: [
+        { label: "Category", value: categoryLabel },
+        { label: "Models compared (top N)", value: topN.toString() },
+        { label: "Top score (s1)", value: formatNumber(metrics.s1) },
+        { label: `#${topN} score (sN)`, value: formatNumber(metrics.sN) },
+        { label: "Score range", value: formatNumber(metrics.scoreRange) },
+        { label: "Mean score (all reported)", value: formatNumber(metrics.meanScore) },
+        { label: "Test-set size", value: testSetSize.toString() },
+        { label: "Effective n (n_eff)", value: formatNumber(metrics.nEff) },
+        { label: "SE of top/Nth difference", value: formatNumber(metrics.seDelta) },
+        { label: "Normalized range (R_norm)", value: formatNumber(metrics.rNorm) },
+        {
+          label: "Statistically similar?",
+          value: metrics.isStatisticallySimilar ? "yes (Δ ≤ 1.96·SE_Δ)" : "no",
+        },
+      ],
+    },
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────

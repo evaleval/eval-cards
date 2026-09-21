@@ -746,10 +746,12 @@
   .sig-completeness { color: oklch(0.55 0.13 165); }
   .sig-provenance { color: oklch(0.55 0.13 50); }
   .sig-comparability { color: oklch(0.55 0.13 320); }
+  .sig-saturation { color: oklch(0.55 0.13 90); }
   .dark .sig-reproducibility { color: oklch(0.78 0.13 240); }
   .dark .sig-completeness { color: oklch(0.78 0.13 165); }
   .dark .sig-provenance { color: oklch(0.78 0.13 50); }
   .dark .sig-comparability { color: oklch(0.78 0.13 320); }
+  .dark .sig-saturation { color: oklch(0.78 0.13 90); }
 
   /* Family card grid */
   .fam-grid {
