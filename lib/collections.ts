@@ -924,6 +924,12 @@ export interface ScaffoldContextModel {
 }
 
 export interface ScaffoldContextPayload {
+  /** What the subject mark is called. The curated study payload leaves it
+   *  unset and reads as "This study"; a cross-source payload built from
+   *  ordinary rows says "This source", because it answers a different
+   *  question — whether this source's number is an outlier, not what a
+   *  budget did to it. */
+  subjectLabel?: string | null
   /** Snapshot id of the harvest the external points come from. */
   harvestedAt: string
   officialTaskCount: number

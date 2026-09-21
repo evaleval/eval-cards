@@ -344,7 +344,7 @@ export function ScoreDistribution({
                           view === "frontier"
                             ? "Frontier score over model release dates (cumulative best)."
                             : view === "context"
-                              ? "This study's score for each model among other published measurements of the same model."
+                              ? `${context?.subjectLabel ?? "This study"}'s score for each model among other published measurements of the same model.`
                               : "Kernel-density distribution of model scores."
                         }
                         className={`ec-pill${on ? " on" : ""}`}
@@ -1069,8 +1069,15 @@ function ContextTooltip({
   )
 }
 
+/** Names before the caption turns into a wall. */
+const MAX_NAMED_WITHOUT_CONTEXT = 6
+
 export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
   const { models } = context
+  // A study page says "This study"; a page comparing sources says "This
+  // source". Same picture, different claim — the label is what stops the
+  // second being read as the first.
+  const subject = context.subjectLabel ?? "This study"
 
   // Hover is addressed by (strip, mark) so the tooltip can be positioned
   // on the same percentage scale as the mark it describes — no
@@ -1117,7 +1124,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
               </div>
               <div
                 role="img"
-                aria-label={`${model.displayName}: this study's score ${formatAccuracyPct(model.score)}${model.scoreSe != null ? ` ± ${formatAccuracyPct(model.scoreSe)}` : ""} over ${model.nTasks} tasks${model.assisted ? `, with oracle feedback ${formatAccuracyPct(model.assisted.score)} over ${model.assisted.nTasks} tasks` : ""}, ${model.points.length} external ${model.points.length === 1 ? "measurement" : "measurements"} from ${formatAccuracyPct(Math.min(...model.points.map((p) => p.score), model.score))} to ${formatAccuracyPct(Math.max(...model.points.map((p) => p.score), model.score))}`}
+                aria-label={`${model.displayName}: ${subject.toLowerCase()}'s score ${formatAccuracyPct(model.score)}${model.scoreSe != null ? ` ± ${formatAccuracyPct(model.scoreSe)}` : ""} over ${model.nTasks} tasks${model.assisted ? `, with oracle feedback ${formatAccuracyPct(model.assisted.score)} over ${model.assisted.nTasks} tasks` : ""}, ${model.points.length} external ${model.points.length === 1 ? "measurement" : "measurements"} from ${formatAccuracyPct(Math.min(...model.points.map((p) => p.score), model.score))} to ${formatAccuracyPct(Math.max(...model.points.map((p) => p.score), model.score))}`}
                 style={{ position: "relative", flex: 1, height: STRIP_HEIGHT }}
               >
                 {/* Strip baseline */}
@@ -1202,7 +1209,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
                 {model.assisted && (
                   <button
                     type="button"
-                    aria-label={`Current study (oracle feedback) · ${formatAccuracyPct(model.assisted.score)}${model.assisted.scoreSe != null ? ` ± ${formatAccuracyPct(model.assisted.scoreSe)}` : ""} · ${model.assisted.nTasks} tasks`}
+                    aria-label={`${subject} (oracle feedback) · ${formatAccuracyPct(model.assisted.score)}${model.assisted.scoreSe != null ? ` ± ${formatAccuracyPct(model.assisted.scoreSe)}` : ""} · ${model.assisted.nTasks} tasks`}
                     onMouseEnter={() => setHover({ modelKey: model.key, mark: "assisted" })}
                     onFocus={() => setHover({ modelKey: model.key, mark: "assisted" })}
                     onBlur={() => setHover(null)}
@@ -1271,7 +1278,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
                 {hover?.modelKey === model.key && hover.mark === "assisted" && model.assisted && (
                   <ContextTooltip
                     leftPct={xPct(model.assisted.score)}
-                    title="Current study (oracle feedback)"
+                    title={`${subject} (oracle feedback)`}
                     meta={`${formatAccuracyPct(model.assisted.score)}${model.assisted.scoreSe != null ? ` ± ${formatAccuracyPct(model.assisted.scoreSe)}` : ""} · ${model.assisted.nTasks} tasks`}
                     modelName={model.displayName}
                   />
@@ -1347,15 +1354,29 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
           budgets, task coverage, and submission protocols).
         </div>
         <div>
-          Diamonds: the current study&apos;s {anyAssisted ? "scores" : "score"} for the
-          no-feedback (blue)
-          {anyAssisted ? " and with-oracle (orange) setups" : " setup"}; whiskers show
-          the standard error.
+          Diamonds: {subject.toLowerCase()}&apos;s {anyAssisted ? "scores" : "score"}
+          {anyAssisted
+            ? " for the no-feedback (blue) and with-oracle (orange) setups"
+            : " (blue)"}; whiskers show the standard error.
         </div>
         <div>Circles: reported scores from other sources in Every Eval Ever.</div>
         {context.modelsWithoutContext.length > 0 && (
           <div>
-            No comparable external entries for {context.modelsWithoutContext.join(", ")}.
+            {/* This list is short on a curated study page and very long on an
+                ordinary one — most models are measured by a single source. A
+                60-name paragraph buries the plot it is meant to annotate, so
+                name a few and count the rest. */}
+            No comparable entries elsewhere for{" "}
+            {context.modelsWithoutContext.slice(0, MAX_NAMED_WITHOUT_CONTEXT).join(", ")}
+            {context.modelsWithoutContext.length > MAX_NAMED_WITHOUT_CONTEXT &&
+              ` and ${
+                context.modelsWithoutContext.length - MAX_NAMED_WITHOUT_CONTEXT
+              } other${
+                context.modelsWithoutContext.length - MAX_NAMED_WITHOUT_CONTEXT === 1
+                  ? ""
+                  : "s"
+              }`}
+            .
           </div>
         )}
         {context.modelsWithoutAssisted.length > 0 && (
