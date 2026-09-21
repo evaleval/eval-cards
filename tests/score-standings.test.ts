@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest"
 import {
   isAssistedResult,
   isHeadlineResult,
+  observationKey,
   scoreStandings,
 } from "@/lib/eval-processing"
+import type { ModelResultForBenchmark } from "@/lib/eval-processing"
 
 // A standing is the model's position in the field, not the row's position
 // on screen. The benchmark table and the study leaderboard embed both
@@ -80,5 +82,42 @@ describe("scoreStandings", () => {
     const ranks = standingsOf(runs)
     expect(ranks.filter((rank) => rank > 0)).toHaveLength(6)
     expect(ranks.filter((rank) => rank === 0)).toHaveLength(12)
+  })
+})
+
+// A leaderboard row's key decides which row a reader's expansion belongs
+// to. Filtering, sorting and the fold/flat switch all reorder the table,
+// so the key has to name the observation rather than its position.
+
+describe("observationKey", () => {
+  const observation = (
+    overrides: Partial<ModelResultForBenchmark>,
+  ): ModelResultForBenchmark =>
+    ({
+      model_info: { name: "Claude Opus 4.6", id: "anthropic/claude-opus-4.6" },
+      model_route_id: "anthropic%2Fclaude-opus-4.6",
+      source_metadata: { source_name: "UK AI Security Institute" },
+      ...overrides,
+    }) as ModelResultForBenchmark
+
+  it("tells a model's runs apart by what actually differs", () => {
+    const at32k = observation({ protocol_condition: '{"reasoning_tokens":32000}' })
+    const at64k = observation({ protocol_condition: '{"reasoning_tokens":64000}' })
+    expect(observationKey(at32k)).not.toBe(observationKey(at64k))
+
+    const byGpt = observation({ judge_condition: '{"judges":["openai/gpt-4o"]}' })
+    const byClaude = observation({ judge_condition: '{"judges":["anthropic/claude-3-5"]}' })
+    expect(observationKey(byGpt)).not.toBe(observationKey(byClaude))
+
+    const fromVals = observation({ merged_source_slug: "vals-ai" })
+    const fromLlmStats = observation({ merged_source_slug: "llm-stats" })
+    expect(observationKey(fromVals)).not.toBe(observationKey(fromLlmStats))
+  })
+
+  it("does not change when the row moves", () => {
+    // The same reading, read twice: whatever order the table is in, the
+    // expansion state attached to it has to follow it.
+    const reading = observation({ protocol_condition: '{"reasoning_tokens":32000}' })
+    expect(observationKey(reading)).toBe(observationKey({ ...reading }))
   })
 })

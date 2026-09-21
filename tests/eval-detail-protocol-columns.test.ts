@@ -398,6 +398,83 @@ describe("EvalDetail leaderboard — folded model rows", () => {
     expect(html).not.toContain("across 2 runs")
   })
 
+  it("ranks by the headline run, so a weak secondary run cannot demote its model", () => {
+    // A's headline is 0.90 with a 0.10 second run; B's single run is 0.80.
+    // By headline, A leads. By a mean across A's runs (0.50), B would.
+    const html = render(
+      summaryWith([
+        run(0.9, { feedback: "none", reasoning_tokens: 32000 }, { is_headline: true }),
+        run(0.1, { feedback: "none", reasoning_tokens: 16000 }),
+        run(0.8, { feedback: "none", reasoning_tokens: 32000 }, {
+          model_info: { name: "GPT-5.4", id: "openai/gpt-5.4" },
+          model_route_id: "openai%2Fgpt-5.4",
+          is_headline: true,
+        }),
+      ]),
+    )
+
+    expect(html.indexOf("Claude Opus 4.6")).toBeLessThan(html.indexOf("GPT-5.4"))
+    expect(html).toContain("0.90")
+    expect(html).toContain("0.80")
+    // The mean is nowhere on the page; the two runs are in the range.
+    expect(html).not.toContain("0.50")
+    expect(html).toContain("0.10 to 0.90 across 2 runs")
+    expect(html.match(/#1/g) ?? []).toHaveLength(1)
+    expect(html.match(/#2/g) ?? []).toHaveLength(1)
+  })
+
+  it("does the same on a lower-is-better metric", () => {
+    // A's headline is 0.10 with a 0.90 second run; B's single run is 0.20.
+    // Lower is better, so A leads by headline and would trail by mean.
+    const base = summaryWith([
+      run(0.1, { feedback: "none", reasoning_tokens: 32000 }, { is_headline: true }),
+      run(0.9, { feedback: "none", reasoning_tokens: 16000 }),
+      run(0.2, { feedback: "none", reasoning_tokens: 32000 }, {
+        model_info: { name: "GPT-5.4", id: "openai/gpt-5.4" },
+        model_route_id: "openai%2Fgpt-5.4",
+        is_headline: true,
+      }),
+    ])
+    const html = render({
+      ...base,
+      metric_config: { ...base.metric_config, lower_is_better: true },
+    } as BenchmarkEvalSummary)
+
+    expect(html.indexOf("Claude Opus 4.6")).toBeLessThan(html.indexOf("GPT-5.4"))
+    expect(html).toContain("0.10")
+    expect(html).toContain("0.20")
+    expect(html).not.toContain("0.50")
+    expect(html).toContain("0.10 to 0.90 across 2 runs")
+    expect(html.match(/#1/g) ?? []).toHaveLength(1)
+    expect(html.match(/#2/g) ?? []).toHaveLength(1)
+  })
+
+  it("leaves a model with no headline reading as flat unranked runs", () => {
+    // Nothing here is the producer's pick, so there is no reading whose
+    // score and standing the row could report. Promoting the first run
+    // would put a secondary number under the model's name.
+    const html = render(
+      summaryWith([
+        run(0.9, { feedback: "none", reasoning_tokens: 32000 }, {
+          model_info: { name: "GPT-5.4", id: "openai/gpt-5.4" },
+          model_route_id: "openai%2Fgpt-5.4",
+          is_headline: true,
+        }),
+        run(0.4, { feedback: "none", reasoning_tokens: 32000 }),
+        run(0.3, { feedback: "none", reasoning_tokens: 16000 }),
+      ]),
+    )
+
+    // One standing on the page, and it belongs to the model that has a
+    // headline. The other model's two runs are listed, unranked.
+    expect(html.match(/#1/g) ?? []).toHaveLength(1)
+    expect(html).not.toContain("#2")
+    expect(html).toContain("0.40")
+    expect(html).toContain("0.30")
+    // No fold was built around them, so nothing summarises them as one.
+    expect(html).not.toContain("across 2 runs")
+  })
+
   it("never turns a published curve's thresholds into protocol values", () => {
     // An aggregate-only record is ONE cell at its run cap, with every
     // curve point kept in the score details. Reading those thresholds as

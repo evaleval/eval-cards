@@ -60,6 +60,7 @@ import {
   judgeCellSummary,
   judgeConditionSummary,
   modelGroupKey,
+  observationKey,
   primaryMetricColumnKey,
   scoreSortBaseDirection,
   scoreStandings,
@@ -1102,12 +1103,23 @@ export function EvalDetail({
         (includeAssistedInRanking || !isAssistedResult(result.protocol_condition)),
     )
 
+    // A row's key has to name the OBSERVATION, not its position: the
+    // reader's expanded rows survive a filter, a sort and the fold/flat
+    // switch, and a key built from an array index reattaches that state
+    // to whichever reading lands at the same offset. Two byte-identical
+    // observations (a merged page's echo rows) still need distinct keys,
+    // so a repeat carries an occurrence suffix.
+    const seen = new Map<string, number>()
+
     return filteredResults.map((modelResult, index) => {
       const rank = ranks[index]
       const judge = judgeConditionSummary(modelResult.judge_condition, judgeDisplayName)
+      const identity = observationKey(modelResult)
+      const occurrence = seen.get(identity) ?? 0
+      seen.set(identity, occurrence + 1)
 
       return {
-        key: `${modelResult.model_info.id}-${index}`,
+        key: occurrence === 0 ? identity : `${identity}|#${occurrence}`,
         rank,
         modelResult,
         normalizedScore: normalizeScore(modelResult.score),
@@ -1169,6 +1181,24 @@ export function EvalDetail({
 
   const [openness, setOpenness] = useState<ModelOpenness[]>([...MODEL_OPENNESS_ORDER])
 
+  // Whether a model's weights are open is a fact about the MODEL, so the
+  // filter decides whole model groups and reads the producer's headline
+  // reading to decide them. Judging each reading on its own row-local
+  // metadata could drop a model's headline and leave one of its
+  // secondary runs standing in for it in the fold.
+  const opennessByModel = useMemo(() => {
+    const byModel = new Map<string, unknown>()
+    const fromHeadline = new Set<string>()
+    for (const row of leaderboardRows) {
+      const key = modelGroupKey(row.modelResult)
+      const headline = isHeadlineResult(row.modelResult)
+      if (fromHeadline.has(key) || (byModel.has(key) && !headline)) continue
+      byModel.set(key, row.modelResult.model_info?.open_weights)
+      if (headline) fromHeadline.add(key)
+    }
+    return byModel
+  }, [leaderboardRows])
+
   // Weights filter narrows which standings are DISPLAYED; it deliberately
   // does not re-rank. A model's rank is its position in the full standings,
   // so filtering to open weights shows "best open model is #4 overall"
@@ -1176,9 +1206,12 @@ export function EvalDetail({
   const opennessVisibleRows = useMemo(
     () =>
       leaderboardRows.filter((row) =>
-        matchesOpenness(row.modelResult.model_info?.open_weights, openness)
+        matchesOpenness(
+          opennessByModel.get(modelGroupKey(row.modelResult)),
+          openness,
+        )
       ),
-    [leaderboardRows, openness]
+    [leaderboardRows, opennessByModel, openness]
   )
 
   const opennessCounts = useMemo(() => {
@@ -1303,7 +1336,12 @@ export function EvalDetail({
    * folding.
    */
   const splitFoldMembers = (members: LeaderboardRow[]) => {
-    const headlineRow = members.find((row) => isHeadlineResult(row.modelResult)) ?? members[0]
+    const headlineRow = members.find((row) => isHeadlineResult(row.modelResult))
+    // No headline means no reading the producer picked, and a fold has
+    // nothing to report without one. Promoting `members[0]` would put a
+    // secondary run's score and standing on a row that reads as the
+    // model's, so the members stay flat and unranked instead.
+    if (!headlineRow) return null
     const panel = headlineRow.modelResult.judge_condition ?? null
     const runs: LeaderboardRow[] = []
     const judgeReadings: LeaderboardRow[] = []
@@ -1321,9 +1359,13 @@ export function EvalDetail({
     if (flatRunView) return visibleRows.map(soloFold)
     const folds: LeaderboardFold[] = []
     for (const members of leaderboardGroups) {
-      const { headlineRow, runs, judgeReadings } = splitFoldMembers(members)
-      folds.push(buildFold(headlineRow, runs))
-      for (const reading of judgeReadings) folds.push(soloFold(reading))
+      const split = splitFoldMembers(members)
+      if (!split) {
+        for (const row of members) folds.push(soloFold(row))
+        continue
+      }
+      folds.push(buildFold(split.headlineRow, split.runs))
+      for (const reading of split.judgeReadings) folds.push(soloFold(reading))
     }
     return folds
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1488,9 +1530,14 @@ export function EvalDetail({
         .join("&"),
     [protocolFilters],
   )
+  // A page number and an expanded row both describe the rows currently on
+  // screen. Narrowing the selection, or switching between one row per
+  // model and one row per run, replaces those rows, so both are reset
+  // rather than carried across to whatever now sits at the same offset.
   useEffect(() => {
     setLeaderboardPage(1)
-  }, [protocolFilterKey])
+    setExpandedRows({})
+  }, [protocolFilterKey, flatRunView])
 
   // First click on a column picks a sensible initial direction (alpha
   // for text, "best/most-recent first" for numeric/date). Second click

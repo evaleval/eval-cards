@@ -278,6 +278,24 @@ export function modelGroupKey(result: {
 }
 
 /**
+ * A stable identity for one observation: the model, the source it came
+ * from, the protocol point it ran at, the judge panel that scored it and
+ * the source's own label for the number. Everything the page can use to
+ * tell two readings of the same model apart, and nothing that depends on
+ * where the reading currently sits in the table.
+ */
+export function observationKey(result: ModelResultForBenchmark): string {
+  return [
+    result.model_route_id ?? result.model_info?.id ?? result.model_info?.name ?? "",
+    result.merged_source_slug ?? result.source_metadata?.source_name ?? "",
+    result.collection_id ?? "",
+    result.protocol_condition ?? "",
+    result.judge_condition ?? "",
+    result.metric_source_label ?? "",
+  ].join("|")
+}
+
+/**
  * Group rows so that a model's non-headline readings (its judge panels and
  * protocol arms) stay attached beneath its headline row.
  *
