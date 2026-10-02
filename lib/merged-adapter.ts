@@ -32,6 +32,142 @@ export function isMergedBenchmarkSummary(payload: unknown): payload is MergedBen
 }
 
 /**
+ * Published maximums for benchmarks whose sources report raw point totals
+ * rather than a percent or a fraction. The producer's registry declares no
+ * bounds for these, so a source publishing the total would otherwise sit
+ * on its own scale.
+ *
+ *   mme — 14 subtasks scored out of 200: perception 2000 + cognition 800
+ *         (Fu et al., arXiv 2306.13394).
+ */
+export const PUBLISHED_TOTAL_MAX: Readonly<Record<string, number>> = {
+  mme: 2800,
+}
+
+/**
+ * Put 'no_bounds' rows from different sources on one scale.
+ *
+ * A metric with no registry bounds gets no conversion from the producer:
+ * every row passes its raw score through as `score_canonical`. When one
+ * source publishes percent and another publishes fractions (cybergym:
+ * BenchPress 76.7 and LLM Stats 0.767 for the same model), the merged pool
+ * ranks the two scales against each other.
+ *
+ * Each source is judged as a whole: all of its scores in [0, 1] means
+ * fraction, all in [0, 100] with any above 1 means percent. A source with
+ * scores above 100 is a raw total; when the benchmark's published maximum
+ * is known (`totalMax`) and every score fits under it, the source is read
+ * as a fraction of that maximum, otherwise nothing moves. Rows are also
+ * left alone when any row in the pool carries a registry conversion, or
+ * when every source already shares one scale. When two scales share
+ * models, the shared models must also differ by roughly 100x, or nothing
+ * moves: two sources that agree model-for-model are on the same scale
+ * whatever their range.
+ *
+ * The page keeps whichever of percent and fraction more sources used,
+ * percent on a tie, with raw-total sources counted as fractions. Rows come
+ * back re-sorted best-first; ties keep their incoming order.
+ */
+export function harmonizeUnboundedScales(
+  rows: readonly MergedObservationRow[],
+  lowerIsBetter: boolean,
+  totalMax?: number,
+): { rows: MergedObservationRow[]; toPercent: boolean | null } {
+  const unchanged = { rows: [...rows], toPercent: null }
+  const finite = rows.filter(
+    (row) => row.score_canonical != null && Number.isFinite(row.score_canonical),
+  )
+  if (finite.length === 0) return unchanged
+  if (finite.some((row) => row.scale_conversion !== "no_bounds")) return unchanged
+
+  const bySource = new Map<string, number[]>()
+  for (const row of finite) {
+    const scores = bySource.get(row.composite_slug) ?? []
+    scores.push(row.score_canonical as number)
+    bySource.set(row.composite_slug, scores)
+  }
+  type SourceScale = "percent" | "fraction" | "total"
+  const scaleOf = new Map<string, SourceScale>()
+  for (const [source, scores] of bySource) {
+    if (scores.some((s) => s < 0)) return unchanged
+    if (scores.some((s) => s > 100)) {
+      if (totalMax == null || scores.some((s) => s > totalMax)) return unchanged
+      scaleOf.set(source, "total")
+    } else {
+      scaleOf.set(source, scores.some((s) => s > 1) ? "percent" : "fraction")
+    }
+  }
+  const scales = [...scaleOf.values()]
+  const percentSources = scales.filter((s) => s === "percent").length
+  const totalSources = scales.filter((s) => s === "total").length
+  const fractionSources = scales.length - percentSources
+  if (totalSources === 0 && (percentSources === 0 || percentSources === scales.length))
+    return unchanged
+  // Each source's scores as fractions of one — what the corroboration
+  // and the final mapping both work from.
+  const asFraction = (row: MergedObservationRow): number => {
+    const score = row.score_canonical as number
+    const scale = scaleOf.get(row.composite_slug)
+    return scale === "percent" ? score / 100 : scale === "total" ? score / (totalMax as number) : score
+  }
+
+  // Corroborate with the models two sources on different scales both
+  // report: once on fractions, the same model should read about the same.
+  const modelOf = (row: MergedObservationRow) =>
+    row.model_key ?? row.model_route_id ?? row.model_info?.name
+  const byModel = new Map<string, MergedObservationRow[]>()
+  for (const row of finite) {
+    const key = modelOf(row)
+    if (!key) continue
+    const group = byModel.get(key) ?? []
+    group.push(row)
+    byModel.set(key, group)
+  }
+  const ratios: number[] = []
+  for (const group of byModel.values()) {
+    for (let i = 0; i < group.length; i++) {
+      for (let j = i + 1; j < group.length; j++) {
+        const a = group[i]
+        const b = group[j]
+        if (scaleOf.get(a.composite_slug) === scaleOf.get(b.composite_slug)) continue
+        const fa = asFraction(a)
+        const fb = asFraction(b)
+        if (fa > 0 && fb > 0) ratios.push(Math.max(fa, fb) / Math.min(fa, fb))
+      }
+    }
+  }
+  if (ratios.length > 0) {
+    ratios.sort((x, y) => x - y)
+    if (ratios[Math.floor(ratios.length / 2)] > 3) return unchanged
+  }
+
+  const toPercent = percentSources >= fractionSources
+  const moved = rows.map((row) => {
+    if (row.score_canonical == null || !Number.isFinite(row.score_canonical)) return row
+    const scale = scaleOf.get(row.composite_slug)
+    if (scale === undefined || scale === (toPercent ? "percent" : "fraction")) return row
+    const fraction = asFraction(row)
+    return {
+      ...row,
+      score_canonical: toPercent ? fraction * 100 : fraction,
+      scale_harmonized:
+        scale === "total" ? ("of_total" as const) : toPercent ? ("mul100" as const) : ("div100" as const),
+    }
+  })
+  // Same order the query uses: canonical score in the metric's direction,
+  // unconvertible rows last.
+  const sign = lowerIsBetter ? 1 : -1
+  moved.sort((a, b) => {
+    const aOk = a.score_canonical != null && Number.isFinite(a.score_canonical)
+    const bOk = b.score_canonical != null && Number.isFinite(b.score_canonical)
+    if (aOk !== bOk) return aOk ? -1 : 1
+    if (!aOk) return 0
+    return sign * ((a.score_canonical as number) - (b.score_canonical as number))
+  })
+  return { rows: moved, toPercent }
+}
+
+/**
  * Rows eligible for the default merged pool: unassisted observations with
  * a score on the metric's registry canonical scale. Assisted conditions
  * belong on their source study's dedicated views, where their protocol is

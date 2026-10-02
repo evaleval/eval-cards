@@ -140,6 +140,18 @@ export function MergedBenchmarkView({
       ).length
     : 0
 
+  // Sources whose fraction (or percent) scores were moved onto the page's
+  // scale because the metric declares no bounds of its own.
+  const harmonizedSources = summary
+    ? Array.from(
+        new Map(
+          summary.results
+            .filter((row) => row.scale_harmonized)
+            .map((row) => [row.composite_slug, row] as const),
+        ).values(),
+      )
+    : []
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
@@ -300,8 +312,37 @@ export function MergedBenchmarkView({
       />
 
       {/* DISCLOSURE NOTES -------------------------------------------------- */}
-      {(disclosureSources.length > 0 || unconvertibleCount > 0 || assistedExcludedCount > 0) && (
+      {(disclosureSources.length > 0 ||
+        unconvertibleCount > 0 ||
+        assistedExcludedCount > 0 ||
+        harmonizedSources.length > 0) && (
         <div className="space-y-1.5">
+          {(["mul100", "div100", "of_total"] as const).map((kind) => {
+            const names = harmonizedSources
+              .filter((row) => row.scale_harmonized === kind)
+              .map((row) => row.composite_display_name || row.composite_slug)
+            if (names.length === 0) return null
+            const one = names.length === 1
+            const reported =
+              kind === "mul100" ? "a fraction of 1" : kind === "div100" ? "a percentage" : "a raw point total"
+            const shown =
+              kind === "mul100"
+                ? "×100"
+                : kind === "div100"
+                  ? "÷100"
+                  : "as a share of the benchmark's published maximum"
+            return (
+              <p
+                key={kind}
+                className="text-[12px] leading-[1.6]"
+                style={{ color: "var(--fg-muted)" }}
+              >
+                {names.join(", ")} {one ? "reports" : "report"} this metric as {reported};{" "}
+                {one ? "its" : "their"} scores are shown {shown} so every source sits on the same
+                scale.
+              </p>
+            )
+          })}
           {assistedExcludedCount > 0 && (
             <p className="text-[12px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>
               {assistedExcludedCount.toLocaleString()} assisted study{" "}
