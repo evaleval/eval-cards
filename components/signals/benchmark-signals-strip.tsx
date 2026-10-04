@@ -25,6 +25,7 @@ function headlineResults(summary: BenchmarkEvalSummary): ModelResultForBenchmark
   return (summary.model_results ?? []).filter(isHeadlineResult)
 }
 import {
+  heuristicToScale,
   mergeRegistryBounds,
   resolveCanonicalScaleGroup,
   type CanonicalScaleCell,
@@ -1196,9 +1197,10 @@ function CrossSuiteBreakdown({ aggregate }: { aggregate: CrossSuiteAggregate }) 
   )
 }
 
-// Saturation, ported from evaleval/benchmark-saturation
+// Saturation index, following evaleval/benchmark-saturation
 
 const SATURATION_TOP_N = 5
+const SATURATION_RANGE_TOLERANCE = 1e-9
 
 // Band names are the paper's five bins; the descriptions are the reference's
 // own (saturation_utils.py, categorize_saturation).
@@ -1218,33 +1220,48 @@ const SATURATION_CATEGORY_DESCRIPTION: Record<SaturationCategory, string> = {
   very_high: "no reliable signal for comparison",
 }
 
-type SaturationScale = "proportion" | "percent"
+const SATURATION_FRACTION_UNITS = new Set(["", "percent", "proportion"])
 
-/**
- * The reference takes scores in one of two forms: proportions in [0, 1]
- * used as they are, or percentage points in [0, 100] divided by 100. It
- * has no other conversion and no handling of lower-is-better metrics, so
- * a page gets a scale only when its metric declares one of those two
- * forms and every score fits it. Everything else returns null.
- */
-function resolveSaturationScale(
-  scores: number[],
+function finiteBounds(
   metricConfig: BenchmarkEvalSummary["metric_config"] | undefined,
-): SaturationScale | null {
-  if (metricConfig != null && typeof metricConfig !== "object") return null
-  if (metricConfig?.lower_is_better) return null
-
-  const unit = typeof metricConfig?.unit === "string" ? metricConfig.unit.trim().toLowerCase() : ""
-  const scale: SaturationScale | null =
-    unit === "percent" ? "percent" : unit === "" || unit === "proportion" ? "proportion" : null
-  if (scale == null) return null
-  const scaleMax = scale === "percent" ? 100 : 1
-
+): { min: number; max: number } | null {
   const min = metricConfig?.min_score
   const max = metricConfig?.max_score
-  if ((min != null || max != null) && (min !== 0 || max !== scaleMax)) return null
+  if (typeof min !== "number" || typeof max !== "number") return null
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return null
+  return { min, max }
+}
 
-  return scores.every((score) => score >= 0 && score <= scaleMax) ? scale : null
+/**
+ * Whether scores can be placed on a 0 to 1 scale at all. Declared finite
+ * bounds always can. Without them the fallback reads a value above 1.5 as
+ * a percentage, which only makes sense for a higher-is-better metric whose
+ * unit is percent, proportion or unstated.
+ *
+ * Stopgap: these rules, the 1.5 fallback and the range check in
+ * deriveSaturation infer the scale from per-page metadata. They should be
+ * replaced by the metric's scale, bounds and direction read from the entity
+ * registry once the registry carries them.
+ */
+function saturationScaleIsKnown(metricConfig: BenchmarkEvalSummary["metric_config"] | undefined): boolean {
+  if (metricConfig != null && typeof metricConfig !== "object") return false
+  if (finiteBounds(metricConfig)) return true
+  if (metricConfig?.lower_is_better) return false
+  const unit = typeof metricConfig?.unit === "string" ? metricConfig.unit.trim().toLowerCase() : ""
+  return SATURATION_FRACTION_UNITS.has(unit)
+}
+
+function normalizeScoreToFraction(
+  score: number,
+  metricConfig: BenchmarkEvalSummary["metric_config"] | undefined,
+): number | null {
+  if (typeof score !== "number" || !Number.isFinite(score)) return null
+  const bounds = finiteBounds(metricConfig)
+  if (bounds) {
+    const fraction = (score - bounds.min) / (bounds.max - bounds.min)
+    return metricConfig?.lower_is_better ? 1 - fraction : fraction
+  }
+  return heuristicToScale(score, false)
 }
 
 function sourceDataSamplesNumber(sourceData: ModelResultForBenchmark["source_data"]): number | undefined {
@@ -1274,16 +1291,19 @@ function resolveTestSetSize(results: ModelResultForBenchmark[]): number | null {
 
 export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
   const triples = headlineResults(summary)
-  const rawScores = triples
-    .map((t) => t.score)
-    .filter((score) => typeof score === "number" && Number.isFinite(score))
+
+  const scored: number[] = []
+  for (const t of triples) {
+    const norm = normalizeScoreToFraction(t.score, summary.metric_config)
+    if (norm != null) scored.push(norm)
+  }
 
   const formula =
     "S_index = exp(-R_norm²); R_norm = (s1 − s5) / SE_Δ; SE_Δ ≈ sqrt(SE(s1)² + SE(s5)²); " +
     "SE(s) ≈ sqrt(s(1−s) / n_eff); n_eff = test_set_size^0.5, over the top 5 models. " +
-    "Higher = more saturated. Ported from evaleval/benchmark-saturation."
+    "Higher = more saturated. Method from evaleval/benchmark-saturation."
 
-  const modelsInput = { label: "Models with a scoreable result", value: rawScores.length.toString() }
+  const modelsInput = { label: "Models with a scoreable result", value: scored.length.toString() }
   const notComputed = (headline: string, empty: string): DerivedSignal => ({
     statValue: "—",
     statUnit: "",
@@ -1292,46 +1312,50 @@ export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
     breakdown: { formula, inputs: [modelsInput], empty },
   })
 
-  if (rawScores.length < SATURATION_TOP_N) {
+  if (scored.length < SATURATION_TOP_N) {
     return notComputed(
-      rawScores.length === 0
+      scored.length === 0
         ? "No reported scores yet."
-        : `Need at least ${SATURATION_TOP_N} models, found ${rawScores.length}.`,
-      "Not enough reported models to compute a saturation index.",
+        : `Need at least ${SATURATION_TOP_N} models, found ${scored.length}.`,
+      "Fewer than 5 models have a reported score, so no index is shown.",
     )
   }
 
-  const scale = resolveSaturationScale(rawScores, summary.metric_config)
-  if (scale == null) {
-    return notComputed(
-      "Not computed for this metric's scale.",
-      "The saturation index is defined for higher-is-better scores that are proportions between 0 and 1 " +
-        "or percentages between 0 and 100. This benchmark's metric is not declared as one of those, " +
-        "or some of its scores fall outside that range.",
-    )
+  const scaleMessage =
+    "The top 5 scores could not be placed on a 0 to 1 scale from this metric's unit and bounds, so no index is shown."
+  if (!saturationScaleIsKnown(summary.metric_config)) {
+    return notComputed("Not computed for this metric's scale.", scaleMessage)
   }
+  const topRaw = scored.sort((x, y) => y - x).slice(0, SATURATION_TOP_N)
+  if (topRaw.some((x) => x < -SATURATION_RANGE_TOLERANCE || x > 1 + SATURATION_RANGE_TOLERANCE)) {
+    return notComputed("Not computed for this metric's scale.", scaleMessage)
+  }
+  const topScores = topRaw.map((x) => Math.min(1, Math.max(0, x)))
 
   const testSetSize = resolveTestSetSize(triples)
   if (testSetSize == null) {
     return notComputed(
       "No test-set size is recorded for this benchmark.",
-      "This benchmark doesn't report a sample_size or samples_number, so a saturation index can't be computed.",
+      "No sample_size or samples_number is reported with these results, so no index is shown.",
     )
   }
 
-  const topScores = rawScores
-    .map((score) => (scale === "percent" ? score / 100 : score))
-    .sort((a, b) => b - a)
-    .slice(0, SATURATION_TOP_N)
   const metrics = computeSaturationMetrics(topScores, testSetSize, SATURATION_TOP_N)
 
-  if (metrics.seDelta === 0) {
+  if (metrics.seDelta === 0 && metrics.s1 !== metrics.sN) {
     return notComputed(
       "Not computed: the standard error is zero.",
-      "The top and 5th scores both sit at the edge of the scale (0 or 1), so the standard error of " +
-        "their difference is zero and the normalized range is undefined.",
+      "The top score is at the maximum and the 5th at the minimum, so the standard error of their " +
+        "difference is zero. No index is shown.",
     )
   }
+
+  const bounds = finiteBounds(summary.metric_config)
+  const scaleNote = bounds
+    ? `declared bounds ${bounds.min} to ${bounds.max}${
+        summary.metric_config?.lower_is_better ? ", inverted (lower is better)" : ""
+      }`
+    : "no declared bounds; values above 1.5 read as percent"
 
   return {
     statValue: pctNum(metrics.sIndex),
@@ -1343,10 +1367,7 @@ export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
       inputs: [
         { label: "Category", value: SATURATION_CATEGORY_LABEL[metrics.category].toLowerCase() },
         { label: "Models compared (top N)", value: SATURATION_TOP_N.toString() },
-        {
-          label: "Score scale",
-          value: scale === "percent" ? "percent, divided by 100" : "proportion",
-        },
+        { label: "Scores scaled to 0 to 1 by", value: scaleNote },
         { label: "Top score (s1)", value: formatNumber(metrics.s1) },
         { label: `#${SATURATION_TOP_N} score (s${SATURATION_TOP_N})`, value: formatNumber(metrics.sN) },
         { label: "Score range", value: formatNumber(metrics.scoreRange) },
