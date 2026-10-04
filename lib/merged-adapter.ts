@@ -100,10 +100,8 @@ export function harmonizeUnboundedScales(
   }
   const scales = [...scaleOf.values()]
   const percentSources = scales.filter((s) => s === "percent").length
-  const totalSources = scales.filter((s) => s === "total").length
   const fractionSources = scales.length - percentSources
-  if (totalSources === 0 && (percentSources === 0 || percentSources === scales.length))
-    return unchanged
+  if (new Set(scales).size < 2) return unchanged
   // Each source's scores as fractions of one — what the corroboration
   // and the final mapping both work from.
   const asFraction = (row: MergedObservationRow): number => {
@@ -152,8 +150,9 @@ export function harmonizeUnboundedScales(
     if (scale === undefined || scale === (toPercent ? "percent" : "fraction")) return row
     const fraction = asFraction(row)
     // 0.58 * 100 is 57.99999999999999 in floating point, which would sort
-    // below a source that published 58.
-    const converted = Number((toPercent ? fraction * 100 : fraction).toPrecision(12))
+    // below a source that published 58. 15 significant digits drops that
+    // noise and nothing a source could have published.
+    const converted = Number((toPercent ? fraction * 100 : fraction).toPrecision(15))
     return {
       ...row,
       score_canonical: converted,

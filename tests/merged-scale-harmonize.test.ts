@@ -170,6 +170,22 @@ describe("harmonizeUnboundedScales", () => {
     expect(total.rows.map((r) => r.score_canonical)).toEqual([74.5, 60])
   })
 
+  it("leaves a precisely published score as it converts", () => {
+    const { rows } = harmonizeUnboundedScales(
+      [row("p", "a", 12.34567890126), row("f", "a", 0.1234567890126)],
+      false,
+    )
+    expect(scores(rows)).toEqual([
+      ["p", "a", 12.34567890126],
+      ["f", "a", 12.34567890126],
+    ])
+  })
+
+  it("leaves a pool of raw totals alone when no source is on another scale", () => {
+    const input = [row("t1", "a", 2086), row("t2", "b", 1400)]
+    expect(harmonizeUnboundedScales(input, false, 2800)).toEqual({ rows: input, toPercent: null })
+  })
+
   it("keeps null and NaN rows last, in place and untouched", () => {
     const blank = row("f", "x", 0.9, { score_canonical: null })
     const nan = row("p", "y", 12, { score_canonical: Number.NaN })
