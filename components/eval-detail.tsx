@@ -1464,7 +1464,7 @@ export function EvalDetail({
 
         <CollapsibleContent className="mt-3">
           <div className="space-y-4">
-            {/* Four interpretive signals, benchmark-level. */}
+            {/* Interpretive signals, benchmark-level. */}
             <BenchmarkSignalsStrip
               summary={summary}
               evalHierarchy={evalHierarchy}
