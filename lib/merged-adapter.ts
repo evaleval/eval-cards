@@ -62,7 +62,8 @@ export const PUBLISHED_TOTAL_MAX: Readonly<Record<string, number>> = {
  * when every source already shares one scale. When two scales share
  * models, the shared models must also differ by roughly 100x, or nothing
  * moves: two sources that agree model-for-model are on the same scale
- * whatever their range.
+ * whatever their range. A model scoring zero in one source and above zero
+ * in the other counts against the conversion.
  *
  * The page keeps whichever of percent and fraction more sources used,
  * percent on a tie, with raw-total sources counted as fractions. Rows come
@@ -132,7 +133,10 @@ export function harmonizeUnboundedScales(
         if (scaleOf.get(a.composite_slug) === scaleOf.get(b.composite_slug)) continue
         const fa = asFraction(a)
         const fb = asFraction(b)
-        if (fa > 0 && fb > 0) ratios.push(Math.max(fa, fb) / Math.min(fa, fb))
+        // A zero on both scales says nothing about either; a zero against
+        // a real score is a disagreement, not a pair to skip.
+        if (fa === 0 && fb === 0) continue
+        ratios.push(fa > 0 && fb > 0 ? Math.max(fa, fb) / Math.min(fa, fb) : Infinity)
       }
     }
   }
@@ -147,9 +151,12 @@ export function harmonizeUnboundedScales(
     const scale = scaleOf.get(row.composite_slug)
     if (scale === undefined || scale === (toPercent ? "percent" : "fraction")) return row
     const fraction = asFraction(row)
+    // 0.58 * 100 is 57.99999999999999 in floating point, which would sort
+    // below a source that published 58.
+    const converted = Number((toPercent ? fraction * 100 : fraction).toPrecision(12))
     return {
       ...row,
-      score_canonical: toPercent ? fraction * 100 : fraction,
+      score_canonical: converted,
       scale_harmonized:
         scale === "total" ? ("of_total" as const) : toPercent ? ("mul100" as const) : ("div100" as const),
     }
@@ -165,6 +172,31 @@ export function harmonizeUnboundedScales(
     return sign * ((a.score_canonical as number) - (b.score_canonical as number))
   })
   return { rows: moved, toPercent }
+}
+
+/**
+ * One sentence per kind of move, naming the sources whose scores were
+ * rescaled. Says what was done to the numbers and nothing about whether
+ * the sources measure the same quantity: a 100x rescale cannot show that.
+ */
+export function scaleHarmonizedNotes(
+  sources: ReadonlyArray<{
+    name: string
+    kind: MergedObservationRow["scale_harmonized"]
+  }>,
+): string[] {
+  const how = {
+    mul100: "multiplied by 100",
+    div100: "divided by 100",
+    of_total: "as a share of the benchmark's published maximum",
+  } as const
+  return (["mul100", "div100", "of_total"] as const).flatMap((kind) => {
+    const names = [...new Set(sources.filter((s) => s.kind === kind).map((s) => s.name))]
+    if (names.length === 0) return []
+    return [
+      `Scores from ${names.join(", ")} are shown ${how[kind]} to match the range of the other sources, which may not measure the same quantity.`,
+    ]
+  })
 }
 
 /**
