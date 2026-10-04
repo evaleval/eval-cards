@@ -101,6 +101,35 @@ describe("computeSaturationMetrics, numeric parity with compute_saturation_metri
     expect(m.isStatisticallySimilar).toBe(c.similar)
   })
 
+  it("matches the reference with ties at fifth place", () => {
+    // compute_saturation_metrics([0.9, 0.8, 0.7, 0.7, 0.7], 1000)
+    const m = computeSaturationMetrics([0.7, 0.9, 0.7, 0.8, 0.7], 1000, 5)
+    expect(m.sN).toBe(0.7)
+    expect(m.meanScore).toBeCloseTo(0.76, 12)
+    expect(m.rNorm).toBeCloseTo(2.0533801921606827, 10)
+    expect(m.sIndex).toBeCloseTo(0.014752094392597552, 12)
+    expect(m.category).toBe("low")
+  })
+
+  it("matches the reference on either side of the z = 1.96 similarity boundary", () => {
+    // compute_saturation_metrics([0.5, 0.5, 0.5, 0.5, 0.364], 10000) -> r_norm 1.9599227710699516, similar True
+    const inside = computeSaturationMetrics([0.5, 0.5, 0.5, 0.5, 0.364], 10000, 5)
+    expect(inside.rNorm).toBeCloseTo(1.9599227710699516, 10)
+    expect(inside.isStatisticallySimilar).toBe(true)
+    // compute_saturation_metrics([0.5, 0.5, 0.5, 0.5, 0.3639], 10000) -> r_norm 1.961419311865799, similar False
+    const outside = computeSaturationMetrics([0.5, 0.5, 0.5, 0.5, 0.3639], 10000, 5)
+    expect(outside.rNorm).toBeCloseTo(1.961419311865799, 10)
+    expect(outside.isStatisticallySimilar).toBe(false)
+  })
+
+  it("matches the reference when equal scores sit at a boundary", () => {
+    // compute_saturation_metrics([0, 0, 0, 0, 0], 100) -> se_delta 0.0, r_norm 0.0, s_index 1.0, "very_high"
+    const m = computeSaturationMetrics([0, 0, 0, 0, 0], 100, 5)
+    expect(m.seDelta).toBe(0)
+    expect(m.sIndex).toBe(1)
+    expect(m.category).toBe("very_high")
+  })
+
   it("departs from the reference when the standard error is zero and the scores differ", () => {
     // compute_saturation_metrics([1, 0.5, 0.5, 0.5, 0], 1000) -> r_norm 0.0, s_index 1.0, "very_high";
     // scripts/calc_saturation_metrics.py leaves R_norm and the index empty for the same input.
@@ -109,6 +138,31 @@ describe("computeSaturationMetrics, numeric parity with compute_saturation_metri
     expect(m.rNorm).toBe(Number.POSITIVE_INFINITY)
     expect(m.sIndex).toBe(0)
     expect(m.category).toBe("very_low")
+  })
+
+  it("raises on non-finite input instead of returning a band, as the reference does", () => {
+    expect(() => computeSaturationMetrics([Number.NaN, 0.9, 0.8, 0.7, 0.6], 1000, 5)).toThrow()
+    expect(() => computeSaturationMetrics([0.9, 0.8, 0.7, 0.6, 0.5], Number.NaN, 5)).toThrow()
+    expect(() => computeSaturationMetrics([0.9, 0.8, 0.7, 0.6, 0.5], 1000, 5, Number.NaN)).toThrow()
+    expect(() => categorizeSaturation(Number.NaN)).toThrow()
+  })
+})
+
+// categorize_saturation(s) in saturation_utils.py, at and just below each threshold.
+describe("categorizeSaturation, parity at the band thresholds", () => {
+  it.each([
+    [0, "very_low"],
+    [0.009999, "very_low"],
+    [0.01, "low"],
+    [0.299999, "low"],
+    [0.3, "moderate"],
+    [0.699999, "moderate"],
+    [0.7, "high"],
+    [0.899999, "high"],
+    [0.9, "very_high"],
+    [1, "very_high"],
+  ])("categorizes %f as %s", (sIndex, category) => {
+    expect(categorizeSaturation(sIndex)).toBe(category)
   })
 })
 

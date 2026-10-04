@@ -9,8 +9,8 @@ export type SaturationCategory = "very_low" | "low" | "moderate" | "high" | "ver
  * @returns Effective sample size n_eff = n^alpha
  */
 export function computeNEff(n: number, alpha = 0.5): number {
-  if (n <= 0) throw new Error(`Test set size must be positive, got ${n}`)
-  if (alpha < 0 || alpha > 1) throw new Error(`Alpha must be in [0, 1], got ${alpha}`)
+  if (!(n > 0) || !Number.isFinite(n)) throw new Error(`Test set size must be positive, got ${n}`)
+  if (!(alpha >= 0 && alpha <= 1)) throw new Error(`Alpha must be in [0, 1], got ${alpha}`)
   return Math.pow(n, alpha)
 }
 
@@ -22,8 +22,8 @@ export function computeNEff(n: number, alpha = 0.5): number {
  * @returns Standard error SE(s) ≈ sqrt(s(1-s) / n_eff)
  */
 export function computeStandardError(score: number, nEff: number): number {
-  if (score < 0 || score > 1) throw new Error(`Score must be in [0, 1], got ${score}`)
-  if (nEff <= 0) throw new Error(`Effective sample size must be positive, got ${nEff}`)
+  if (!(score >= 0 && score <= 1)) throw new Error(`Score must be in [0, 1], got ${score}`)
+  if (!(nEff > 0)) throw new Error(`Effective sample size must be positive, got ${nEff}`)
   if (score === 0 || score === 1) return 0
   return Math.sqrt((score * (1 - score)) / nEff)
 }
@@ -52,10 +52,10 @@ export function computeSeDelta(s1: number, sN: number, nEff: number): number {
  *
  * Note: se_delta is 0 only when both scores sit at a boundary (0 or 1).
  * Equal scores return 0 (maximum compression), as saturation_utils.py does.
- * Unequal scores return +Infinity here, where saturation_utils.py returns
- * 0.0 and the paper script (calc_saturation_metrics.py) leaves the index
- * empty. The references disagree, so callers should treat se_delta === 0 as
- * "not computed" rather than display either value.
+ * Unequal scores (one at 1, the other at 0) return +Infinity here, where
+ * saturation_utils.py returns 0.0 and the paper script
+ * (calc_saturation_metrics.py) leaves the index empty. The references
+ * disagree on that case, so callers should not display a value for it.
  */
 export function computeNormalizedRange(s1: number, sN: number, seDelta: number): number {
   if (seDelta === 0) return s1 === sN ? 0 : Number.POSITIVE_INFINITY
@@ -89,7 +89,7 @@ export function computeSaturationIndex(rNorm: number): number {
  * - very_high: S_index ≥ 0.9 (no reliable signal for comparison)
  */
 export function categorizeSaturation(sIndex: number): SaturationCategory {
-  if (sIndex < 0 || sIndex > 1) throw new Error(`S_index must be in [0, 1], got ${sIndex}`)
+  if (!(sIndex >= 0 && sIndex <= 1)) throw new Error(`S_index must be in [0, 1], got ${sIndex}`)
   if (sIndex < 0.01) return "very_low"
   if (sIndex < 0.3) return "low"
   if (sIndex < 0.7) return "moderate"
