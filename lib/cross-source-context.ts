@@ -18,8 +18,8 @@
  * inference budget do to this score?". Hence `subjectLabel`.
  */
 import type { ScaffoldContextModel, ScaffoldContextPayload } from "@/lib/collections"
-import type { MergedBenchmarkSummary } from "@/lib/eval-processing"
-import { convertedRows } from "@/lib/merged-adapter"
+import type { MergedBenchmarkSummary, MergedObservationRow } from "@/lib/eval-processing"
+import { convertedRows, scaleHarmonizedNotes } from "@/lib/merged-adapter"
 
 export interface CrossSourceRow {
   /** Stable model identity — the same key across sources. */
@@ -32,6 +32,9 @@ export interface CrossSourceRow {
   sourceSlug: string
   sourceLabel: string
   runDate?: string | null
+  /** Set when the merged accessor rescaled this score to sit with the
+   *  other sources; the strip then says so. */
+  scaleHarmonized?: MergedObservationRow["scale_harmonized"]
 }
 
 export interface CrossSourceContextOptions {
@@ -141,8 +144,15 @@ export function buildCrossSourceContext(
   const drawn = models.flatMap((model) => [model.score, ...model.points.map((p) => p.score)])
   const scoreScale = drawn.every((value) => value >= 0 && value <= 1) ? "fraction" : "raw"
 
+  // The page's own table shows each source's number as published, so a
+  // strip drawn on rescaled numbers has to say which ones were moved.
+  const scaleNotes = scaleHarmonizedNotes(
+    comparable.map((row) => ({ name: row.sourceLabel, kind: row.scaleHarmonized })),
+  )
+
   return {
     scoreScale,
+    ...(scaleNotes.length > 0 ? { scaleNotes } : {}),
     // Study-only instrumentation. Empty rather than invented: the captions
     // that read these degrade to saying nothing, which is correct here.
     harvestedAt: "",
@@ -216,6 +226,7 @@ export function crossSourceRowsFromMerged(merged: MergedBenchmarkSummary): Cross
       sourceSlug,
       sourceLabel: observation.composite_display_name ?? sourceSlug,
       runDate: observation.evaluation_timestamp ?? null,
+      scaleHarmonized: observation.scale_harmonized,
     })
   }
   return rows
@@ -226,18 +237,22 @@ export function crossSourceRowsFromMerged(merged: MergedBenchmarkSummary): Cross
  *
  * `score_canonical` is meant to be one scale per metric, and for a named
  * metric it is: every source reports mmlu-pro accuracy as a fraction. For
- * the unnamed `score` metric it is not. In the current snapshot benchpress
- * publishes scicode as 21 to 60.2 and Artificial Analysis publishes the
- * same models as 0 to 0.602, both in the canonical column; drop, math and
- * tau2-bench split the same way. Drawn on one axis those read as a
- * hundredfold disagreement nobody measured, which is the loudest thing the
- * plot can say and it would be false.
+ * the unnamed `score` metric the producer passes each source's number
+ * through, so benchpress can publish scicode as 21 to 60.2 while
+ * Artificial Analysis publishes the same models as 0 to 0.602. Drawn on
+ * one axis those read as a hundredfold disagreement nobody measured.
  *
- * A source reporting anything above 1 is not on the fraction scale, which
- * is the same reading of the same numbers the merged page takes. A source
- * on the other scale from the page's own is dropped rather than converted:
- * the conversion is the producer's to make, and guessing it here would
- * invent a measurement.
+ * The merged accessor settles most of these before the rows get here:
+ * when a pool splits into percent and fraction sources it moves one group
+ * onto the other's scale and flags the moved rows
+ * (`harmonizeUnboundedScales`), so both arrive on one scale, nothing is
+ * dropped, and the strip notes which sources were rescaled.
+ *
+ * What is left for this filter is the pools that accessor declines to
+ * touch, such as shared models that do not differ by about 100x, or a raw
+ * total with no published maximum. There a source reporting anything
+ * above 1 is not on the fraction scale, and a source on the other scale
+ * from the page's own is dropped rather than converted here.
  */
 function onOneScale(
   rows: readonly CrossSourceRow[],

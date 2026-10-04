@@ -512,6 +512,35 @@ describe("the scale the strip draws on", () => {
     expect(html).not.toContain("binary run success rates")
   })
 
+  it("says which sources were rescaled when the merged rows were harmonized", () => {
+    const rows = crossSourceRowsFromMerged(
+      mergedPayload([
+        observation({ score: 76.7, score_canonical: 76.7 }),
+        observation({
+          composite_slug: "src-b",
+          composite_display_name: "Source B",
+          score: 0.767,
+          score_canonical: 76.7,
+          scale_harmonized: "mul100",
+        }),
+      ]),
+    )
+    const payload = buildCrossSourceContext(rows, {
+      subjectSourceSlug: "src-b",
+      subjectLabel: "This source",
+    })!
+    expect(payload.models[0].score).toBe(76.7)
+    expect(plot(payload)).toContain(
+      "Scores from Source B are shown multiplied by 100 to match the range of the other sources",
+    )
+  })
+
+  it("carries no rescaling note when nothing was rescaled", () => {
+    const payload = derived(85, 80)
+    expect(payload.scaleNotes).toBeUndefined()
+    expect(plot(payload)).not.toContain("are shown")
+  })
+
   it("says nothing about task counts it never measured", () => {
     expect(plot(derived(0.85, 0.8))).not.toContain("0 tasks")
   })
