@@ -1312,7 +1312,7 @@ function describeMissingBounds(metricConfig: BenchmarkEvalSummary["metric_config
   const min = metricConfig?.min_score
   const max = metricConfig?.max_score
   if (min == null && max == null) return "no bounds are declared"
-  return `declared bounds ${min ?? "none"} to ${max ?? "none"} are not a finite range`
+  return `declared bounds ${min ?? "none"} to ${max ?? "none"} are not a usable range`
 }
 
 /** Why a top-five score fell outside 0 to 1 once scaled, from the reported values. */
@@ -1327,8 +1327,9 @@ function describeOutOfRange(
     const extent = hi > bounds.max ? `reach ${formatReported(hi)}` : `go as low as ${formatReported(lo)}`
     return `top scores ${extent} but declared bounds are ${bounds.min} to ${bounds.max}`
   }
-  if (lo < 0) return `top scores go as low as ${formatReported(lo)} and no bounds are declared`
-  return `top scores reach ${formatReported(hi)}, which reads as neither a 0 to 1 fraction nor a percentage, and no bounds are declared`
+  const missing = describeMissingBounds(metricConfig)
+  if (lo < 0) return `top scores go as low as ${formatReported(lo)} and ${missing}`
+  return `top scores reach ${formatReported(hi)}, which reads as neither a 0 to 1 fraction nor a percentage, and ${missing}`
 }
 
 function sourceDataSamplesNumber(sourceData: ModelResultForBenchmark["source_data"]): number | undefined {
@@ -1354,6 +1355,16 @@ function resolveTestSetSize(results: ModelResultForBenchmark[]): number | null {
     }
   }
   return best
+}
+
+/** Whether any result carries a sample-size field at all, usable or not. */
+function hasSampleSizeField(results: ModelResultForBenchmark[]): boolean {
+  return results.some((r) => {
+    if (r.score_details?.sample_size != null) return true
+    const sourceData = r.source_data
+    if (!sourceData || Array.isArray(sourceData)) return false
+    return (sourceData as { samples_number?: unknown }).samples_number != null
+  })
 }
 
 export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
@@ -1405,6 +1416,12 @@ export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
 
   const testSetSize = resolveTestSetSize(triples)
   if (testSetSize == null) {
+    if (hasSampleSizeField(triples)) {
+      return notComputed(
+        "No usable test-set size for this benchmark.",
+        "no usable test-set size (sample_size or samples_number is present but not a positive number)",
+      )
+    }
     return notComputed(
       "No test-set size is recorded for this benchmark.",
       "no test-set size recorded (no sample_size or samples_number on these results)",
@@ -1497,7 +1514,10 @@ function formatNumber(value: number): string {
 }
 
 function formatFixed3(value: number): string {
-  return Number.isFinite(value) ? value.toFixed(3) : "—"
+  if (!Number.isFinite(value)) return "—"
+  const fixed = value.toFixed(3)
+  if (value !== 0 && Number(fixed) === 0) return value > 0 ? "<0.001" : ">-0.001"
+  return fixed
 }
 
 function formatReported(value: number): string {

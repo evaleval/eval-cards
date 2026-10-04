@@ -121,6 +121,26 @@ describe("BenchmarkSignalsStrip, Saturation tile", () => {
     )
   })
 
+  it("does not call a present but unusable sample size absent", () => {
+    const signal = deriveSaturation(summaryWith(models([0.9, 0.85, 0.8, 0.75, 0.7], 0)))
+    expect(signal.statValue).toBe(DASH)
+    expect(signal.headline).toBe("No usable test-set size for this benchmark.")
+    expect(signal.breakdown.empty).toBe(
+      "Not computed: no usable test-set size (sample_size or samples_number is present but not a positive number).",
+    )
+  })
+
+  it("prints a nonzero value that rounds to zero as <0.001, never 0.000", () => {
+    const signal = deriveSaturation(summaryWith(models([0.9004, 0.9003, 0.9002, 0.9001, 0.9], 1e12)))
+    expect(signal.statValue).toBe("41")
+    expect(breakdownValue(signal, "Score range")).toBe("<0.001")
+    expect(breakdownValue(signal, "SE of top/#5 difference")).toBe("<0.001")
+    expect(breakdownValue(signal, "Top score (s1)")).toBe("0.900")
+    for (const input of signal.breakdown.inputs) {
+      expect(input.value).not.toMatch(/-0\.000|NaN|Infinity/)
+    }
+  })
+
   it.each([
     [
       "a unit that is not a fraction",
@@ -144,13 +164,19 @@ describe("BenchmarkSignalsStrip, Saturation tile", () => {
       "bounds that are not finite",
       { unit: "points", min_score: Number.NEGATIVE_INFINITY, max_score: Number.POSITIVE_INFINITY },
       [1500, 1480, 1460, 1440, 1420],
-      "Not computed: unit is points and declared bounds -Infinity to Infinity are not a finite range.",
+      "Not computed: unit is points and declared bounds -Infinity to Infinity are not a usable range.",
     ],
     [
       "unbounded scores above 100",
       { unit: undefined, ...NO_BOUNDS },
       [1500, 1480, 1460, 1440, 1420],
       "Not computed: top scores reach 1500, which reads as neither a 0 to 1 fraction nor a percentage, and no bounds are declared.",
+    ],
+    [
+      "negative scores with bounds that are declared but unusable",
+      { min_score: 0, max_score: 0 },
+      [-0.1, -0.2, -0.3, -0.4, -0.5],
+      "Not computed: top scores go as low as -0.5 and declared bounds 0 to 0 are not a usable range.",
     ],
     [
       "unbounded negative scores",
