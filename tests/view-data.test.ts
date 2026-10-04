@@ -25,6 +25,7 @@ async function writeSyntheticStageJSnapshot(
     includeCollectionContext?: boolean
     includeJudgeColumns?: boolean
     includeScoringMode?: boolean
+    includeMixedScaleSlice?: boolean
     dropRawModelIds?: boolean
   } = {},
 ) {
@@ -42,6 +43,8 @@ async function writeSyntheticStageJSnapshot(
   // comparability_status / score_published columns on eval_results_view.
   // includeScoringMode=false (the default) emulates a snapshot from before
   // the producer classified a row's scoring mode: no scoring_mode column.
+  // includeMixedScaleSlice adds a second mt-bench slice whose two sources
+  // publish the same bounds-less metric as a percent and as a fraction.
   const {
     includeMergedView = true,
     includeCollections = false,
@@ -49,6 +52,7 @@ async function writeSyntheticStageJSnapshot(
     includeCollectionContext = false,
     includeJudgeColumns = false,
     includeScoringMode = false,
+    includeMixedScaleSlice = false,
     dropRawModelIds = false,
   } = options
   await mkdir(snapshotDir, { recursive: true })
@@ -544,6 +548,30 @@ async function writeSyntheticStageJSnapshot(
     8.1 AS score_canonical,
     'no_bounds' AS scale_conversion
   `)
+  if (includeMixedScaleSlice) {
+    const mixedScaleRow = (source: string, name: string, model: string, info: string, score: number) =>
+      insertVariant(`
+        '${source}%2Fmt-bench-turn2' AS evaluation_id,
+        'mt-bench-turn2' AS benchmark_id,
+        '${source}' AS composite_slug,
+        '${name}' AS composite_display_name,
+        true AS is_slice,
+        'mt-bench' AS parent_benchmark_id,
+        'mt-bench-turn2%3Ascore' AS metric_summary_id,
+        'score' AS metric_id,
+        'score' AS metric_id_effective,
+        'Score' AS metric_display_name,
+        '${model}' AS model_key,
+        '${model}' AS model_id,
+        '${model.replace("/", "%2F")}' AS model_route_id,
+        ${info} AS model_info,
+        ${score} AS score,
+        ${score} AS score_canonical,
+        'no_bounds' AS scale_conversion
+      `)
+    await mixedScaleRow("src-c", "Source C", "meta/llama-4", llamaModelInfo, 62.0)
+    await mixedScaleRow("src-e", "Source E", "xai/grok-5", grokModelInfo, 0.71)
+  }
 
   if (includeCollections) {
     // Study rows: one model across two clean budgets plus an assisted
@@ -1102,6 +1130,7 @@ async function withSnapshot(
     includeCollectionContext?: boolean
     includeJudgeColumns?: boolean
     includeScoringMode?: boolean
+    includeMixedScaleSlice?: boolean
     dropRawModelIds?: boolean
   },
   run: (
@@ -1218,6 +1247,31 @@ describe("merged benchmark accessor (merged-benchmark-view F1)", () => {
         score: 8.1,
         scale_conversion: "no_bounds",
       })
+    })
+  })
+
+  it("recomputes best_result once a mixed-scale pool is put on one scale", async () => {
+    await withSnapshot({ includeMixedScaleSlice: true }, async (dataBackend) => {
+      const merged = await dataBackend.getMergedBenchmarkSummary("mt-bench", undefined, "mt-bench-turn2")
+      // The fraction source leads once both are percent; ranked as
+      // published, 62 would have beaten 0.71.
+      expect(merged!.results.map((r) => [r.composite_slug, r.score, r.score_canonical])).toEqual([
+        ["src-e", 0.71, 71],
+        ["src-c", 62, 62],
+      ])
+      expect(merged!.results[0].scale_harmonized).toBe("mul100")
+      expect(merged!.best_result).toEqual({
+        model_name: "Grok 5",
+        model_key: "xai/grok-5",
+        score: 0.71,
+        score_canonical: 71,
+        composite_slug: "src-e",
+        evaluation_id: "src-e%2Fmt-bench-turn2",
+      })
+
+      // A pool on one scale keeps the producer's best_result.
+      const untouched = await dataBackend.getMergedBenchmarkSummary("mt-bench")
+      expect(untouched!.best_result).toMatchObject({ model_name: "Llama 4", score_canonical: 8.1 })
     })
   })
 

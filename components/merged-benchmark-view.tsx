@@ -25,7 +25,11 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation"
 
 import { EvalDetail } from "@/components/eval-detail"
 import { fetchMergedBenchmarkSummary } from "@/lib/dashboard-data-client"
-import { isMergedBenchmarkSummary, mergedSummaryToEvalSummary } from "@/lib/merged-adapter"
+import {
+  isMergedBenchmarkSummary,
+  mergedSummaryToEvalSummary,
+  scaleHarmonizedNotes,
+} from "@/lib/merged-adapter"
 import {
   isAssistedResult,
   type MergedBenchmarkSummary,
@@ -147,6 +151,15 @@ export function MergedBenchmarkView({
           (row.score_canonical == null || !Number.isFinite(row.score_canonical)),
       ).length
     : 0
+
+  // Sources whose scores were moved onto the page's scale because the
+  // metric declares no bounds of its own.
+  const harmonizedNotes = scaleHarmonizedNotes(
+    (summary?.results ?? []).map((row) => ({
+      name: row.composite_display_name || row.composite_slug,
+      kind: row.scale_harmonized,
+    })),
+  )
 
   if (loading) {
     return (
@@ -308,8 +321,16 @@ export function MergedBenchmarkView({
       />
 
       {/* DISCLOSURE NOTES -------------------------------------------------- */}
-      {(disclosureSources.length > 0 || unconvertibleCount > 0 || assistedExcludedCount > 0) && (
+      {(disclosureSources.length > 0 ||
+        unconvertibleCount > 0 ||
+        assistedExcludedCount > 0 ||
+        harmonizedNotes.length > 0) && (
         <div className="space-y-1.5">
+          {harmonizedNotes.map((note) => (
+            <p key={note} className="text-[12px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>
+              {note}
+            </p>
+          ))}
           {assistedExcludedCount > 0 && (
             <p className="text-[12px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>
               {assistedExcludedCount.toLocaleString()} assisted study{" "}

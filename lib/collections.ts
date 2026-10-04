@@ -936,6 +936,10 @@ export interface ScaffoldContextPayload {
    *  scale for the page's metric, which is a fraction for some metrics
    *  and 0-100 or wider for others, so it says which. */
   scoreScale?: "fraction" | "raw" | null
+  /** Which sources' scores were rescaled to share the strip's scale. Only
+   *  a derived payload sets it; the page's own table shows the published
+   *  numbers, so the strip has to account for the difference. */
+  scaleNotes?: string[]
   /** Snapshot id of the harvest the external points come from. */
   harvestedAt: string
   officialTaskCount: number

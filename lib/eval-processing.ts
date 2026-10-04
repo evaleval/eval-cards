@@ -752,6 +752,12 @@ export interface MergedObservationRow {
   /** The number the source published, before any canonical-scale
    *  conversion applied to `score`. */
   score_published?: number
+  /** Set when the merged accessor moved this row's `score_canonical`
+   *  between the fraction and percent scales so it sits on the same scale
+   *  as the page's other sources (see harmonizeUnboundedScales). Only
+   *  'no_bounds' rows are ever moved. 'of_total' rows were published as
+   *  raw totals and divided by the benchmark's published maximum. */
+  scale_harmonized?: "mul100" | "div100" | "of_total"
 }
 
 export interface MergedBenchmarkSummary {

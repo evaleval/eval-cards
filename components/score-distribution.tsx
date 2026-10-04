@@ -1454,6 +1454,7 @@ export function ContextPlot({ context }: { context: ScaffoldContextPayload }) {
           Runs may differ in setup (e.g. scaffolds, budgets, task coverage, and
           submission protocols).
         </div>
+        {context.scaleNotes?.map((note) => <div key={note}>{note}</div>)}
         <div>
           Diamonds: {subject.toLowerCase()}&apos;s {anyAssisted ? "scores" : "score"}
           {anyAssisted

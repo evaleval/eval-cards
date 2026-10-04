@@ -4,6 +4,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { getConnection, serialized } from "@/lib/duckdb"
 import { fetchCollectionContext, fetchCollections, fetchHeadline } from "@/lib/sidecars"
+import { harmonizeUnboundedScales, PUBLISHED_TOTAL_MAX } from "@/lib/merged-adapter"
 import {
   buildCollectionAttachment,
   buildScaffoldContext,
@@ -1894,11 +1895,42 @@ export async function getMergedBenchmarkSummary(
     benchmarkCard = (parseMaybeJson(cardRow.benchmark_card) ?? null) as BenchmarkCard | null
   }
 
+  // A bounds-less metric gets no conversion from the producer, so sources
+  // that publish percent and sources that publish fractions would be
+  // pooled as-is. Put them on one scale before anything reads the rows.
+  const harmonized = harmonizeUnboundedScales(
+    resultRows.map(mergedObservationFromRow),
+    selectedLowerIsBetter,
+    PUBLISHED_TOTAL_MAX[asString(row.benchmark_id)],
+  )
+  const observations = harmonized.rows
+  let bestResult = (parseMaybeJson(row.best_result) ?? null) as MergedBestResult | null
+  // The producer picked its best result across the mismatched scales, so
+  // once rows move, the best is whatever now leads the pool the page shows.
+  if (harmonized.toPercent != null) {
+    const top = observations.find(
+      (obs) =>
+        isHeadlineResult(obs) &&
+        !isAssistedResult(obs.protocol_condition) &&
+        obs.score_canonical != null &&
+        Number.isFinite(obs.score_canonical),
+    )
+    if (top) {
+      bestResult = {
+        model_name: top.model_info?.name ?? null,
+        model_key: top.model_key ?? null,
+        score: top.score,
+        score_canonical: top.score_canonical,
+        composite_slug: top.composite_slug,
+        evaluation_id: top.evaluation_id,
+      }
+    }
+  }
+
   // Curated-collection entries for the collections these rows belong to.
   // The reader needs them to name the study a row comes from and to give
   // its protocol numbers their declared units; uncurated entries carry
   // neither, and every ordinary row has a collection_id.
-  const observations = resultRows.map(mergedObservationFromRow)
   let collections: Record<string, CollectionsSidecarEntry> | undefined
   try {
     const ids = new Set(
@@ -1937,7 +1969,7 @@ export async function getMergedBenchmarkSummary(
     all_sources_count: asNumber(row.all_sources_count),
     results_count: asNumber(row.results_count),
     models_count: asNumber(row.models_count),
-    best_result: (parseMaybeJson(row.best_result) ?? null) as MergedBestResult | null,
+    best_result: bestResult,
     aggregate_sources: aggregateSources,
     metrics,
     slices: grain === "slice" ? slices : null,
