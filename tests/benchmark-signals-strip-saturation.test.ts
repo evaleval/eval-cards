@@ -97,22 +97,99 @@ describe("BenchmarkSignalsStrip, Saturation tile", () => {
     expect(signal.statValue).toBe("68")
     expect(signal.statUnit).toBe("%")
     expect(signal.headline).toBe("Moderate: compression observed, sensitivity weakening.")
-    expect(signal.detail).toBe("higher = more saturated")
+    expect(signal.detail).toBe("higher = more saturated · n = 1000")
     expect(tileText(summary)).toContain(
-      "Saturation68%Moderate: compression observed, sensitivity weakening. · higher = more saturated",
+      "Saturation68%Moderate: compression observed, sensitivity weakening. · higher = more saturated · n = 1000",
     )
   })
 
   it("requires five models, as the reference does", () => {
-    const signal = deriveSaturation(summaryWith(models([0.9, 0.85, 0.8, 0.75], 1000)))
+    const summary = summaryWith(models([0.9, 0.85, 0.8, 0.75], 1000))
+    const signal = deriveSaturation(summary)
     expect(signal.statValue).toBe(DASH)
     expect(signal.headline).toBe("Need at least 5 models, found 4.")
+    expect(signal.breakdown.empty).toBe("Not computed: found 4 models, need 5.")
+    expect(tileText(summary)).not.toContain("n =")
   })
 
   it("is not computed when no test-set size is reported", () => {
     const signal = deriveSaturation(summaryWith(models([0.9, 0.85, 0.8, 0.75, 0.7])))
     expect(signal.statValue).toBe(DASH)
     expect(signal.headline).toBe("No test-set size is recorded for this benchmark.")
+    expect(signal.breakdown.empty).toBe(
+      "Not computed: no test-set size recorded (no sample_size or samples_number on these results).",
+    )
+  })
+
+  it.each([
+    [
+      "a unit that is not a fraction",
+      { unit: "points", ...NO_BOUNDS },
+      [0.9, 0.8, 0.7, 0.6, 0.5],
+      "Not computed: unit is points and no bounds are declared.",
+    ],
+    [
+      "a lower-is-better metric without bounds",
+      { lower_is_better: true, ...NO_BOUNDS },
+      [0.1, 0.2, 0.3, 0.4, 0.5],
+      "Not computed: lower is better and no bounds are declared.",
+    ],
+    [
+      "scores above the declared bounds",
+      { unit: "percent" },
+      [87, 86, 85, 84, 83],
+      "Not computed: top scores reach 87 but declared bounds are 0 to 1.",
+    ],
+    [
+      "bounds that are not finite",
+      { unit: "points", min_score: Number.NEGATIVE_INFINITY, max_score: Number.POSITIVE_INFINITY },
+      [1500, 1480, 1460, 1440, 1420],
+      "Not computed: unit is points and declared bounds -Infinity to Infinity are not a finite range.",
+    ],
+    [
+      "unbounded scores above 100",
+      { unit: undefined, ...NO_BOUNDS },
+      [1500, 1480, 1460, 1440, 1420],
+      "Not computed: top scores reach 1500, which reads as neither a 0 to 1 fraction nor a percentage, and no bounds are declared.",
+    ],
+    [
+      "unbounded negative scores",
+      { ...NO_BOUNDS },
+      [-0.1, -0.2, -0.3, -0.4, -0.5],
+      "Not computed: top scores go as low as -0.5 and no bounds are declared.",
+    ],
+  ] as [string, MetricConfigOverrides, number[], string][])(
+    "states the reason in the dialog for %s",
+    (_name, metricConfig, scores, reason) => {
+      const signal = deriveSaturation(summaryWith(models(scores, 1000), metricConfig))
+      expect(signal.statValue).toBe(DASH)
+      expect(signal.breakdown.empty).toBe(reason)
+    },
+  )
+
+  it("says so when the metric configuration cannot be read", () => {
+    const summary = summaryWith(models([0.9, 0.8, 0.7, 0.6, 0.5], 1000))
+    const signal = deriveSaturation({ ...summary, metric_config: "broken" as never })
+    expect(signal.statValue).toBe(DASH)
+    expect(signal.breakdown.empty).toBe("Not computed: metric configuration could not be read.")
+  })
+
+  it("formats the dialog's score-like values to three decimals and sizes as integers", () => {
+    const signal = deriveSaturation(summaryWith(models([0.95, 0.94, 0.93, 0.92, 0.91], 1000)))
+    for (const label of [
+      "Top score (s1)",
+      "#5 score (s5)",
+      "Score range",
+      "Mean score (top 5)",
+      "Effective n (n_eff)",
+      "SE of top/#5 difference",
+      "Normalized range (R_norm)",
+    ]) {
+      expect(breakdownValue(signal, label)).toMatch(/^\d+\.\d{3}$/)
+    }
+    expect(breakdownValue(signal, "Top score (s1)")).toBe("0.950")
+    expect(breakdownValue(signal, "Score range")).toBe("0.040")
+    expect(breakdownValue(signal, "Test-set size")).toBe("1000")
   })
 
   it.each([
@@ -151,7 +228,7 @@ describe("BenchmarkSignalsStrip, Saturation tile", () => {
     )
     expect(signal.statValue).toBe("85")
     expect(signal.headline).toBe("High: models largely indistinguishable.")
-    expect(breakdownValue(signal, "Top score (s1)")).toBe("0.882")
+    expect(breakdownValue(signal, "Top score (s1)")).toBe("0.882 (reported 88.2)")
   })
 
   it("normalises by declared bounds", () => {
@@ -162,8 +239,8 @@ describe("BenchmarkSignalsStrip, Saturation tile", () => {
     )
     expect(signal.statValue).toBe("<1")
     expect(signal.headline).toBe("Very low: strong discriminative power.")
-    expect(breakdownValue(signal, "Top score (s1)")).toBe("0.8")
-    expect(breakdownValue(signal, "#5 score (s5)")).toBe("0.4")
+    expect(breakdownValue(signal, "Top score (s1)")).toBe("0.800 (reported 8.2)")
+    expect(breakdownValue(signal, "#5 score (s5)")).toBe("0.400 (reported 4.6)")
   })
 
   it("inverts a lower-is-better metric so the lowest raw scores are the top five", () => {
@@ -173,8 +250,8 @@ describe("BenchmarkSignalsStrip, Saturation tile", () => {
       summaryWith(models([0.6, 0.3, 0.1, 0.25, 0.9, 0.15, 0.2], 400), { lower_is_better: true }),
     )
     expect(signal.statValue).toBe("7")
-    expect(breakdownValue(signal, "Top score (s1)")).toBe("0.9")
-    expect(breakdownValue(signal, "#5 score (s5)")).toBe("0.7")
+    expect(breakdownValue(signal, "Top score (s1)")).toBe("0.900 (reported 0.1)")
+    expect(breakdownValue(signal, "#5 score (s5)")).toBe("0.700 (reported 0.3)")
   })
 
   it("computes when all five scores are equal at a boundary", () => {
@@ -198,7 +275,7 @@ describe("BenchmarkSignalsStrip, Saturation tile", () => {
     const signal = deriveSaturation(summary)
     expect(signal.statValue).toBe("7")
     expect(signal.headline).toBe("Low: some clustering, meaningful separations remain.")
-    expect(signal.detail).toBe("higher = more saturated")
+    expect(signal.detail).toBe("higher = more saturated · n = 400")
     expect(breakdownValue(signal, "Statistically similar?")).toBe("yes (Δ ≤ 1.96·SE_Δ)")
     expect(tileText(summary)).not.toMatch(/within noise|distinguishable/)
   })
@@ -220,16 +297,16 @@ describe("BenchmarkSignalsStrip, Saturation tile", () => {
     // -> s_index 0.8626295106100751, mean_score 0.78
     const signal = deriveSaturation(summaryWith(models([0.1, 0.77, 0.8, 0.2, 0.76, 0.79, 0.78], 1000)))
     expect(signal.statValue).toBe("86")
-    expect(breakdownValue(signal, "Mean score (top 5)")).toBe("0.78")
-    expect(breakdownValue(signal, "#5 score (s5)")).toBe("0.76")
+    expect(breakdownValue(signal, "Mean score (top 5)")).toBe("0.780")
+    expect(breakdownValue(signal, "#5 score (s5)")).toBe("0.760")
   })
 
   it("takes the fifth of the sorted scores when several tie there", () => {
     // compute_saturation_metrics([0.9, 0.8, 0.8, 0.7, 0.7], 1000) -> s_index 0.014752094392597552, mean_score 0.78
     const signal = deriveSaturation(summaryWith(models([0.7, 0.8, 0.7, 0.9, 0.7, 0.8, 0.7], 1000)))
     expect(signal.statValue).toBe("1")
-    expect(breakdownValue(signal, "#5 score (s5)")).toBe("0.7")
-    expect(breakdownValue(signal, "Mean score (top 5)")).toBe("0.78")
+    expect(breakdownValue(signal, "#5 score (s5)")).toBe("0.700")
+    expect(breakdownValue(signal, "Mean score (top 5)")).toBe("0.780")
   })
 
   it("ignores non-headline rows", () => {

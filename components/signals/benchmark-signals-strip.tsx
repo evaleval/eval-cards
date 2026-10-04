@@ -168,7 +168,11 @@ export function BenchmarkSignalsStrip({
       <div
         className="grid gap-x-6 gap-y-3"
         style={{
-          gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+          // Five 220px tiles and four 24px gaps need 1196px. Below that the
+          // minimum widens to a third of the row, so the five tiles wrap
+          // 3 + 2 instead of 4 + 1; narrower still, 220px applies again.
+          gridTemplateColumns:
+            "repeat(auto-fit, minmax(max(220px, min((100% - 48px) / 3, (1196px - 100%) * 9999)), 1fr))",
           border: "1px solid var(--border-soft)",
           background: "var(--bg)",
           padding: "12px 16px",
@@ -1295,6 +1299,38 @@ function normalizeScoreToFraction(
   return heuristicToScale(score, false)
 }
 
+/** Why saturationScaleIsKnown said no, in the order it checks. */
+function describeUnknownScale(metricConfig: BenchmarkEvalSummary["metric_config"] | undefined): string {
+  if (metricConfig != null && typeof metricConfig !== "object") return "metric configuration could not be read"
+  const bounds = describeMissingBounds(metricConfig)
+  if (metricConfig?.lower_is_better) return `lower is better and ${bounds}`
+  const unit = typeof metricConfig?.unit === "string" ? metricConfig.unit.trim().toLowerCase() : ""
+  return `unit is ${unit} and ${bounds}`
+}
+
+function describeMissingBounds(metricConfig: BenchmarkEvalSummary["metric_config"] | undefined): string {
+  const min = metricConfig?.min_score
+  const max = metricConfig?.max_score
+  if (min == null && max == null) return "no bounds are declared"
+  return `declared bounds ${min ?? "none"} to ${max ?? "none"} are not a finite range`
+}
+
+/** Why a top-five score fell outside 0 to 1 once scaled, from the reported values. */
+function describeOutOfRange(
+  reported: number[],
+  metricConfig: BenchmarkEvalSummary["metric_config"] | undefined,
+): string {
+  const lo = Math.min(...reported)
+  const hi = Math.max(...reported)
+  const bounds = finiteBounds(metricConfig)
+  if (bounds) {
+    const extent = hi > bounds.max ? `reach ${formatReported(hi)}` : `go as low as ${formatReported(lo)}`
+    return `top scores ${extent} but declared bounds are ${bounds.min} to ${bounds.max}`
+  }
+  if (lo < 0) return `top scores go as low as ${formatReported(lo)} and no bounds are declared`
+  return `top scores reach ${formatReported(hi)}, which reads as neither a 0 to 1 fraction nor a percentage, and no bounds are declared`
+}
+
 function sourceDataSamplesNumber(sourceData: ModelResultForBenchmark["source_data"]): number | undefined {
   if (!sourceData || Array.isArray(sourceData)) return undefined
   const n = (sourceData as { samples_number?: unknown }).samples_number
@@ -1323,10 +1359,10 @@ function resolveTestSetSize(results: ModelResultForBenchmark[]): number | null {
 export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
   const triples = headlineResults(summary)
 
-  const scored: number[] = []
+  const scored: { norm: number; reported: number }[] = []
   for (const t of triples) {
     const norm = normalizeScoreToFraction(t.score, summary.metric_config)
-    if (norm != null) scored.push(norm)
+    if (norm != null) scored.push({ norm, reported: t.score })
   }
 
   const formula =
@@ -1335,12 +1371,12 @@ export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
     "Higher = more saturated. Method from evaleval/benchmark-saturation."
 
   const modelsInput = { label: "Models with a scoreable result", value: scored.length.toString() }
-  const notComputed = (headline: string, empty: string): DerivedSignal => ({
+  const notComputed = (headline: string, reason: string): DerivedSignal => ({
     statValue: "—",
     statUnit: "",
     headline,
     detail: "",
-    breakdown: { formula, inputs: [modelsInput], empty },
+    breakdown: { formula, inputs: [modelsInput], empty: `Not computed: ${reason}.` },
   })
 
   if (scored.length < SATURATION_TOP_N) {
@@ -1348,18 +1384,22 @@ export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
       scored.length === 0
         ? "No reported scores yet."
         : `Need at least ${SATURATION_TOP_N} models, found ${scored.length}.`,
-      "Fewer than 5 models have a reported score, so no index is shown.",
+      scored.length === 0
+        ? "no model has a reported score"
+        : `found ${scored.length} ${scored.length === 1 ? "model" : "models"}, need ${SATURATION_TOP_N}`,
     )
   }
 
-  const scaleMessage =
-    "The top 5 scores could not be placed on a 0 to 1 scale from this metric's unit and bounds, so no index is shown."
   if (!saturationScaleIsKnown(summary.metric_config)) {
-    return notComputed("Not computed for this metric's scale.", scaleMessage)
+    return notComputed("Not computed for this metric's scale.", describeUnknownScale(summary.metric_config))
   }
-  const topRaw = scored.sort((x, y) => y - x).slice(0, SATURATION_TOP_N)
+  const top = scored.sort((x, y) => y.norm - x.norm).slice(0, SATURATION_TOP_N)
+  const topRaw = top.map((x) => x.norm)
   if (topRaw.some((x) => x < -SATURATION_RANGE_TOLERANCE || x > 1 + SATURATION_RANGE_TOLERANCE)) {
-    return notComputed("Not computed for this metric's scale.", scaleMessage)
+    return notComputed(
+      "Not computed for this metric's scale.",
+      describeOutOfRange(top.map((x) => x.reported), summary.metric_config),
+    )
   }
   const topScores = topRaw.map((x) => Math.min(1, Math.max(0, x)))
 
@@ -1367,7 +1407,7 @@ export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
   if (testSetSize == null) {
     return notComputed(
       "No test-set size is recorded for this benchmark.",
-      "No sample_size or samples_number is reported with these results, so no index is shown.",
+      "no test-set size recorded (no sample_size or samples_number on these results)",
     )
   }
 
@@ -1376,10 +1416,14 @@ export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
   if (metrics.seDelta === 0 && metrics.s1 !== metrics.sN) {
     return notComputed(
       "Not computed: the standard error is zero.",
-      "The top score is at the maximum and the 5th at the minimum, so the standard error of their " +
-        "difference is zero. No index is shown.",
+      "the top score is 1 and the 5th is 0 on the 0 to 1 scale, so the standard error of their difference is zero",
     )
   }
+
+  const usedWithReported = (used: number, reported: number): string =>
+    Math.abs(used - reported) > SATURATION_RANGE_TOLERANCE
+      ? `${formatFixed3(used)} (reported ${formatReported(reported)})`
+      : formatFixed3(used)
 
   const bounds = finiteBounds(summary.metric_config)
   const scaleNote = bounds
@@ -1392,21 +1436,24 @@ export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
     statValue: pctNum(metrics.sIndex),
     statUnit: "%",
     headline: `${SATURATION_CATEGORY_LABEL[metrics.category]}: ${SATURATION_CATEGORY_DESCRIPTION[metrics.category]}.`,
-    detail: "higher = more saturated",
+    detail: `higher = more saturated · n = ${testSetSize}`,
     breakdown: {
       formula,
       inputs: [
         { label: "Category", value: SATURATION_CATEGORY_LABEL[metrics.category].toLowerCase() },
         { label: "Models compared (top N)", value: SATURATION_TOP_N.toString() },
         { label: "Scores scaled to 0 to 1 by", value: scaleNote },
-        { label: "Top score (s1)", value: formatNumber(metrics.s1) },
-        { label: `#${SATURATION_TOP_N} score (s${SATURATION_TOP_N})`, value: formatNumber(metrics.sN) },
-        { label: "Score range", value: formatNumber(metrics.scoreRange) },
-        { label: `Mean score (top ${SATURATION_TOP_N})`, value: formatNumber(metrics.meanScore) },
+        { label: "Top score (s1)", value: usedWithReported(metrics.s1, top[0].reported) },
+        {
+          label: `#${SATURATION_TOP_N} score (s${SATURATION_TOP_N})`,
+          value: usedWithReported(metrics.sN, top[SATURATION_TOP_N - 1].reported),
+        },
+        { label: "Score range", value: formatFixed3(metrics.scoreRange) },
+        { label: `Mean score (top ${SATURATION_TOP_N})`, value: formatFixed3(metrics.meanScore) },
         { label: "Test-set size", value: testSetSize.toString() },
-        { label: "Effective n (n_eff)", value: formatNumber(metrics.nEff) },
-        { label: `SE of top/#${SATURATION_TOP_N} difference`, value: formatNumber(metrics.seDelta) },
-        { label: "Normalized range (R_norm)", value: formatNumber(metrics.rNorm) },
+        { label: "Effective n (n_eff)", value: formatFixed3(metrics.nEff) },
+        { label: `SE of top/#${SATURATION_TOP_N} difference`, value: formatFixed3(metrics.seDelta) },
+        { label: "Normalized range (R_norm)", value: formatFixed3(metrics.rNorm) },
         {
           label: "Statistically similar?",
           value: metrics.isStatisticallySimilar ? "yes (Δ ≤ 1.96·SE_Δ)" : "no",
@@ -1447,6 +1494,14 @@ function formatNumber(value: number): string {
   if (value >= 100) return value.toFixed(0)
   if (value >= 1) return value.toFixed(2)
   return value.toFixed(3).replace(/0+$/g, "").replace(/\.$/, "")
+}
+
+function formatFixed3(value: number): string {
+  return Number.isFinite(value) ? value.toFixed(3) : "—"
+}
+
+function formatReported(value: number): string {
+  return Number.isFinite(value) ? String(Number(value.toPrecision(4))) : "—"
 }
 
 // ──────────────────────────────────────────────────────────────────────────
