@@ -151,8 +151,15 @@ export function fetchEvalHierarchy() {
   return fetchJson<EvalHierarchy>("/api/eval-hierarchy").then(decorateHierarchyDerivedTags)
 }
 
-export function fetchComparisonIndex() {
-  return fetchJson<ComparisonIndex>("/api/comparison-index")
+/** The comparison index sliced to what one model page reads. */
+export function fetchComparisonIndexForModel(modelRouteId: string) {
+  return fetchJson<ComparisonIndex>(`/api/comparison-index?model=${encodeURIComponent(modelRouteId)}`)
+}
+
+/** Full leaderboards for exactly these evals. */
+export function fetchComparisonIndexForEvals(evaluationIds: string[]) {
+  const ids = [...new Set(evaluationIds)].sort()
+  return fetchJson<ComparisonIndex>(`/api/comparison-index?evals=${ids.map(encodeURIComponent).join(",")}`)
 }
 
 export function fetchCorpusAggregates() {

@@ -84,6 +84,7 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "happy-dom": "^15.11.7",
     "playwright": "^1.60.0",
     "postcss": "^8.5",
     "puppeteer-core": "^24.42.0",

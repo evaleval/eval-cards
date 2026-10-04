@@ -64,8 +64,16 @@ export async function cachedGzipJson(
     })
   }
 
-  const entry = await entryPromise
+  return respond(request, await entryPromise)
+}
 
+/** The same gzip / ETag response for a payload built per request, without
+ *  the per-process memo. */
+export async function gzipJson(request: Request, data: unknown): Promise<Response> {
+  return respond(request, await buildEntry(async () => data))
+}
+
+function respond(request: Request, entry: Entry): Response {
   if (request.headers.get("if-none-match") === entry.etag) {
     return new Response(null, {
       status: 304,

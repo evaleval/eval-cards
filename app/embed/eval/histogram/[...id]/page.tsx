@@ -2,16 +2,16 @@
 
 import { useEffect, useState } from "react"
 import { useParams, useSearchParams } from "next/navigation"
-import { BenchmarkDetail } from "@/components/benchmark-detail"
+import { BenchmarkDetail, comparisonRouteIdOf } from "@/components/benchmark-detail"
 import {
   fetchBenchmarkMetadata,
-  fetchComparisonIndex,
   fetchEvalHierarchy,
   fetchModelSummary,
 } from "@/lib/dashboard-data-client"
 import { routeIdFromSegments } from "@/lib/utils"
 import type { BenchmarkCard } from "@/lib/benchmark-schema"
-import type { ComparisonIndex, EvalHierarchy } from "@/lib/backend-artifacts"
+import type { EvalHierarchy } from "@/lib/backend-artifacts"
+import { useComparisonIndex } from "@/lib/use-comparison-index"
 
 /**
  * Embed-only render of a single model/benchmark histogram plotbox.
@@ -37,8 +37,8 @@ export default function EmbedEvalHistogram() {
   const [summary, setSummary] = useState<Awaited<ReturnType<typeof fetchModelSummary>> | null>(null)
   const [benchmarkCards, setBenchmarkCards] = useState<Record<string, BenchmarkCard>>({})
   const [evalHierarchy, setEvalHierarchy] = useState<EvalHierarchy | null>(null)
-  const [comparisonIndex, setComparisonIndex] = useState<ComparisonIndex | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const comparisonIndex = useComparisonIndex(summary ? { model: comparisonRouteIdOf(summary) } : null)
 
   useEffect(() => {
     if (!modelRouteId) {
@@ -60,12 +60,6 @@ export default function EmbedEvalHistogram() {
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err))
       })
-
-    fetchComparisonIndex()
-      .then((idx) => {
-        if (!cancelled) setComparisonIndex(idx)
-      })
-      .catch(() => {})
 
     return () => {
       cancelled = true

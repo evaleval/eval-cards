@@ -2,7 +2,7 @@ import "server-only"
 
 import fs from "node:fs"
 import path from "node:path"
-import { getConnection } from "@/lib/duckdb"
+import { getConnection, serialized } from "@/lib/duckdb"
 import { fetchCollectionContext, fetchCollections, fetchHeadline } from "@/lib/sidecars"
 import {
   buildCollectionAttachment,
@@ -64,7 +64,6 @@ import {
 type Row = Record<string, any>
 
 let readRowsSequence = 0
-let readRowsQueue: Promise<unknown> = Promise.resolve()
 
 const MODEL_CARD_COLUMNS = `
   id, model_key, route_id, model_name, model_id, canonical_model_name, developer,
@@ -400,9 +399,7 @@ async function readRows<T = Row>(
     }
   }
 
-  const scheduled = readRowsQueue.then(runQuery, runQuery)
-  readRowsQueue = scheduled.then(() => undefined, () => undefined)
-  return scheduled
+  return serialized(runQuery)
 }
 
 function asNumber(value: unknown, fallback = 0) {

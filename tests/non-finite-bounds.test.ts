@@ -64,71 +64,20 @@ describe("wire form round trip through the app's own JSON hops", () => {
   })
 })
 
-describe("fetchComparisonIndex (v2 sidecar) applies the reviver", () => {
-  it("delivers the registry stamp as a number, not the wire string", async () => {
-    const { mkdtemp, rm, writeFile } = await import("node:fs/promises")
-    const os = await import("node:os")
-    const path = await import("node:path")
-    const snapshotDir = await mkdtemp(path.join(os.tmpdir(), "eval-card-inf-"))
-    const previousBackend = process.env.DATA_BACKEND
-    const previousSnapshotUrl = process.env.SNAPSHOT_URL
-    const fixture = {
-      generated_at: "2026-09-06T00:00:00Z",
-      config_version: 2,
-      metric_group_order: ["capability", "other"],
-      evals: {
-        "lm-eval%2Fwikitext": {
-          evaluation_id: "lm-eval%2Fwikitext",
-          benchmark_id: "wikitext",
-          family_id: null,
-          family_display_name: null,
-          composite_slug: "lm-eval",
-          composite_display_name: "lm-eval",
-          parent_benchmark_id: null,
-          display_name: "WikiText",
-          category: "Language",
-          is_slice: false,
-          is_summary_score: false,
-          summary_score_for: null,
-          metrics: [
-            {
-              metric_summary_id: "wikitext::perplexity",
-              metric_name: "Perplexity",
-              metric_id: "perplexity",
-              metric_key: "perplexity",
-              group: "other",
-              group_order: 1,
-              lower_is_better: true,
-              unit: null,
-              canonical_min_score: 1,
-              canonical_max_score: "Infinity",
-              scores: [],
-            },
-          ],
-        },
-      },
-      by_model: {},
-    }
+describe("comparison tables deliver infinite registry bounds as numbers", () => {
+  it("reads the DOUBLE infinity as a number, not the wire string", async () => {
+    const { useSnapshot } = await import("./comparison-fixture")
+    const restore = useSnapshot()
     try {
-      await writeFile(path.join(snapshotDir, "comparison-index.json"), JSON.stringify(fixture))
-      process.env.DATA_BACKEND = "v2"
-      process.env.SNAPSHOT_URL = `file://${snapshotDir}`
-      const sidecars = await import("../lib/sidecars")
-      sidecars.resetSidecarCacheForTests()
-      const index = await sidecars.fetchComparisonIndex()
-      const metric = index.evals["lm-eval%2Fwikitext"].metrics[0]
-      expect(metric.canonical_min_score).toBe(1)
+      const { sliceForEvals } = await import("../lib/comparison-table")
+      const index = await sliceForEvals(["llm-stats%2Feq-bench"])
+      const metric = index!.evals["llm-stats%2Feq-bench"].metrics[0]
+      expect(metric.canonical_min_score).toBe(Number.NEGATIVE_INFINITY)
       expect(metric.canonical_max_score).toBe(Number.POSITIVE_INFINITY)
       expect(typeof metric.canonical_max_score).toBe("number")
       expect(registryBoundsIsPercent({ min: metric.canonical_min_score, max: metric.canonical_max_score })).toBeNull()
     } finally {
-      const sidecars = await import("../lib/sidecars")
-      sidecars.resetSidecarCacheForTests()
-      if (previousBackend == null) delete process.env.DATA_BACKEND
-      else process.env.DATA_BACKEND = previousBackend
-      if (previousSnapshotUrl == null) delete process.env.SNAPSHOT_URL
-      else process.env.SNAPSHOT_URL = previousSnapshotUrl
-      await rm(snapshotDir, { recursive: true, force: true })
+      restore()
     }
   })
 })

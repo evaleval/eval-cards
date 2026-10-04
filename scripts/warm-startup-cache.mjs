@@ -10,7 +10,6 @@ const ENDPOINTS = [
   "/api/benchmark-metadata",
   "/api/corpus-aggregates",
   "/api/eval-hierarchy",
-  "/api/comparison-index",
 ]
 
 function withBaseUrl(path) {

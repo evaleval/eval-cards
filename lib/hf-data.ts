@@ -54,6 +54,7 @@ const LOCAL_CACHE_DIR = process.env.HF_DATA_LOCAL_DIR?.trim()
 // lib/json-bounds.ts. Re-exported so existing imports keep working.
 import { parseJsonWithBounds } from "@/lib/json-bounds"
 export { reviveNonFiniteBounds } from "@/lib/json-bounds"
+import { sliceIndexForEvals, sliceIndexForModel } from "@/lib/comparison-slice"
 
 async function readLocalCache<T>(relativePath: string): Promise<T | null> {
   try {
@@ -673,12 +674,22 @@ export function adaptEvalHierarchy(raw: EvalHierarchy): EvalHierarchy {
   return raw
 }
 
-export async function fetchComparisonIndex(): Promise<ComparisonIndex> {
+/**
+ * The comparison index sliced to one page: the model slice or the slice of
+ * exactly these evals. v2 queries the snapshot's comparison tables (null when
+ * the snapshot has none); legacy datasets publish only the whole index, so it
+ * is loaded as before and sliced in memory.
+ */
+export async function fetchComparisonSlice(
+  request: { model: string } | { evals: string[] },
+): Promise<ComparisonIndex | null> {
   if (useViewLayerBackend()) {
-    return (await fetchSnapshotSidecars()).fetchComparisonIndex()
+    const table = await import("@/lib/comparison-table")
+    return "model" in request ? table.sliceForModel(request.model) : table.sliceForEvals(request.evals)
   }
 
-  return fetchHFJson<ComparisonIndex>("comparison-index.json")
+  const index = await fetchHFJson<ComparisonIndex>("comparison-index.json")
+  return "model" in request ? sliceIndexForModel(index, request.model) : sliceIndexForEvals(index, request.evals)
 }
 
 /**
