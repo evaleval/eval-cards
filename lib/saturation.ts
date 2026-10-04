@@ -50,8 +50,12 @@ export function computeSeDelta(s1: number, sN: number, nEff: number): number {
  * @param seDelta Standard error of the difference
  * @returns R_norm = (s1 - sN) / SE_Δ
  *
- * Note: When se_delta is 0 (all models have identical scores at boundaries),
- * returns 0.0 to indicate maximum compression.
+ * Note: se_delta is 0 only when both scores sit at a boundary (0 or 1).
+ * Equal scores return 0 (maximum compression), as saturation_utils.py does.
+ * Unequal scores return +Infinity here, where saturation_utils.py returns
+ * 0.0 and the paper script (calc_saturation_metrics.py) leaves the index
+ * empty. The references disagree, so callers should treat se_delta === 0 as
+ * "not computed" rather than display either value.
  */
 export function computeNormalizedRange(s1: number, sN: number, seDelta: number): number {
   if (seDelta === 0) return s1 === sN ? 0 : Number.POSITIVE_INFINITY
