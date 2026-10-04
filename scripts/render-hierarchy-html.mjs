@@ -49,16 +49,43 @@ if (!fs.existsSync(inPath)) {
 
 const raw = JSON.parse(fs.readFileSync(inPath, "utf8"))
 
-// Try to load comparison-index.json from the same snapshot dir so the
+// Try to read the comparison tables from the same snapshot dir so the
 // cleaner can do score-equality-based aggregator dedup (llm-stats vs
-// canonical sources).
+// canonical sources). The cleaner needs each eval's metrics in order and
+// each score row's model and score.
 let comparisonIndex = null
-const comparisonIndexPath = path.join(path.dirname(inPath), "comparison-index.json")
-if (fs.existsSync(comparisonIndexPath)) {
+const tablePath = (name) => path.join(path.dirname(inPath), `${name}.parquet`)
+const comparisonTables = ["comparison_evals", "comparison_metrics", "comparison_scores"]
+if (comparisonTables.every((name) => fs.existsSync(tablePath(name)))) {
   try {
-    comparisonIndex = JSON.parse(fs.readFileSync(comparisonIndexPath, "utf8"))
+    const { DuckDBConnection } = await import("@duckdb/node-api")
+    const connection = await DuckDBConnection.create()
+    const read = async (sql) => (await connection.runAndReadAll(sql)).getRowObjectsJS()
+    const source = (name) => `read_parquet('${tablePath(name).replace(/'/g, "''")}')`
+    const evals = {}
+    for (const row of await read(`SELECT evaluation_id FROM ${source("comparison_evals")} ORDER BY evaluation_id`)) {
+      evals[row.evaluation_id] = { metrics: [] }
+    }
+    const metrics = new Map()
+    for (const row of await read(
+      `SELECT evaluation_id, metric_summary_id, metric_name FROM ${source("comparison_metrics")} ORDER BY evaluation_id, metric_ord`,
+    )) {
+      const metric = { metric_summary_id: row.metric_summary_id, metric_name: row.metric_name, scores: [] }
+      evals[row.evaluation_id]?.metrics.push(metric)
+      metrics.set(`${row.evaluation_id}|${row.metric_summary_id}`, metric)
+    }
+    for (const row of await read(
+      `SELECT evaluation_id, metric_summary_id, model_route_id, score FROM ${source("comparison_scores")}
+       ORDER BY evaluation_id, metric_summary_id, row_ord`,
+    )) {
+      metrics.get(`${row.evaluation_id}|${row.metric_summary_id}`)?.scores.push({
+        model_route_id: row.model_route_id,
+        score: row.score,
+      })
+    }
+    comparisonIndex = { evals }
   } catch (err) {
-    console.error(`comparison-index.json unreadable: ${err.message ?? err}`)
+    console.error(`comparison tables unreadable: ${err.message ?? err}`)
   }
 }
 
@@ -69,8 +96,8 @@ if (cleanFn) {
   try {
     cleaned = cleanFn(structuredClone(raw), comparisonIndex)
     cleanerStatus = comparisonIndex
-      ? "applied lib/clean-hierarchy.ts (with comparison-index)"
-      : "applied lib/clean-hierarchy.ts (without comparison-index — score dedup skipped)"
+      ? "applied lib/clean-hierarchy.ts (with comparison tables)"
+      : "applied lib/clean-hierarchy.ts (without comparison tables — score dedup skipped)"
   } catch (err) {
     cleanerStatus = `cleaner threw: ${err.message ?? err}`
   }

@@ -19,19 +19,20 @@ import {
 import { compositeScoresByModel } from "@/lib/eval-processing"
 import { isMergedBenchmarkSummary } from "@/lib/merged-adapter"
 import {
-  fetchComparisonIndex,
   fetchEvalHierarchy,
   fetchEvalSummary,
   fetchMergedBenchmarkSummary,
 } from "@/lib/dashboard-data-client"
 import { humanizeEvaluationId, isMergedEvalId, routeIdFromSegments, routeIdToPath } from "@/lib/utils"
 import { PARAM_RANGE_MAX_INDEX, parseParamsBillionsFromModelName, paramStepToNumeric } from "@/lib/param-range"
-import type { ComparisonIndex, EvalHierarchy } from "@/lib/backend-artifacts"
+import type { EvalHierarchy } from "@/lib/backend-artifacts"
 import {
   buildHierarchyEvalIndex,
   type HierarchyEvalLocation,
 } from "@/lib/hierarchy-lookup"
 import { tagLabel } from "@/lib/benchmark-schema"
+import { crossSuiteSiblingEvalIds } from "@/components/signals/benchmark-signals-strip"
+import { useComparisonIndex } from "@/lib/use-comparison-index"
 
 function findBenchmarkSplitIds(hierarchy: EvalHierarchy | null, evalId: string): string[] {
   if (!hierarchy) return []
@@ -58,7 +59,6 @@ export default function EvalDetailPage() {
   const [summary, setSummary] = useState<BenchmarkEvalSummary | null>(null)
   const [subSummaries, setSubSummaries] = useState<BenchmarkEvalSummary[]>([])
   const [hierarchy, setHierarchy] = useState<EvalHierarchy | null>(null)
-  const [comparisonIndex, setComparisonIndex] = useState<ComparisonIndex | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [matrixSearch, setMatrixSearch] = useState("")
@@ -201,22 +201,16 @@ export default function EvalDetailPage() {
     load()
   }, [params.id, isMergedRoute])
 
-  // Cross-suite comparability needs the full comparison-index, but it's
-  // not on the critical path for first paint — load lazily so the page
-  // renders fast even on slow networks.
-  useEffect(() => {
-    let cancelled = false
-    fetchComparisonIndex()
-      .then((idx) => {
-        if (!cancelled) setComparisonIndex(idx)
-      })
-      .catch((err) => {
-        console.warn("Failed to load comparison-index:", err)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  // Cross-suite comparability reads the leaderboards of this page's
+  // benchmark-index siblings. Not on the critical path for first paint, so
+  // it loads after the summary and hierarchy. Composite pages and merged
+  // pages (which load their own) request nothing here.
+  const comparisonRequest = useMemo(() => {
+    if (isMergedRoute || !summary) return null
+    if (summary.is_aggregated && (summary.aggregate_sources?.length ?? 0) > 1) return null
+    return { evals: crossSuiteSiblingEvalIds(summary, hierarchy) }
+  }, [isMergedRoute, summary, hierarchy])
+  const comparisonIndex = useComparisonIndex(comparisonRequest)
 
   const hierarchyIndex = useMemo(() => {
     if (!hierarchy) return null
@@ -277,7 +271,6 @@ export default function EvalDetailPage() {
           <MergedBenchmarkView
             benchmarkId={routeEvalId}
             evalHierarchy={hierarchy}
-            comparisonIndex={comparisonIndex}
           />
         </main>
       </div>

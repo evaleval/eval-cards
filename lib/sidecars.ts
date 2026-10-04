@@ -15,7 +15,6 @@ import { join } from "node:path"
 
 import type {
   BackendManifest,
-  ComparisonIndex,
   CorpusAggregates,
   EvalHierarchy,
   OrgMetadata,
@@ -23,7 +22,8 @@ import type {
   PeerRanksMap,
   PeerRanksSidecar,
 } from "@/lib/backend-artifacts"
-import { cleanHierarchy } from "@/lib/clean-hierarchy"
+import { cleanHierarchy, type ComparisonIndexLike } from "@/lib/clean-hierarchy"
+import { cleanerInput } from "@/lib/comparison-table"
 import { parseJsonWithBounds, stringifyJsonWithBounds } from "@/lib/json-bounds"
 import type { CollectionContextSidecar, CollectionsSidecarEntry } from "@/lib/collections"
 
@@ -37,7 +37,6 @@ let cache: {
   manifest?: CacheSlot<BackendManifest>
   headline?: CacheSlot<CorpusAggregates>
   hierarchy?: CacheSlot<EvalHierarchy>
-  comparisonIndex?: CacheSlot<ComparisonIndex>
   peerRanks?: CacheSlot<PeerRanksMap>
   organizations?: CacheSlot<Record<string, OrgMetadata>>
   collections?: CacheSlot<Record<string, CollectionsSidecarEntry>>
@@ -58,8 +57,8 @@ function sidecarUrl(name: string) {
 }
 
 // Disk cache directory + refresh window for the multi-MB sidecar payloads.
-// Next.js' built-in fetch cache rejects items over 2 MB so the 47 MB
-// comparison-index / 6 MB peer-ranks / 2.5 MB hierarchy were re-fetched
+// Next.js' built-in fetch cache rejects items over 2 MB so the 6 MB
+// peer-ranks / 2.5 MB hierarchy were re-fetched
 // from HuggingFace on every cold start. With the disk cache, a warm
 // container reads from disk (sub-second) instead of re-downloading.
 //
@@ -271,23 +270,23 @@ function getCachedValue<K extends keyof typeof cache>(
   return existing.value as NonNullable<(typeof cache)[K]> extends CacheSlot<infer T> ? Promise<T> : never
 }
 
-async function fetchFreshComparisonIndexForCleaner(): Promise<ComparisonIndex | null> {
+async function fetchComparisonForCleaner(): Promise<ComparisonIndexLike | null> {
   try {
-    const index = await fetchJson<ComparisonIndex>("comparison-index.json", false)
-    assertComparisonIndexShape(index)
-    return index
+    const input = await cleanerInput()
+    if (input) return input
+    console.warn("[sidecars] comparison tables not in snapshot; cleaner will skip aggregator dedup.")
   } catch (err) {
     console.warn(
-      `[sidecars] comparison-index unavailable; cleaner will skip aggregator dedup. ${err instanceof Error ? err.message : String(err)}`,
+      `[sidecars] comparison data unavailable; cleaner will skip aggregator dedup. ${err instanceof Error ? err.message : String(err)}`,
     )
-    return null
   }
+  return null
 }
 
 async function buildCleanedHierarchy(): Promise<EvalHierarchy> {
   const [raw, comparisonIndex] = await Promise.all([
     fetchJson<EvalHierarchy>("hierarchy.json", false),
-    fetchFreshComparisonIndexForCleaner(),
+    fetchComparisonForCleaner(),
   ])
   return cleanHierarchy(raw, comparisonIndex)
 }
@@ -343,20 +342,11 @@ export function fetchHierarchy(): Promise<EvalHierarchy> {
 }
 
 /** Per-model cleaned benchmark count from the hierarchy payload.
- *  Returns an empty map when the hierarchy was loaded without a
- *  comparison-index (e.g. old cached v10 blobs). */
+ *  Returns an empty map when the hierarchy was loaded without
+ *  comparison data (e.g. old cached v10 blobs). */
 export async function fetchModelCoverage(): Promise<Record<string, number>> {
   const h = await fetchHierarchy()
   return h._modelCoverageMap ?? {}
-}
-
-export function fetchComparisonIndex(): Promise<ComparisonIndex> {
-  return getCachedValue("comparisonIndex", "comparison index", (preferStale) =>
-    fetchJson<ComparisonIndex>("comparison-index.json", preferStale).then((index) => {
-      assertComparisonIndexShape(index)
-      return index
-    }),
-  )
 }
 
 /**
@@ -455,20 +445,6 @@ export function fetchCollectionContext(): Promise<CollectionContextSidecar> {
         return {} as CollectionContextSidecar
       }),
   )
-}
-
-/**
- * Fail fast on contract regressions. Comparison-index rows must carry
- * `family_id`; the model-page graph view collapses without it.
- */
-export function assertComparisonIndexShape(index: ComparisonIndex): void {
-  for (const [evalId, entry] of Object.entries(index.evals ?? {})) {
-    if (!Object.prototype.hasOwnProperty.call(entry, "family_id")) {
-      throw new Error(
-        `comparison-index contract regression: evals[${evalId}] is missing family_id.`,
-      )
-    }
-  }
 }
 
 export function resetSidecarCacheForTests() {

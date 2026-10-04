@@ -31,19 +31,19 @@ import {
   type MergedBenchmarkSummary,
   type ModelResultForBenchmark,
 } from "@/lib/eval-processing"
-import type { ComparisonIndex, EvalHierarchy } from "@/lib/backend-artifacts"
+import type { EvalHierarchy } from "@/lib/backend-artifacts"
+import { crossSuiteSiblingEvalIds } from "@/components/signals/benchmark-signals-strip"
+import { useComparisonIndex } from "@/lib/use-comparison-index"
 import { routeIdToPath } from "@/lib/utils"
 
 export function MergedBenchmarkView({
   benchmarkId,
   evalHierarchy,
-  comparisonIndex,
 }: {
   benchmarkId: string
-  /** Cross-suite comparability inputs, lazily loaded by the route page —
+  /** Cross-suite comparability input, lazily loaded by the route page —
    *  same wiring the per-source path gives EvalDetail. */
   evalHierarchy?: EvalHierarchy | null
-  comparisonIndex?: ComparisonIndex | null
 }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -101,6 +101,14 @@ export function MergedBenchmarkView({
   const adapted = useMemo(
     () => (summary ? mergedSummaryToEvalSummary(summary) : null),
     [summary],
+  )
+  // The leaderboards the signals strip reads for this page's cross-suite
+  // siblings, requested once the page summary and hierarchy are known.
+  const comparisonIndex = useComparisonIndex(
+    useMemo(
+      () => (adapted ? { evals: crossSuiteSiblingEvalIds(adapted, evalHierarchy) } : null),
+      [adapted, evalHierarchy],
+    ),
   )
 
   const selectedMetricId = summary?.selected_metric_id

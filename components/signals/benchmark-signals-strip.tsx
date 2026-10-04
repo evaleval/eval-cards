@@ -730,6 +730,22 @@ function findCanonicalEntry(
   return null
 }
 
+/** The evaluation ids `buildCrossSuiteAggregate` reads from the comparison
+ *  index for this page: the constituents of its canonical benchmark-index
+ *  entry. Empty when the page has no such entry. */
+export function crossSuiteSiblingEvalIds(
+  summary: BenchmarkEvalSummary,
+  hierarchy: EvalHierarchy | null | undefined,
+): string[] {
+  const entry = findCanonicalEntry(hierarchy, summary)
+  if (!entry) return []
+  const ids = new Set<string>()
+  for (const app of entry.appearances ?? []) {
+    for (const id of app.constituent_evaluation_ids ?? []) ids.add(id)
+  }
+  return [...ids]
+}
+
 function pickRepresentativeMetric(metrics: ComparisonMetricEntry[]): ComparisonMetricEntry | null {
   if (metrics.length === 0) return null
   const isStderr = (id: string) => /(^|_)stderr(_|$)|standard.error/i.test(id)
@@ -742,7 +758,7 @@ function pickRepresentativeMetric(metrics: ComparisonMetricEntry[]): ComparisonM
   return main ?? null
 }
 
-function buildCrossSuiteAggregate(
+export function buildCrossSuiteAggregate(
   summary: BenchmarkEvalSummary,
   hierarchy: EvalHierarchy | null | undefined,
   comparisonIndex: ComparisonIndex | null | undefined,

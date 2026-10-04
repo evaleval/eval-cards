@@ -2036,6 +2036,18 @@ function resolveSplitPeers({
   }
 }
 
+// The current model's route id in the comparison index (see the
+// `currentModelRouteId` memo). Pages request the model's slice under it.
+export function comparisonRouteIdOf(summary: ModelSummaryCore): string {
+  const explicit =
+    (summary as any).model_route_id ||
+    (summary.model_info as any).model_route_id ||
+    (summary as any).variant_key
+  if (typeof explicit === "string" && explicit.length > 0) return explicit
+  const id = summary.model_info.id || ""
+  return id ? encodeURIComponent(id) : ""
+}
+
 // Per-(eval, metric) leaderboards sourced from comparison-index.json.
 export function buildBenchmarkHistograms({
   comparisonIndex,
@@ -3127,8 +3139,9 @@ export function BenchmarkDetail({
 
   // Per-benchmark extras added via the "+" button on each histogram.
   const [extraModelsByBenchmark, setExtraModelsByBenchmark] = useState<Record<string, string[]>>({})
-  // All histogram data now comes from `comparisonIndex` (comparison-index.json),
-  // the backend-authoritative per-(eval, metric) leaderboard artifact. The old
+  // All histogram data now comes from `comparisonIndex`, this model's slice of
+  // the backend-authoritative per-(eval, metric) leaderboards
+  // (/api/comparison-index?model=…, read from the comparison tables). The old
   // `top_scores`-on-model-cards and per-eval-detail fan-out paths are retired.
 
   // Every identifier the current model may appear under in comparison-index.
@@ -3161,15 +3174,7 @@ export function BenchmarkDetail({
   // so prefer its carried-through model_route_id, then variant_key, and finally
   // encode the plain id — never the legacy `__` form, which the v2 backend's
   // percent-encoded keys don't use.
-  const currentModelRouteId = useMemo(() => {
-    const explicit =
-      (summary as any).model_route_id ||
-      (summary.model_info as any).model_route_id ||
-      (summary as any).variant_key
-    if (typeof explicit === "string" && explicit.length > 0) return explicit
-    const id = summary.model_info.id || ""
-    return id ? encodeURIComponent(id) : ""
-  }, [summary])
+  const currentModelRouteId = useMemo(() => comparisonRouteIdOf(summary), [summary])
 
   // Inputs for the overlaps builder sourced from the model's own summary
   // payload: one candidate per benchmark group (merged in when the benchmark

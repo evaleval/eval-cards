@@ -3,7 +3,7 @@
 # Migration gate — the HEAVIER, on-demand gate for the comparison-index migration
 # (run when working on the scoped-fetch migration, NOT on every push — the fast
 # pre-push gate is scripts/linux-gate.sh). Runs on linux/amd64 with the prod-pinned
-# binding. Today: leaderboard parity (query == comparison-index). As the migration
+# binding. Today: leaderboard parity (query == the comparison tables). As the migration
 # proceeds, add render-equivalence + the by_model consumer test here.
 #
 # Usage:  scripts/migration-gate.sh
@@ -27,7 +27,7 @@ echo "[migration-gate] binding @duckdb/node-api@${DUCKDB_VERSION}; snapshot ${SN
 docker build --platform=linux/amd64 --build-arg "DUCKDB_VERSION=${DUCKDB_VERSION}" \
   -t evalcard-linux-gate "$ROOT/scripts/linux-gate" >/dev/null
 
-echo "[migration-gate] leaderboard parity (query vs live comparison-index)…"
+echo "[migration-gate] leaderboard parity (query vs live comparison tables)…"
 docker run --platform=linux/amd64 --rm -e SNAPSHOT_URL="$SNAPSHOT_URL" evalcard-linux-gate parity.mjs
 
 # TODO add as the migration proceeds:

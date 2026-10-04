@@ -6,17 +6,17 @@ import { Button } from "@/components/ui/button"
 import { ArrowLeft } from "lucide-react"
 import { Navigation } from "@/components/navigation"
 import { ReaderModeBar } from "@/components/reader-mode-bar"
-import { BenchmarkDetail } from "@/components/benchmark-detail"
+import { BenchmarkDetail, comparisonRouteIdOf } from "@/components/benchmark-detail"
 import type { BenchmarkCard, ModelEvaluationSummary } from "@/lib/eval-processing"
 import {
   fetchBenchmarkMetadata,
-  fetchComparisonIndex,
   fetchEvalHierarchy,
   fetchModelSummary,
   fetchModelCards,
 } from "@/lib/dashboard-data-client"
 import type { BenchmarkEvaluationCardData } from "@/components/benchmark-evaluation-card"
-import type { ComparisonIndex, EvalHierarchy } from "@/lib/backend-artifacts"
+import type { EvalHierarchy } from "@/lib/backend-artifacts"
+import { useComparisonIndex } from "@/lib/use-comparison-index"
 import { routeIdFromSegments, routeIdToPath } from "@/lib/utils"
 
 export default function ModelDetailPage() {
@@ -27,7 +27,6 @@ export default function ModelDetailPage() {
   const [benchmarkCards, setBenchmarkCards] = useState<Record<string, BenchmarkCard>>({})
   const [modelCards, setModelCards] = useState<BenchmarkEvaluationCardData[]>([])
   const [evalHierarchy, setEvalHierarchy] = useState<EvalHierarchy | null>(null)
-  const [comparisonIndex, setComparisonIndex] = useState<ComparisonIndex | null>(null)
   const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -149,16 +148,10 @@ export default function ModelDetailPage() {
     let isCancelled = false
 
     const loadAuxiliaryData = async () => {
-      const [allModelCards, compIndex] = await Promise.all([
-        fetchModelCards().catch((err) => {
-          console.warn("Failed to load model cards:", err)
-          return [] as BenchmarkEvaluationCardData[]
-        }),
-        fetchComparisonIndex().catch((err) => {
-          console.warn("Failed to load comparison-index:", err)
-          return null as ComparisonIndex | null
-        }),
-      ])
+      const allModelCards = await fetchModelCards().catch((err) => {
+        console.warn("Failed to load model cards:", err)
+        return [] as BenchmarkEvaluationCardData[]
+      })
 
       if (isCancelled) {
         return
@@ -166,7 +159,6 @@ export default function ModelDetailPage() {
 
       startTransition(() => {
         setModelCards(allModelCards)
-        setComparisonIndex(compIndex)
       })
     }
 
@@ -232,6 +224,11 @@ export default function ModelDetailPage() {
       summary.variants[0]
     )
   }, [selectedVariantId, summary])
+
+  const comparisonSummary = selectedVariant ?? summary
+  const comparisonIndex = useComparisonIndex(
+    comparisonSummary ? { model: comparisonRouteIdOf(comparisonSummary) } : null,
+  )
 
   useEffect(() => {
     if (!summary) {

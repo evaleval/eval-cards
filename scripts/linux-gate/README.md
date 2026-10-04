@@ -116,15 +116,16 @@ misconfigured (e.g. no snapshot URL).
 **Script:** `scripts/migration-gate.sh` → runs `scripts/linux-gate/parity.mjs`.
 **Run on demand**, only when changing how leaderboard data is fetched. Heavier.
 
-The warehouse ships a precomputed file, `comparison-index.json`, holding the
-"correct" leaderboard scores and rankings from the upstream pipeline. The app is
-being migrated to compute those leaderboards *itself* at runtime with a DuckDB
-query instead of reading the precomputed file. The risk is subtle: the runtime
+The warehouse ships precomputed leaderboard tables, `comparison_metrics.parquet`
+and `comparison_scores.parquet`, holding the "correct" leaderboard scores and
+rankings from the upstream pipeline (the same rows `comparison-index.json` carries).
+The app is being migrated to compute those leaderboards *itself* at runtime with a
+DuckDB query instead of reading the precomputed rows. The risk is subtle: the runtime
 query could rank, order, or group rows slightly differently and **silently** show
 users different numbers.
 
 This gate runs the runtime query on Linux against the live snapshot and compares
-its output **row-by-row against `comparison-index.json`** — membership, ordering,
+its output **row-by-row against the comparison tables**: membership, ordering,
 rank, totals, scores (to a 1e-9 tolerance), and the grouping identity. It passes
 **only if they match exactly**, and prints a per-category diff
 (`length / order / rank / total / score / familyId`) with samples when they don't.
@@ -134,11 +135,10 @@ between snapshot versions (`model_family_id` vs `model_group_id`), so the script
 inspects the schema with `DESCRIBE` and adapts. If a regenerated snapshot changes
 the schema again, that detection is the place to look.
 
-**Lifecycle note:** this gate is *temporary by design*. It diffs against
-`comparison-index.json`, which the migration will eventually delete. Once that file
-is gone, convert this into a **golden-fixture test** (freeze a known-good output
-and diff against that). Don't bake in the assumption that `comparison-index.json`
-exists forever.
+**Lifecycle note:** this gate is *temporary by design*. It diffs against the
+producer's comparison tables. If those are ever dropped, convert this into a
+**golden-fixture test** (freeze a known-good output and diff against that). Don't
+bake in the assumption that they exist forever.
 
 ## Running them
 
@@ -150,8 +150,8 @@ scripts/migration-gate.sh    # heavier: leaderboard parity, only when touching l
 ```
 
 Both require **Docker** and **network access to huggingface.co**: the smoke fetches
-snapshot Parquet over DuckDB httpfs, and the parity gate additionally fetches
-`comparison-index.json` via a plain HTTPS `fetch()`.
+snapshot Parquet over DuckDB httpfs (the parity gate also reads the comparison
+tables that way).
 
 You do **not** set the DuckDB version — it's read from `pnpm-lock.yaml`.
 
@@ -240,7 +240,7 @@ you'll face:
 - **Pin the binding from the lockfile, not by hand** — keep deriving the version
   from `pnpm-lock.yaml` so CI always tests what ships.
 - **Give the job network egress to `huggingface.co`** — the scripts fetch the
-  snapshot Parquet (httpfs) and `comparison-index.json` (HTTPS) at runtime; there's
+  snapshot Parquet (httpfs), comparison tables included, at runtime; there's
   no bundled fixture.
 - **Decide which snapshot CI tests against** — default is the latest published
   snapshot (`scripts/resolve-latest-snapshot.mjs`); set `SNAPSHOT_URL` on the job
@@ -248,7 +248,7 @@ you'll face:
 - **Honour the exit codes** (`0` pass / `1` fail / `2` misconfig) — they drive a CI
   job's pass/fail directly.
 - **Treat the parity gate as migration-phase** — convert it to a golden-fixture
-  diff when the migration deletes `comparison-index.json`.
+  diff if the comparison tables are ever dropped.
 - **Keep the pre-push hook as a fast local check if you like** — CI becomes the
   authoritative gate enforced for everyone; the hook stays an optional early
   warning.

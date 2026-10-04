@@ -1,14 +1,15 @@
 // Leaderboard-parity gate — proves the runtime DuckDB leaderboard query reproduces
-// the producer's comparison-index `evals[].metrics[].scores[]` BYTE-FOR-BYTE, on the
-// prod-pinned binding, over the live snapshot. This is the core regression gate for
-// the comparison-index migration: if the scoped query ever diverges from what the
-// monolith served (rank semantics, ordering, identity column, membership), this fails.
+// the producer's leaderboards in comparison_metrics / comparison_scores (rows in
+// row_ord order) BYTE-FOR-BYTE, on the prod-pinned binding, over the live snapshot.
+// This is the core regression gate for the comparison-index migration: if the scoped
+// query ever diverges from what the producer ships (rank semantics, ordering, identity
+// column, membership), this fails.
 //
 // Run on linux/amd64 via scripts/migration-gate.sh. SNAPSHOT_URL selects the snapshot
 // (default = pinned prod; override to re-verify against a post-rebaseline snapshot).
 //
-// NOTE this is a MIGRATION-phase gate (it diffs against the comparison-index, which the
-// migration eventually deletes). Post-deletion it converts to a golden-fixture test.
+// NOTE this is a MIGRATION-phase gate (it diffs against the producer's comparison
+// tables). If those are ever dropped it converts to a golden-fixture test.
 import { DuckDBConnection } from "@duckdb/node-api"
 
 const SNAP = (process.env.SNAPSHOT_URL || "").replace(/\/+$/, "")
@@ -47,9 +48,14 @@ ORDER BY evaluation_id, metric_summary_id,
 const cand = new Map()
 for (const r of await rows(SQL)) { const k = r.evaluation_id + "|" + r.metric_summary_id; (cand.get(k) ?? cand.set(k, []).get(k)).push(r) }
 
-const ci = await (await fetch(`${SNAP}/comparison-index.json`)).json()
+// The producer's leaderboards, as the comparison tables carry them (the same
+// rows, in the same order, as comparison-index.json's evals[].metrics[].scores[]).
 const live = new Map()
-for (const [evalId, ev] of Object.entries(ci.evals)) for (const m of ev.metrics || []) live.set(evalId + "|" + m.metric_summary_id, m.scores || [])
+for (const m of await rows(`SELECT evaluation_id, metric_summary_id FROM read_parquet('${SNAP}/comparison_metrics.parquet')`))
+  live.set(m.evaluation_id + "|" + m.metric_summary_id, [])
+for (const r of await rows(`SELECT evaluation_id, metric_summary_id, model_route_id, model_family_id, score, rank, total
+  FROM read_parquet('${SNAP}/comparison_scores.parquet') ORDER BY evaluation_id, metric_summary_id, row_ord`))
+  live.get(r.evaluation_id + "|" + r.metric_summary_id).push(r)
 
 let exact = 0, lenDiff = 0, orderDiff = 0, rankDiff = 0, totalDiff = 0, scoreDiff = 0, famDiff = 0
 const onlyLive = [...live.keys()].filter((k) => !cand.has(k))

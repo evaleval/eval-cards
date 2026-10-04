@@ -186,7 +186,7 @@ const PROTECTED_LEADERBOARD_FAMILIES = new Set<string>(["hf-open-llm-v2"])
  * canonical benchmark. Doing this at hierarchy-build time means the
  * frontend never has to think about aggregator dedup again.
  */
-type ComparisonIndexLike = {
+export type ComparisonIndexLike = {
   evals: Record<
     string,
     {
