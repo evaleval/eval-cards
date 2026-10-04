@@ -74,7 +74,11 @@ export function buildCrossSourceContext(
   const subjectSlug =
     options.subjectSourceSlug ?? widestCoverageSource(usable) ?? undefined
 
-  const comparable = onOneScale(usable, subjectSlug)
+  // Rows the merged accessor rescaled are already on one scale, and a
+  // second reading of their ranges here could split them apart again.
+  const comparable = usable.some((row) => row.scaleHarmonized)
+    ? usable
+    : onOneScale(usable, subjectSlug)
 
   const byModel = new Map<string, CrossSourceRow[]>()
   for (const row of comparable) {
@@ -83,6 +87,7 @@ export function buildCrossSourceContext(
 
   const models: ScaffoldContextModel[] = []
   const modelsWithoutContext: string[] = []
+  const drawn: CrossSourceRow[] = []
 
   for (const [modelKey, modelRows] of byModel) {
     const subjectRow = modelRows.find((row) => row.sourceSlug === subjectSlug)
@@ -99,6 +104,7 @@ export function buildCrossSourceContext(
       continue
     }
 
+    drawn.push(subjectRow, ...others)
     models.push({
       key: modelKey,
       displayName: subjectRow.displayName,
@@ -141,13 +147,18 @@ export function buildCrossSourceContext(
   // scores, and only a set that fits entirely in [0,1] is a fraction the
   // plot may draw as a percentage. scicode's canonical scores run 0 to
   // 60.2, and 60.2 shown as "6020.0%" is a different number.
-  const drawn = models.flatMap((model) => [model.score, ...model.points.map((p) => p.score)])
-  const scoreScale = drawn.every((value) => value >= 0 && value <= 1) ? "fraction" : "raw"
+  // A rescaled pool is read whole: the marks drawn from a percent pool can
+  // all sit at or under 1 without being fractions.
+  const scaleEvidence = usable.some((row) => row.scaleHarmonized) ? usable : drawn
+  const scoreScale = scaleEvidence.every((row) => row.score >= 0 && row.score <= 1)
+    ? "fraction"
+    : "raw"
 
   // The page's own table shows each source's number as published, so a
   // strip drawn on rescaled numbers has to say which ones were moved.
+  // Only sources with a mark on the strip are named.
   const scaleNotes = scaleHarmonizedNotes(
-    comparable.map((row) => ({ name: row.sourceLabel, kind: row.scaleHarmonized })),
+    drawn.map((row) => ({ name: row.sourceLabel, kind: row.scaleHarmonized })),
   )
 
   return {
@@ -246,7 +257,8 @@ export function crossSourceRowsFromMerged(merged: MergedBenchmarkSummary): Cross
  * when a pool splits into percent and fraction sources it moves one group
  * onto the other's scale and flags the moved rows
  * (`harmonizeUnboundedScales`), so both arrive on one scale, nothing is
- * dropped, and the strip notes which sources were rescaled.
+ * dropped, and the strip notes which sources were rescaled. A pool with
+ * any rescaled row skips this filter.
  *
  * What is left for this filter is the pools that accessor declines to
  * touch, such as shared models that do not differ by about 100x, or a raw

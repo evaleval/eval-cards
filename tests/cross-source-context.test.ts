@@ -11,6 +11,7 @@ import {
   mergedPayloadIsComparable,
   type CrossSourceRow,
 } from "@/lib/cross-source-context"
+import { harmonizeUnboundedScales } from "@/lib/merged-adapter"
 import type {
   BenchmarkEvalSummary,
   MergedBenchmarkSummary,
@@ -533,6 +534,48 @@ describe("the scale the strip draws on", () => {
     expect(plot(payload)).toContain(
       "Scores from Source B are shown multiplied by 100 to match the range of the other sources",
     )
+  })
+
+  it("keeps the strip when the page's own rescaled scores all sit at or under 1", () => {
+    // Source P publishes percent (0.8 and 40), source F the same model as
+    // 0.008. Once F is rescaled to 0.8 its range alone reads as a fraction.
+    const observations = [
+      observation({ model_key: "org/z", score: 40, score_canonical: 40 }),
+      observation({ score: 0.8, score_canonical: 0.8 }),
+      observation({
+        composite_slug: "src-b",
+        composite_display_name: "Source B",
+        score: 0.008,
+        score_canonical: 0.008,
+      }),
+    ].map((o) => ({ ...o, scale_conversion: "no_bounds" as const }))
+    const harmonized = harmonizeUnboundedScales(observations, false)
+    expect(harmonized.toPercent).toBe(true)
+    const payload = buildCrossSourceContext(
+      crossSourceRowsFromMerged(mergedPayload(harmonized.rows)),
+      { subjectSourceSlug: "src-b", subjectLabel: "This source" },
+    )!
+    expect(payload).not.toBeNull()
+    expect(payload.models[0].score).toBe(0.8)
+    expect(payload.models[0].points.map((p) => [p.source, p.score])).toEqual([["Source A", 0.8]])
+    expect(payload.scaleNotes?.[0]).toContain("Scores from Source B are shown multiplied by 100")
+    // 0.8 on the percent scale, not 80%.
+    expect(payload.scoreScale).toBe("raw")
+    expect(plot(payload)).not.toContain("80.0%")
+  })
+
+  it("does not name a rescaled source that has no mark on the strip", () => {
+    const payload = buildCrossSourceContext(
+      [
+        row({ modelKey: "m", score: 50, sourceSlug: "a" }),
+        row({ modelKey: "m", score: 40, sourceSlug: "b" }),
+        row({ modelKey: "x", score: 30, sourceSlug: "b" }),
+        row({ modelKey: "x", score: 30, sourceSlug: "c", scaleHarmonized: "mul100" }),
+      ],
+      { subjectSourceSlug: "a", subjectLabel: "This source" },
+    )!
+    expect(payload.models.map((m) => m.key)).toEqual(["m"])
+    expect(payload.scaleNotes).toBeUndefined()
   })
 
   it("carries no rescaling note when nothing was rescaled", () => {
