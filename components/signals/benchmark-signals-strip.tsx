@@ -29,18 +29,21 @@ function headlineResults(summary: BenchmarkEvalSummary): ModelResultForBenchmark
   return (summary.model_results ?? []).filter(isHeadlineResult)
 }
 import {
+  heuristicToScale,
   mergeRegistryBounds,
   resolveCanonicalScaleGroup,
   type CanonicalScaleCell,
 } from "@/lib/score-scale"
+import { computeSaturationMetrics, type SaturationCategory } from "@/lib/saturation"
 
-type SignalId = "reproducibility" | "completeness" | "provenance" | "comparability"
+type SignalId = "reproducibility" | "completeness" | "provenance" | "comparability" | "saturation"
 
 const SIGNAL_GLYPHS: Record<SignalId, string> = {
   reproducibility: "R",
   completeness: "C",
   provenance: "P",
   comparability: "X",
+  saturation: "S",
 }
 
 const SIGNAL_NAMES: Record<SignalId, string> = {
@@ -48,6 +51,7 @@ const SIGNAL_NAMES: Record<SignalId, string> = {
   completeness: "Completeness",
   provenance: "Provenance",
   comparability: "Comparability",
+  saturation: "Saturation",
 }
 
 const SIGNAL_ASKS: Record<SignalId, string> = {
@@ -55,6 +59,7 @@ const SIGNAL_ASKS: Record<SignalId, string> = {
   completeness: "How much of the benchmark card is filled in?",
   provenance: "Who reported these scores and how many parties have replicated?",
   comparability: "Where multiple sources report the same benchmark, do their numbers agree?",
+  saturation: "Can the top models still be reliably distinguished by their scores?",
 }
 
 /**
@@ -122,10 +127,11 @@ interface BenchmarkSignalsStripProps {
 }
 
 /**
- * Benchmark-level rollup of the four interpretive signals. Each tile
- * reports one headline statistic that reads
- * "higher is better, more documentation = better", and is clickable to
- * open a Dialog explaining how the score was computed.
+ * Benchmark-level rollup of the interpretive signals. Each tile reports
+ * one headline statistic and is clickable to open a Dialog explaining
+ * how the score was computed. The four documentation tiles read
+ * "higher is better, more documentation = better"; Saturation runs the
+ * other way (higher = more saturated) and says so on the tile.
  */
 export function BenchmarkSignalsStrip({
   summary,
@@ -147,12 +153,14 @@ export function BenchmarkSignalsStrip({
   const comp = useMemo(() => deriveCompleteness(summary), [summary])
   const prov = useMemo(() => deriveProvenance(summary, crossSuite), [summary, crossSuite])
   const cmp = useMemo(() => deriveComparability(summary, crossSuite), [summary, crossSuite])
+  const sat = useMemo(() => deriveSaturation(summary), [summary])
 
   const signals: Record<SignalId, DerivedSignal> = {
     reproducibility: repro,
     completeness: comp,
     provenance: prov,
     comparability: cmp,
+    saturation: sat,
   }
 
   return (
@@ -170,6 +178,7 @@ export function BenchmarkSignalsStrip({
         <SignalRow id="completeness" {...comp} onOpen={() => setOpenSignal("completeness")} />
         <SignalRow id="provenance" {...prov} onOpen={() => setOpenSignal("provenance")} />
         <SignalRow id="comparability" {...cmp} onOpen={() => setOpenSignal("comparability")} />
+        <SignalRow id="saturation" {...sat} onOpen={() => setOpenSignal("saturation")} />
       </div>
 
       <Dialog open={openSignal !== null} onOpenChange={(open) => !open && setOpenSignal(null)}>
@@ -1217,6 +1226,194 @@ function CrossSuiteBreakdown({ aggregate }: { aggregate: CrossSuiteAggregate }) 
       )}
     </div>
   )
+}
+
+// Saturation index, following evaleval/benchmark-saturation
+
+const SATURATION_TOP_N = 5
+const SATURATION_RANGE_TOLERANCE = 1e-9
+
+// Band names are the paper's five bins; the descriptions are the reference's
+// own (saturation_utils.py, categorize_saturation).
+const SATURATION_CATEGORY_LABEL: Record<SaturationCategory, string> = {
+  very_low: "Very low",
+  low: "Low",
+  moderate: "Moderate",
+  high: "High",
+  very_high: "Very high",
+}
+
+const SATURATION_CATEGORY_DESCRIPTION: Record<SaturationCategory, string> = {
+  very_low: "strong discriminative power",
+  low: "some clustering, meaningful separations remain",
+  moderate: "compression observed, sensitivity weakening",
+  high: "models largely indistinguishable",
+  very_high: "no reliable signal for comparison",
+}
+
+const SATURATION_FRACTION_UNITS = new Set(["", "percent", "proportion"])
+
+function finiteBounds(
+  metricConfig: BenchmarkEvalSummary["metric_config"] | undefined,
+): { min: number; max: number } | null {
+  const min = metricConfig?.min_score
+  const max = metricConfig?.max_score
+  if (typeof min !== "number" || typeof max !== "number") return null
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return null
+  return { min, max }
+}
+
+/**
+ * Whether scores can be placed on a 0 to 1 scale at all. Declared finite
+ * bounds always can. Without them the fallback reads a value above 1.5 as
+ * a percentage, which only makes sense for a higher-is-better metric whose
+ * unit is percent, proportion or unstated.
+ *
+ * Stopgap: these rules, the 1.5 fallback and the range check in
+ * deriveSaturation infer the scale from per-page metadata. They should be
+ * replaced by the metric's scale, bounds and direction read from the entity
+ * registry once the registry carries them.
+ */
+function saturationScaleIsKnown(metricConfig: BenchmarkEvalSummary["metric_config"] | undefined): boolean {
+  if (metricConfig != null && typeof metricConfig !== "object") return false
+  if (finiteBounds(metricConfig)) return true
+  if (metricConfig?.lower_is_better) return false
+  const unit = typeof metricConfig?.unit === "string" ? metricConfig.unit.trim().toLowerCase() : ""
+  return SATURATION_FRACTION_UNITS.has(unit)
+}
+
+function normalizeScoreToFraction(
+  score: number,
+  metricConfig: BenchmarkEvalSummary["metric_config"] | undefined,
+): number | null {
+  if (typeof score !== "number" || !Number.isFinite(score)) return null
+  const bounds = finiteBounds(metricConfig)
+  if (bounds) {
+    const fraction = (score - bounds.min) / (bounds.max - bounds.min)
+    return metricConfig?.lower_is_better ? 1 - fraction : fraction
+  }
+  return heuristicToScale(score, false)
+}
+
+function sourceDataSamplesNumber(sourceData: ModelResultForBenchmark["source_data"]): number | undefined {
+  if (!sourceData || Array.isArray(sourceData)) return undefined
+  const n = (sourceData as { samples_number?: unknown }).samples_number
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+function resolveTestSetSize(results: ModelResultForBenchmark[]): number | null {
+  const counts = new Map<number, number>()
+  for (const r of results) {
+    const n = r.score_details?.sample_size ?? sourceDataSamplesNumber(r.source_data)
+    if (typeof n === "number" && Number.isFinite(n) && n > 0) {
+      counts.set(n, (counts.get(n) ?? 0) + 1)
+    }
+  }
+  let best: number | null = null
+  let bestCount = 0
+  for (const [n, count] of counts) {
+    if (count > bestCount) {
+      best = n
+      bestCount = count
+    }
+  }
+  return best
+}
+
+export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
+  const triples = headlineResults(summary)
+
+  const scored: number[] = []
+  for (const t of triples) {
+    const norm = normalizeScoreToFraction(t.score, summary.metric_config)
+    if (norm != null) scored.push(norm)
+  }
+
+  const formula =
+    "S_index = exp(-R_norm²); R_norm = (s1 − s5) / SE_Δ; SE_Δ ≈ sqrt(SE(s1)² + SE(s5)²); " +
+    "SE(s) ≈ sqrt(s(1−s) / n_eff); n_eff = test_set_size^0.5, over the top 5 models. " +
+    "Higher = more saturated. Method from evaleval/benchmark-saturation."
+
+  const modelsInput = { label: "Models with a scoreable result", value: scored.length.toString() }
+  const notComputed = (headline: string, empty: string): DerivedSignal => ({
+    statValue: "—",
+    statUnit: "",
+    headline,
+    detail: "",
+    breakdown: { formula, inputs: [modelsInput], empty },
+  })
+
+  if (scored.length < SATURATION_TOP_N) {
+    return notComputed(
+      scored.length === 0
+        ? "No reported scores yet."
+        : `Need at least ${SATURATION_TOP_N} models, found ${scored.length}.`,
+      "Fewer than 5 models have a reported score, so no index is shown.",
+    )
+  }
+
+  const scaleMessage =
+    "The top 5 scores could not be placed on a 0 to 1 scale from this metric's unit and bounds, so no index is shown."
+  if (!saturationScaleIsKnown(summary.metric_config)) {
+    return notComputed("Not computed for this metric's scale.", scaleMessage)
+  }
+  const topRaw = scored.sort((x, y) => y - x).slice(0, SATURATION_TOP_N)
+  if (topRaw.some((x) => x < -SATURATION_RANGE_TOLERANCE || x > 1 + SATURATION_RANGE_TOLERANCE)) {
+    return notComputed("Not computed for this metric's scale.", scaleMessage)
+  }
+  const topScores = topRaw.map((x) => Math.min(1, Math.max(0, x)))
+
+  const testSetSize = resolveTestSetSize(triples)
+  if (testSetSize == null) {
+    return notComputed(
+      "No test-set size is recorded for this benchmark.",
+      "No sample_size or samples_number is reported with these results, so no index is shown.",
+    )
+  }
+
+  const metrics = computeSaturationMetrics(topScores, testSetSize, SATURATION_TOP_N)
+
+  if (metrics.seDelta === 0 && metrics.s1 !== metrics.sN) {
+    return notComputed(
+      "Not computed: the standard error is zero.",
+      "The top score is at the maximum and the 5th at the minimum, so the standard error of their " +
+        "difference is zero. No index is shown.",
+    )
+  }
+
+  const bounds = finiteBounds(summary.metric_config)
+  const scaleNote = bounds
+    ? `declared bounds ${bounds.min} to ${bounds.max}${
+        summary.metric_config?.lower_is_better ? ", inverted (lower is better)" : ""
+      }`
+    : "no declared bounds; values above 1.5 read as percent"
+
+  return {
+    statValue: pctNum(metrics.sIndex),
+    statUnit: "%",
+    headline: `${SATURATION_CATEGORY_LABEL[metrics.category]}: ${SATURATION_CATEGORY_DESCRIPTION[metrics.category]}.`,
+    detail: "higher = more saturated",
+    breakdown: {
+      formula,
+      inputs: [
+        { label: "Category", value: SATURATION_CATEGORY_LABEL[metrics.category].toLowerCase() },
+        { label: "Models compared (top N)", value: SATURATION_TOP_N.toString() },
+        { label: "Scores scaled to 0 to 1 by", value: scaleNote },
+        { label: "Top score (s1)", value: formatNumber(metrics.s1) },
+        { label: `#${SATURATION_TOP_N} score (s${SATURATION_TOP_N})`, value: formatNumber(metrics.sN) },
+        { label: "Score range", value: formatNumber(metrics.scoreRange) },
+        { label: `Mean score (top ${SATURATION_TOP_N})`, value: formatNumber(metrics.meanScore) },
+        { label: "Test-set size", value: testSetSize.toString() },
+        { label: "Effective n (n_eff)", value: formatNumber(metrics.nEff) },
+        { label: `SE of top/#${SATURATION_TOP_N} difference`, value: formatNumber(metrics.seDelta) },
+        { label: "Normalized range (R_norm)", value: formatNumber(metrics.rNorm) },
+        {
+          label: "Statistically similar?",
+          value: metrics.isStatisticallySimilar ? "yes (Δ ≤ 1.96·SE_Δ)" : "no",
+        },
+      ],
+    },
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
