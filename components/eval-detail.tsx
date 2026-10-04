@@ -161,6 +161,9 @@ interface EvalDetailProps {
    *  per-source evaluation_id in scope here, so MergedBenchmarkView
    *  passes the resolved per-source href down. */
   studySourceHref?: string
+  /** Merged pages only: notes about how rows were put on one scale,
+   *  shown directly above the leaderboard table. */
+  leaderboardNotes?: string[]
 }
 
 /** One model's folded leaderboard row: the run it reports, and every
@@ -551,6 +554,29 @@ function formatRawScore(score: number | null | undefined, unit?: string) {
   return `${score.toFixed(2)}${suffix}`
 }
 
+const RESCALED_MARK = "†"
+
+/** Marks a merged-page row whose score was rescaled to match the other
+ *  sources; the hover text gives the number the source published. */
+function RescaledMark({ modelResult }: { modelResult: ModelResultForBenchmark }) {
+  if (!modelResult.scale_harmonized) return null
+  const published = modelResult.score_published
+  const label =
+    typeof published === "number" && Number.isFinite(published)
+      ? `Rescaled: published as ${Number(published.toPrecision(6))}`
+      : "Rescaled to match the other sources"
+  return (
+    <span
+      data-rescaled-mark
+      title={label}
+      aria-label={label}
+      style={{ fontSize: 11, fontWeight: 400, color: "var(--fg-muted)", cursor: "help", marginRight: 4 }}
+    >
+      {RESCALED_MARK}
+    </span>
+  )
+}
+
 function isNumericScore(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value)
 }
@@ -776,6 +802,7 @@ export function EvalDetail({
   splitConfig,
   rowHighlight,
   studySourceHref,
+  leaderboardNotes,
   crossSourceContextLoader,
 }: EvalDetailProps) {
   const { mode } = useAudienceMode()
@@ -2486,7 +2513,16 @@ export function EvalDetail({
             </div>
           )}
 
-          <div className="flex justify-end mb-2">
+          <div className="flex items-end justify-end gap-4 mb-2">
+            {leaderboardNotes && leaderboardNotes.length > 0 && (
+              <div className="mr-auto space-y-1" style={{ maxWidth: 720 }}>
+                {leaderboardNotes.map((note) => (
+                  <p key={note} className="text-[12px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>
+                    {RESCALED_MARK} {note}
+                  </p>
+                ))}
+              </div>
+            )}
             <EmbedButton
               embedPath={`/embed/eval/leaderboard/${routeIdToPath(summary.evaluation_id)}`}
               label="Leaderboard"
@@ -2630,6 +2666,7 @@ export function EvalDetail({
                         {/* Unit suffix omitted — already shown in the
                             column header so it doesn't need to repeat
                             on every row. */}
+                        <RescaledMark modelResult={modelResult} />
                         {formatRawScore(fold.score)}
                         {foldRangeLabel(fold) && (
                           <div
@@ -2997,6 +3034,7 @@ export function EvalDetail({
                               setup or a differing dataset name when
                               available; otherwise it's omitted. */}
                           <div className="flex items-baseline justify-end gap-2 tabular-nums" style={{ fontSize: 15, fontWeight: 600 }}>
+                            <RescaledMark modelResult={modelResult} />
                             <span>{formatRawScore(fold.score, undefined)}</span>
                           </div>
                           {isFolded && foldRangeLabel(fold) && (

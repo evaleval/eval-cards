@@ -88,7 +88,15 @@ function mergedPayload(results: MergedObservationRow[]): MergedBenchmarkSummary 
   }
 }
 
-async function render(results: MergedObservationRow[]): Promise<string> {
+interface Rendered {
+  text: string
+  /** True when the note sits before the first leaderboard row in document order. */
+  noteBeforeRows: boolean
+  /** Model name and hover text of every row carrying a rescale mark. */
+  marks: { model: string; title: string | null }[]
+}
+
+async function render(results: MergedObservationRow[]): Promise<Rendered> {
   payload = mergedPayload(results)
   const { AudienceModeProvider } = await import("@/components/audience-mode-provider")
   const { MergedBenchmarkView } = await import("@/components/merged-benchmark-view")
@@ -105,28 +113,60 @@ async function render(results: MergedObservationRow[]): Promise<string> {
     )
   })
   const text = document.body.textContent ?? ""
+  const note = Array.from(container.querySelectorAll("p")).find((p) =>
+    p.textContent?.includes("may not measure the same quantity"),
+  )
+  const firstRow = container.querySelector("tbody tr")
+  const noteBeforeRows =
+    note != null &&
+    firstRow != null &&
+    Boolean(note.compareDocumentPosition(firstRow) & Node.DOCUMENT_POSITION_FOLLOWING)
+  // Desktop table only: the narrow-screen list repeats every row.
+  const marks = Array.from(container.querySelectorAll("table.ec-htable [data-rescaled-mark]")).map(
+    (mark) => ({
+      model: mark.closest("tr")?.querySelector("a")?.textContent ?? "",
+      title: mark.getAttribute("title"),
+    }),
+  )
   await act(async () => root.unmount())
   container.remove()
-  return text
+  return { text, noteBeforeRows, marks }
 }
 
 const NOTE =
   "Scores from Source B are shown multiplied by 100 to match the range of the other sources, which may not measure the same quantity."
 
+const RESCALED = [
+  row("src-a", "a", 83.8),
+  row("src-b", "b", 0.767, {
+    score_canonical: 76.7,
+    score_published: 0.767,
+    scale_harmonized: "mul100",
+  }),
+]
+
 describe("the merged page's rescaling note", () => {
   it("names the source whose scores were rescaled", async () => {
-    const text = await render([
-      row("src-a", "a", 83.8),
-      row("src-b", "b", 0.767, { score_canonical: 76.7, scale_harmonized: "mul100" }),
-    ])
+    const { text } = await render(RESCALED)
     expect(text).toContain("Bench")
     expect(text).toContain(NOTE)
   })
 
+  it("sits above the leaderboard rows", async () => {
+    const { noteBeforeRows } = await render(RESCALED)
+    expect(noteBeforeRows).toBe(true)
+  })
+
+  it("marks only the rescaled rows, with the published value", async () => {
+    const { marks } = await render(RESCALED)
+    expect(marks).toEqual([{ model: "b", title: "Rescaled: published as 0.767" }])
+  })
+
   it("is absent when no row was rescaled", async () => {
-    const text = await render([row("src-a", "a", 83.8), row("src-b", "b", 76.7)])
+    const { text, marks } = await render([row("src-a", "a", 83.8), row("src-b", "b", 76.7)])
     expect(text).toContain("Bench")
     expect(text).not.toContain("are shown multiplied")
     expect(text).not.toContain("may not measure the same quantity")
+    expect(marks).toEqual([])
   })
 })

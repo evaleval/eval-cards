@@ -416,6 +416,9 @@ export interface ModelResultForBenchmark {
   /** Merged-page rows only (set by lib/merged-adapter): the observation's
    *  source composite slug, used for the ?source= row pre-highlight. */
   merged_source_slug?: string
+  /** Merged-page rows only: how `score` was rescaled to sit on the page's
+   *  scale (see MergedObservationRow.scale_harmonized). */
+  scale_harmonized?: "mul100" | "div100" | "of_total"
   /** Collections (see the backend's collections spec, warehouse-outputs section): submission-channel id of
    *  the row's representative fact row — key into the snapshot's
    *  `collections.json` sidecar. */

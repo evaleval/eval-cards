@@ -318,19 +318,14 @@ export function MergedBenchmarkView({
         splitConfig={metricSplitConfig}
         rowHighlight={rowHighlight}
         studySourceHref={studySourceHref}
+        leaderboardNotes={harmonizedNotes}
       />
 
       {/* DISCLOSURE NOTES -------------------------------------------------- */}
       {(disclosureSources.length > 0 ||
         unconvertibleCount > 0 ||
-        assistedExcludedCount > 0 ||
-        harmonizedNotes.length > 0) && (
+        assistedExcludedCount > 0) && (
         <div className="space-y-1.5">
-          {harmonizedNotes.map((note) => (
-            <p key={note} className="text-[12px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>
-              {note}
-            </p>
-          ))}
           {assistedExcludedCount > 0 && (
             <p className="text-[12px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>
               {assistedExcludedCount.toLocaleString()} assisted study{" "}
