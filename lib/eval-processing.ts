@@ -419,6 +419,7 @@ export interface ModelResultForBenchmark {
   /** Merged-page rows only: how `score` was rescaled to sit on the page's
    *  scale (see MergedObservationRow.scale_harmonized). */
   scale_harmonized?: "mul100" | "div100" | "of_total"
+  scale_harmonized_total?: number
   /** Collections (see the backend's collections spec, warehouse-outputs section): submission-channel id of
    *  the row's representative fact row — key into the snapshot's
    *  `collections.json` sidecar. */
@@ -645,6 +646,9 @@ export interface BenchmarkLeaderboardRow {
   source_metadata: SourceMetadata
   source_data: BenchmarkEvaluation["source_data"]
   values: Record<string, number | null>
+  /** Merged-page rows only: hover text for a score that was rescaled to
+   *  sit on the page's scale (see scaleHarmonizedTitle). */
+  rescaled_title?: string
   /** Per-column verified-evaluator flag, keyed identically to `values`. */
   verified?: Record<string, boolean>
   annotations_by_metric?: Record<string, RowAnnotations | null | undefined>
@@ -761,6 +765,8 @@ export interface MergedObservationRow {
    *  'no_bounds' rows are ever moved. 'of_total' rows were published as
    *  raw totals and divided by the benchmark's published maximum. */
   scale_harmonized?: "mul100" | "div100" | "of_total"
+  /** The published maximum an 'of_total' row was divided by. */
+  scale_harmonized_total?: number
 }
 
 export interface MergedBenchmarkSummary {

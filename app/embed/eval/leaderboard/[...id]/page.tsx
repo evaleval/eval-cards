@@ -22,6 +22,7 @@ import {
   scoreStandings,
   type ModelResultForBenchmark,
 } from "@/lib/eval-processing"
+import { SCALE_HARMONIZED_MARK } from "@/lib/merged-adapter"
 import { getMetricChipLabel } from "@/lib/metric-labels"
 import { routeIdFromSegments } from "@/lib/utils"
 
@@ -53,7 +54,7 @@ export default function EmbedEvalLeaderboard() {
   const sortMetricKey = searchParams.get("metric")
   const sliceParam = searchParams.get("slice")
 
-  const { summary, error, sources, activeSource, setActiveSource } = useEmbedEvalSummary(
+  const { summary, error, sources, activeSource, setActiveSource, scaleNotes } = useEmbedEvalSummary(
     evalId,
     { metricParam: sortMetricKey, sourceParam: searchParams.get("source") },
   )
@@ -219,6 +220,7 @@ export default function EmbedEvalLeaderboard() {
        *  unassisted headline runs. 0 means the row takes no rank. */
       rank: number
       assisted: boolean
+      rescaledTitle?: string
       result?: ModelResultForBenchmark
     }
 
@@ -281,6 +283,7 @@ export default function EmbedEvalLeaderboard() {
             sortScore: values[sortKey] ?? null,
             rank: 0,
             assisted: false,
+            rescaledTitle: row.rescaled_title,
           }
         })
         .filter((r) => r !== null) as TableRow[]
@@ -422,6 +425,16 @@ export default function EmbedEvalLeaderboard() {
           </select>
         </div>
       )}
+      {scaleNotes.map((note) => (
+        <div
+          key={note}
+          data-scale-note
+          className="mb-2"
+          style={{ fontSize: 11, lineHeight: 1.4, color: "var(--fg-muted)" }}
+        >
+          {SCALE_HARMONIZED_MARK} {note}
+        </div>
+      ))}
       <div style={{ overflowX: "auto" }}>
         <table
           style={{
@@ -614,6 +627,21 @@ export default function EmbedEvalLeaderboard() {
                         padding: "5px 0 5px 12px",
                       }}
                     >
+                      {val != null && row.rescaledTitle && (
+                        <span
+                          data-rescaled-mark
+                          title={row.rescaledTitle}
+                          aria-label={row.rescaledTitle}
+                          style={{
+                            fontWeight: 400,
+                            color: "var(--fg-muted)",
+                            cursor: "help",
+                            marginRight: 4,
+                          }}
+                        >
+                          {SCALE_HARMONIZED_MARK}
+                        </span>
+                      )}
                       {val == null ? "—" : formatScore(val, m.unit)}
                     </td>
                   )

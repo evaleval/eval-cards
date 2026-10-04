@@ -11,6 +11,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { ScoreDistribution } from "@/components/score-distribution"
 import { ParamRangePicker } from "@/components/param-range-picker"
 import { EmbedButton } from "@/components/embed-button"
+import { SCALE_HARMONIZED_MARK, scaleHarmonizedTitle } from "@/lib/merged-adapter"
 import {
   PARAM_RANGE_MAX_INDEX,
   paramStepToNumeric,
@@ -554,17 +555,11 @@ function formatRawScore(score: number | null | undefined, unit?: string) {
   return `${score.toFixed(2)}${suffix}`
 }
 
-const RESCALED_MARK = "†"
-
 /** Marks a merged-page row whose score was rescaled to match the other
  *  sources; the hover text gives the number the source published. */
 function RescaledMark({ modelResult }: { modelResult: ModelResultForBenchmark }) {
-  if (!modelResult.scale_harmonized) return null
-  const published = modelResult.score_published
-  const label =
-    typeof published === "number" && Number.isFinite(published)
-      ? `Rescaled: published as ${Number(published.toPrecision(6))}`
-      : "Rescaled to match the other sources"
+  const label = scaleHarmonizedTitle(modelResult)
+  if (!label) return null
   return (
     <span
       data-rescaled-mark
@@ -572,7 +567,7 @@ function RescaledMark({ modelResult }: { modelResult: ModelResultForBenchmark })
       aria-label={label}
       style={{ fontSize: 11, fontWeight: 400, color: "var(--fg-muted)", cursor: "help", marginRight: 4 }}
     >
-      {RESCALED_MARK}
+      {SCALE_HARMONIZED_MARK}
     </span>
   )
 }
@@ -2518,7 +2513,7 @@ export function EvalDetail({
               <div className="mr-auto space-y-1" style={{ maxWidth: 720 }}>
                 {leaderboardNotes.map((note) => (
                   <p key={note} className="text-[12px] leading-[1.6]" style={{ color: "var(--fg-muted)" }}>
-                    {RESCALED_MARK} {note}
+                    {SCALE_HARMONIZED_MARK} {note}
                   </p>
                 ))}
               </div>

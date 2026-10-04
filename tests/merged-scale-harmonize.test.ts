@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
 
-import { harmonizeUnboundedScales, scaleHarmonizedNotes } from "@/lib/merged-adapter"
+import {
+  harmonizeUnboundedScales,
+  scaleHarmonizedNotes,
+  scaleHarmonizedTitle,
+} from "@/lib/merged-adapter"
 import type { MergedObservationRow } from "@/lib/eval-processing"
 
 function row(
@@ -106,6 +110,7 @@ describe("harmonizeUnboundedScales", () => {
       ["b", 0.518],
     ])
     expect(rows[0].scale_harmonized).toBe("of_total")
+    expect(rows[0].scale_harmonized_total).toBe(2800)
     expect(rows[1].scale_harmonized).toBeUndefined()
   })
 
@@ -245,5 +250,37 @@ describe("scaleHarmonizedNotes", () => {
       "shown as a share of the benchmark's published maximum to match",
     )
     expect(scaleHarmonizedNotes([{ name: "A", kind: undefined }])).toEqual([])
+  })
+})
+
+describe("scaleHarmonizedTitle", () => {
+  it("states the operation and the published value", () => {
+    expect(scaleHarmonizedTitle({ scale_harmonized: "mul100", score_published: 0.951 })).toBe(
+      "Rescaled x100: published as 0.951",
+    )
+    expect(scaleHarmonizedTitle({ scale_harmonized: "div100", score_published: 76.7 })).toBe(
+      "Rescaled /100: published as 76.7",
+    )
+    expect(
+      scaleHarmonizedTitle({
+        scale_harmonized: "of_total",
+        scale_harmonized_total: 2800,
+        score_published: 2549.8,
+      }),
+    ).toBe("Shown as a share of 2800: published as 2549.8")
+  })
+
+  it("reads correctly for a published zero and without a published value", () => {
+    expect(scaleHarmonizedTitle({ scale_harmonized: "mul100", score_published: 0 })).toBe(
+      "Rescaled x100: published as 0",
+    )
+    expect(scaleHarmonizedTitle({ scale_harmonized: "div100" })).toBe("Rescaled /100")
+    expect(scaleHarmonizedTitle({ scale_harmonized: "of_total" })).toBe(
+      "Shown as a share of the benchmark's published maximum",
+    )
+  })
+
+  it("is undefined for a row that was not rescaled", () => {
+    expect(scaleHarmonizedTitle({ score_published: 0.5 })).toBeUndefined()
   })
 })

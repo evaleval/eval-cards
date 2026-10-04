@@ -12,7 +12,11 @@
 import { useEffect, useMemo, useState } from "react"
 
 import { fetchEvalSummary, fetchMergedBenchmarkSummary } from "@/lib/dashboard-data-client"
-import { isMergedBenchmarkSummary, mergedSummaryToEvalSummary } from "@/lib/merged-adapter"
+import {
+  isMergedBenchmarkSummary,
+  mergedSummaryToEvalSummary,
+  scaleHarmonizedNotes,
+} from "@/lib/merged-adapter"
 import { isMergedEvalId } from "@/lib/utils"
 import type { BenchmarkEvalSummary, MergedBenchmarkSummary } from "@/lib/eval-processing"
 
@@ -35,6 +39,8 @@ export function useEmbedEvalSummary(
   /** "" = merged (default). */
   activeSource: string
   setActiveSource: (slug: string) => void
+  /** Merged data only: which sources' scores were rescaled, and how. */
+  scaleNotes: string[]
 } {
   const isMerged = isMergedEvalId(evalId)
   const metricId = opts.metricParam?.trim() || undefined
@@ -141,7 +147,21 @@ export function useEmbedEvalSummary(
     setActiveSource(slug)
   }
 
+  const scaleNotes = useMemo(
+    () =>
+      mergedRaw && !effectiveSource
+        ? scaleHarmonizedNotes(
+            mergedRaw.results.map((row) => ({
+              name: row.composite_display_name || row.composite_slug,
+              kind: row.scale_harmonized,
+            })),
+          )
+        : [],
+    [mergedRaw, effectiveSource],
+  )
+
   return {
+    scaleNotes,
     summary: effectiveSource ? sourceSummary : base,
     error,
     sources,

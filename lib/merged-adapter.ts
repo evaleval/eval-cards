@@ -158,6 +158,7 @@ export function harmonizeUnboundedScales(
       score_canonical: converted,
       scale_harmonized:
         scale === "total" ? ("of_total" as const) : toPercent ? ("mul100" as const) : ("div100" as const),
+      ...(scale === "total" ? { scale_harmonized_total: totalMax } : {}),
     }
   })
   // Same order the query uses: canonical score in the metric's direction,
@@ -196,6 +197,34 @@ export function scaleHarmonizedNotes(
       `Scores from ${names.join(", ")} are shown ${how[kind]} to match the range of the other sources, which may not measure the same quantity.`,
     ]
   })
+}
+
+/** The mark shown next to a rescaled score and in front of its note. */
+export const SCALE_HARMONIZED_MARK = "†"
+
+/**
+ * Hover text for one rescaled row: what was done to the number and what
+ * the source published. Undefined for a row that was not rescaled.
+ */
+export function scaleHarmonizedTitle(row: {
+  scale_harmonized?: MergedObservationRow["scale_harmonized"]
+  scale_harmonized_total?: number
+  score_published?: number
+}): string | undefined {
+  if (!row.scale_harmonized) return undefined
+  const total = row.scale_harmonized_total
+  const what =
+    row.scale_harmonized === "mul100"
+      ? "Rescaled x100"
+      : row.scale_harmonized === "div100"
+        ? "Rescaled /100"
+        : typeof total === "number" && Number.isFinite(total)
+          ? `Shown as a share of ${total}`
+          : "Shown as a share of the benchmark's published maximum"
+  const published = row.score_published
+  return typeof published === "number" && Number.isFinite(published)
+    ? `${what}: published as ${Number(published.toPrecision(6))}`
+    : what
 }
 
 /**
@@ -365,6 +394,7 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
       scoring_mode: row.scoring_mode,
       score_published: row.score_published,
       scale_harmonized: row.scale_harmonized,
+      scale_harmonized_total: row.scale_harmonized_total,
       result: {
         evaluation_name: metricDisplayName,
         display_name: metricDisplayName,
@@ -386,6 +416,7 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
     source_metadata: row.source_metadata,
     source_data: sourceDataOf(row),
     values: { [columnKey]: row.score_canonical as number },
+    rescaled_title: scaleHarmonizedTitle(row),
     verified: row.is_verified_evaluator ? { [columnKey]: true } : undefined,
     metrics_present: 1,
   }))

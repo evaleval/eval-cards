@@ -7,12 +7,13 @@ import type { MergedBenchmarkSummary, MergedObservationRow } from "@/lib/eval-pr
 
 let payload: MergedBenchmarkSummary
 
-vi.mock("next/navigation", () => import("./next-navigation-stub"))
-vi.mock("@/lib/use-comparison-index", () => ({ useComparisonIndex: () => null }))
+vi.mock("next/navigation", async () => ({
+  ...(await import("./next-navigation-stub")),
+  useParams: () => ({ id: ["bench"] }),
+}))
 vi.mock("@/lib/dashboard-data-client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/dashboard-data-client")>()),
   fetchMergedBenchmarkSummary: () => Promise.resolve(payload),
-  fetchPeerRanks: () => Promise.resolve({}),
 }))
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -88,87 +89,56 @@ function mergedPayload(results: MergedObservationRow[]): MergedBenchmarkSummary 
   }
 }
 
-interface Rendered {
-  text: string
-  /** True when the note sits before the first leaderboard row in document order. */
-  noteBeforeRows: boolean
-  /** Model name and hover text of every row carrying a rescale mark. */
-  marks: { model: string; title: string | null }[]
-}
-
-async function render(results: MergedObservationRow[]): Promise<Rendered> {
+async function render(results: MergedObservationRow[]) {
   payload = mergedPayload(results)
-  const { AudienceModeProvider } = await import("@/components/audience-mode-provider")
-  const { MergedBenchmarkView } = await import("@/components/merged-benchmark-view")
+  const { default: EmbedEvalLeaderboard } = await import("@/app/embed/eval/leaderboard/[...id]/page")
   const container = document.createElement("div")
   document.body.appendChild(container)
   const root = createRoot(container)
   await act(async () => {
-    root.render(
-      createElement(
-        AudienceModeProvider,
-        null,
-        createElement(MergedBenchmarkView, { benchmarkId: "bench" }),
-      ),
-    )
+    root.render(createElement(EmbedEvalLeaderboard))
   })
-  const text = document.body.textContent ?? ""
-  const note = Array.from(container.querySelectorAll("p")).find((p) =>
-    p.textContent?.includes("may not measure the same quantity"),
-  )
+  const note = container.querySelector("[data-scale-note]")
   const firstRow = container.querySelector("tbody tr")
-  const noteBeforeRows =
-    note != null &&
-    firstRow != null &&
-    Boolean(note.compareDocumentPosition(firstRow) & Node.DOCUMENT_POSITION_FOLLOWING)
-  // Desktop table only: the narrow-screen list repeats every row.
-  const marks = Array.from(container.querySelectorAll("table.ec-htable [data-rescaled-mark]")).map(
-    (mark) => ({
-      model: mark.closest("tr")?.querySelector("a")?.textContent ?? "",
+  const rendered = {
+    rows: container.querySelectorAll("tbody tr").length,
+    note: note?.textContent ?? null,
+    noteBeforeRows:
+      note != null &&
+      firstRow != null &&
+      Boolean(note.compareDocumentPosition(firstRow) & Node.DOCUMENT_POSITION_FOLLOWING),
+    marks: Array.from(container.querySelectorAll("[data-rescaled-mark]")).map((mark) => ({
+      model: mark.closest("tr")?.querySelector("td:nth-child(2) span")?.textContent ?? "",
       title: mark.getAttribute("title"),
-    }),
-  )
+    })),
+  }
   await act(async () => root.unmount())
   container.remove()
-  return { text, noteBeforeRows, marks }
+  return rendered
 }
 
-const NOTE =
-  "Scores from Source B are shown multiplied by 100 to match the range of the other sources, which may not measure the same quantity."
-
-const RESCALED = [
-  row("src-a", "a", 83.8),
-  row("src-b", "b", 0.767, {
-    score_canonical: 76.7,
-    score_published: 0.767,
-    scale_harmonized: "mul100",
-  }),
-]
-
-describe("the merged page's rescaling note", () => {
-  it("names the source whose scores were rescaled", async () => {
-    const { text, noteBeforeRows, marks } = await render(RESCALED)
-    expect(text).toContain("Bench")
-    expect(text).toContain(`† ${NOTE}`)
+describe("the merged leaderboard embed", () => {
+  it("discloses rescaled scores with the note and a mark on each rescaled row", async () => {
+    const { rows, note, noteBeforeRows, marks } = await render([
+      row("src-a", "a", 83.8),
+      row("src-b", "b", 0.767, {
+        score_canonical: 76.7,
+        score_published: 0.767,
+        scale_harmonized: "mul100",
+      }),
+    ])
+    expect(rows).toBe(2)
+    expect(note).toBe(
+      "† Scores from Source B are shown multiplied by 100 to match the range of the other sources, which may not measure the same quantity.",
+    )
     expect(noteBeforeRows).toBe(true)
-    expect(marks).toHaveLength(1)
-  })
-
-  it("sits above the leaderboard rows", async () => {
-    const { noteBeforeRows } = await render(RESCALED)
-    expect(noteBeforeRows).toBe(true)
-  })
-
-  it("marks only the rescaled rows, with the published value", async () => {
-    const { marks } = await render(RESCALED)
     expect(marks).toEqual([{ model: "b", title: "Rescaled x100: published as 0.767" }])
   })
 
-  it("is absent when no row was rescaled", async () => {
-    const { text, marks } = await render([row("src-a", "a", 83.8), row("src-b", "b", 76.7)])
-    expect(text).toContain("Bench")
-    expect(text).not.toContain("are shown multiplied")
-    expect(text).not.toContain("may not measure the same quantity")
+  it("shows no note and no mark when no row was rescaled", async () => {
+    const { rows, note, marks } = await render([row("src-a", "a", 83.8), row("src-b", "b", 76.7)])
+    expect(rows).toBe(2)
+    expect(note).toBeNull()
     expect(marks).toEqual([])
   })
 })
