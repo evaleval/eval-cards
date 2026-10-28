@@ -3,6 +3,8 @@
  * This file has NO "server-only" restriction so it can be imported from client components.
  */
 
+export const AUTO_BENCHMARKCARDS_DATASET_URL = "https://huggingface.co/datasets/evaleval/auto-benchmarkcards"
+
 /**
  * Normalize a benchmark name to a stable lookup key.
  * Strips composite prefixes like "hfopenllm_v2/", lowercases, collapses whitespace.

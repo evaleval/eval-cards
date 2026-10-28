@@ -21,6 +21,7 @@
       "https://artificialanalysis.ai/api/v2/data/llms/models"
     ]
   },
+  "benchmark_card_source_path": null,
   "benchmark_card": null,
   "tags": {
     "domains": [],

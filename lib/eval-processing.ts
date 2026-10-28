@@ -507,6 +507,8 @@ export interface BenchmarkEvalSummary extends SignalSummaries {
   avg_score_norm: number | null
   /** Rich benchmark card from the metadata/ folder, when available */
   benchmark_card?: BenchmarkCard
+  /** Card file path relative to the Auto-BenchmarkCards dataset root. */
+  benchmark_card_source_path?: string | null
   is_aggregated?: boolean
   aggregate_sources?: Array<{
     evaluation_id: string
@@ -807,6 +809,7 @@ export interface MergedBenchmarkSummary {
   /** The benchmark's card, sourced from a per-source instantiation that
    *  authored one (preferring a source that reports the preferred metric). */
   benchmark_card?: BenchmarkCard | null
+  benchmark_card_source_path?: string | null
   /** `collections.json` entries for the curated collections these rows
    *  belong to, keyed by collection_id. Lets the reader name the study a
    *  row comes from and give its protocol numbers their declared units

@@ -21,6 +21,7 @@
       "https://storage.googleapis.com/crfm-helm-public/safety/benchmark_output/releases/v1.17.0/groups/safety_scenarios.json"
     ]
   },
+  "benchmark_card_source_path": null,
   "benchmark_card": null,
   "tags": {
     "domains": [],

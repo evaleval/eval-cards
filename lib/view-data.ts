@@ -166,15 +166,18 @@ const MODEL_CELL_JOIN_COLUMNS = `
   e.is_summary_score AS eval_is_summary_score
 `
 
-// parent_benchmark_display_name is additive (2026-06 producer): the actual
-// display name of a slice row's parent benchmark, NULL for non-slice rows.
-// Distinct from composite_display_name, which for cross-benchmark suites is
-// the SUITE label. Older snapshots don't carry the column, and a missing
-// column binder-errors the whole query, so callers probe `evalsViewHas
-// ParentDisplayName()` and splice in a NULL alias when absent.
-function evalListColumns(hasParentDisplayName: boolean) {
+function benchmarkCardSourcePathColumn(columns: Set<string>) {
+  return columns.has("benchmark_card_source_path")
+    ? "benchmark_card_source_path"
+    : "CAST(NULL AS VARCHAR) AS benchmark_card_source_path"
+}
+
+// Additive metadata columns use NULL aliases when absent from the snapshot.
+// The parent display name labels a slice's benchmark, distinct from its suite.
+function evalListColumns(columns: Set<string>) {
   return `${EVAL_LIST_COLUMNS},
-  ${hasParentDisplayName
+  ${benchmarkCardSourcePathColumn(columns)},
+  ${columns.has("parent_benchmark_display_name")
     ? "parent_benchmark_display_name"
     : "CAST(NULL AS VARCHAR) AS parent_benchmark_display_name"}`
 }
@@ -877,25 +880,26 @@ function modelSummaryFromRows(
   }
 }
 
-// Probe (once per process) whether the loaded snapshot's evals_view carries
-// the additive parent_benchmark_display_name column, so projections degrade
-// to a NULL alias on older snapshots instead of binder-erroring the query.
-let evalsViewParentDisplayNameCache: boolean | undefined
-async function evalsViewHasParentDisplayName(): Promise<boolean> {
-  if (evalsViewParentDisplayNameCache === undefined) {
+// Probe additive evals_view columns once per process, using NULL aliases
+// for columns absent from older snapshots.
+let evalsViewColumnsCache: Set<string> | undefined
+async function evalsViewColumns(): Promise<Set<string>> {
+  if (evalsViewColumnsCache === undefined) {
     try {
       const columns = await readRows<{ column_name: string }>("DESCRIBE evals_view")
-      evalsViewParentDisplayNameCache = columns.some(
-        (column) => column.column_name === "parent_benchmark_display_name"
-      )
+      evalsViewColumnsCache = new Set(columns.map((column) => column.column_name))
     } catch {
       // Probe failed (e.g. connection init blip) — don't cache, so the next
       // request re-probes; the data query that follows surfaces the real
       // error if the connection is genuinely broken.
-      return false
+      return new Set()
     }
   }
-  return evalsViewParentDisplayNameCache
+  return evalsViewColumnsCache
+}
+
+async function evalsViewHasParentDisplayName(): Promise<boolean> {
+  return (await evalsViewColumns()).has("parent_benchmark_display_name")
 }
 
 // Probe (once per process) whether the loaded snapshot's eval_results_view
@@ -1153,10 +1157,10 @@ export async function getEvalListData(): Promise<{
   evals: BenchmarkEvalListItem[]
   totalModels: number
 }> {
-  const hasParentDisplayName = await evalsViewHasParentDisplayName()
+  const columns = await evalsViewColumns()
   const [evalRows, countRows] = await Promise.all([
     readRows<BenchmarkEvalListItem & { benchmark_card?: unknown }>(
-      `SELECT ${evalListColumns(hasParentDisplayName)}
+      `SELECT ${evalListColumns(columns)}
        FROM evals_view
        ORDER BY evaluation_name ASC`
     ),
@@ -1383,7 +1387,7 @@ export async function getEvalSummaryById(evalId: string): Promise<BenchmarkEvalS
   // eval LIST has no use for it, and the cell query below already treats the
   // column as required on this table.
   const evalRows = await readRows<Row>(
-    `SELECT ${evalListColumns(await evalsViewHasParentDisplayName())},
+    `SELECT ${evalListColumns(await evalsViewColumns())},
             primary_metric_id
      FROM evals_view
      WHERE evaluation_id = ?
@@ -1871,6 +1875,7 @@ export async function getMergedBenchmarkSummary(
   // shows. Any instantiation of this benchmark that authored one will do;
   // prefer a source that reports the preferred metric.
   let benchmarkCard: BenchmarkCard | null = null
+  let benchmarkCardSourcePath: string | null = null
   // Slice-grain fallback: for benchmarks with no top-level data the cards
   // live under the slice ids (rewardbench-2 → rewardbench-2-factuality),
   // so include them in the lookup.
@@ -1879,7 +1884,8 @@ export async function getMergedBenchmarkSummary(
     ...(grain === "slice" ? slices.map((s) => s.slice_id) : []),
   ]
   const cardRows = await readRows<Row>(
-    `SELECT composite_slug, CAST(to_json(benchmark_card) AS VARCHAR) AS benchmark_card
+    `SELECT composite_slug, CAST(to_json(benchmark_card) AS VARCHAR) AS benchmark_card,
+            ${benchmarkCardSourcePathColumn(await evalsViewColumns())}
      FROM evals_view
      WHERE benchmark_id IN (${cardIds.map(() => "?").join(", ")})
        AND benchmark_card IS NOT NULL`,
@@ -1893,6 +1899,7 @@ export async function getMergedBenchmarkSummary(
     const cardRow =
       cardRows.find((r) => preferredSlugs.has(asString(r.composite_slug))) ?? cardRows[0]
     benchmarkCard = (parseMaybeJson(cardRow.benchmark_card) ?? null) as BenchmarkCard | null
+    benchmarkCardSourcePath = optionalString(cardRow.benchmark_card_source_path) ?? null
   }
 
   // A bounds-less metric gets no conversion from the producer, so sources
@@ -1982,6 +1989,7 @@ export async function getMergedBenchmarkSummary(
     // labels its judge with a raw canonical id.
     judge_display_names: await fetchJudgeDisplayNames(resultRows),
     benchmark_card: benchmarkCard,
+    benchmark_card_source_path: benchmarkCardSourcePath,
     collections,
   }
 }

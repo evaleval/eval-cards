@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import collectionContextFixture from "./fixtures/collection_context.json"
 import { isNotAssessable } from "../components/signals/signal-utils"
+import { mergedSummaryToEvalSummary } from "../lib/merged-adapter"
 
 function sqlString(value: string) {
   return `'${value.replace(/'/g, "''")}'`
@@ -26,6 +27,7 @@ async function writeSyntheticStageJSnapshot(
     includeJudgeColumns?: boolean
     includeScoringMode?: boolean
     includeMixedScaleSlice?: boolean
+    includeBenchmarkCardSources?: boolean
     dropRawModelIds?: boolean
   } = {},
 ) {
@@ -53,6 +55,7 @@ async function writeSyntheticStageJSnapshot(
     includeJudgeColumns = false,
     includeScoringMode = false,
     includeMixedScaleSlice = false,
+    includeBenchmarkCardSources = false,
     dropRawModelIds = false,
   } = options
   await mkdir(snapshotDir, { recursive: true })
@@ -214,8 +217,9 @@ async function writeSyntheticStageJSnapshot(
         0.8 AS avg_score,
         0.8 AS avg_score_norm,
         0.8 AS top_score,
-        false AS has_card,
-        NULL AS benchmark_card,
+        ${includeBenchmarkCardSources} AS has_card,
+        ${includeBenchmarkCardSources ? `'${JSON.stringify({ benchmark_details: { name: "MMLU" } })}'::JSON` : "NULL"} AS benchmark_card,
+        ${includeBenchmarkCardSources ? "'cards/mmlu.json' AS benchmark_card_source_path," : ""}
         false AS is_aggregated,
         [] AS aggregate_sources,
         false AS is_summary_score,
@@ -278,6 +282,18 @@ async function writeSyntheticStageJSnapshot(
         0::INTEGER AS subtasks_count
     `
   )
+  if (includeBenchmarkCardSources) {
+    await connection.run(
+      `INSERT INTO evals_fixture
+       SELECT * REPLACE (
+         'src-a%2Fmmlu' AS evaluation_id,
+         'src-a' AS composite_slug,
+         '{"benchmark_details":{"name":"Preferred MMLU"}}'::JSON AS benchmark_card,
+         'cards/preferred-mmlu.json' AS benchmark_card_source_path
+       )
+       FROM evals_fixture WHERE evaluation_id = 'mmlu'`
+    )
+  }
   if (includeCollections) {
     // Synthetic protocol-varied study page (curated collection).
     await connection.run(
@@ -1081,6 +1097,7 @@ describe("Stage J view-layer backend", () => {
         score: 0.8,
         result: { metric_summary_id: "mmlu%3Aaccuracy", is_verified_evaluator: true },
       })
+      expect(evalSummary?.benchmark_card_source_path).toBeNull()
       expect(evalSummary?.model_results[0]?.result.generation_config).toMatchObject({
         temperature: 0.2,
         top_p: 0.95,
@@ -1131,6 +1148,7 @@ async function withSnapshot(
     includeJudgeColumns?: boolean
     includeScoringMode?: boolean
     includeMixedScaleSlice?: boolean
+    includeBenchmarkCardSources?: boolean
     dropRawModelIds?: boolean
   },
   run: (
@@ -1165,6 +1183,26 @@ async function withSnapshot(
 }
 
 describe("merged benchmark accessor (merged-benchmark-view F1)", () => {
+  it("keeps source paths with the selected card in lists, details, and merged pages", async () => {
+    await withSnapshot({ includeBenchmarkCardSources: true }, async (dataBackend) => {
+      const list = await dataBackend.getEvalListLiteData()
+      expect(list.evals.find((row) => row.evaluation_id === "mmlu")?.benchmark_card_source_path)
+        .toBe("cards/mmlu.json")
+      const summary = await dataBackend.getEvalSummaryById("mmlu")
+      expect(summary).toMatchObject({
+        benchmark_card: { benchmark_details: { name: "MMLU" } },
+        benchmark_card_source_path: "cards/mmlu.json",
+      })
+      const merged = await dataBackend.getMergedBenchmarkSummary("mmlu")
+      expect(merged).toMatchObject({
+        benchmark_card: { benchmark_details: { name: "Preferred MMLU" } },
+        benchmark_card_source_path: "cards/preferred-mmlu.json",
+      })
+      expect(mergedSummaryToEvalSummary(merged!).benchmark_card_source_path)
+        .toBe("cards/preferred-mmlu.json")
+    })
+  })
+
   it("returns the merged row with echo rows intact, sorted by score_canonical", async () => {
     await withSnapshot({}, async (dataBackend) => {
       const merged = await dataBackend.getMergedBenchmarkSummary("mmlu")

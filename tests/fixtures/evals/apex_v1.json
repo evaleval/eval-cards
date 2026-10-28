@@ -19,6 +19,7 @@
     "source_type": "hf_dataset",
     "hf_repo": "Mercor/APEX-v1"
   },
+  "benchmark_card_source_path": "cards/apex-v1.json",
   "benchmark_card": {
     "benchmark_details": {
       "name": "APEX-v1",

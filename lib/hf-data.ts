@@ -505,6 +505,7 @@ export interface HFEvalDetail extends SignalSummaries {
   category: string
   source_data: SourceData
   benchmark_card: BenchmarkCard | null
+  benchmark_card_source_path?: string | null
   metrics: HFEvalMetric[]
   subtasks: unknown[]
   evalcards?: { annotations?: EvalcardsAnnotations }

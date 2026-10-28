@@ -471,6 +471,7 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
     avg_score_norm: 0,
     merged_view: true,
     benchmark_card: merged.benchmark_card ?? undefined,
+    benchmark_card_source_path: merged.benchmark_card_source_path ?? null,
     metrics_count: merged.metrics.length,
     metric_names: merged.metrics.map((m) => m.display_name),
     leaderboard_metrics: [

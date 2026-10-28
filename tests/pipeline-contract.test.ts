@@ -136,6 +136,22 @@ describe("Tier A — pipeline contracts (model files)", () => {
 describe("Tier A — pipeline contracts (eval-detail files)", () => {
   const evals = loadAllFixtures<HFEvalDetail>("evals")
 
+  it("every eval-detail carries a nullable dataset-relative benchmark card source path", () => {
+    const violations: Violation[] = []
+    for (const { id, data } of evals) {
+      const sourcePath = data.benchmark_card_source_path
+      if (sourcePath !== null && (typeof sourcePath !== "string" || !/^cards\/[^/]+\.json$/.test(sourcePath))) {
+        violations.push({ fixture: id, path: "benchmark_card_source_path", detail: `invalid path: ${sourcePath}` })
+      }
+      if (sourcePath != null && !data.benchmark_card) {
+        violations.push({ fixture: id, path: "benchmark_card_source_path", detail: "path without a card" })
+      }
+    }
+    expect(violations, formatViolations(violations)).toEqual([])
+    expect(evals.some(({ data }) => data.benchmark_card_source_path != null)).toBe(true)
+    expect(evals.some(({ data }) => data.benchmark_card_source_path === null)).toBe(true)
+  })
+
   it("every eval-detail has eval_summary_id, benchmark, benchmark_leaf_name", () => {
     const violations: Violation[] = []
     for (const { id, data } of evals) {

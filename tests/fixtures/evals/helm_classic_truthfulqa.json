@@ -21,6 +21,7 @@
       "https://storage.googleapis.com/crfm-helm-public/benchmark_output/releases/v0.4.0/groups/core_scenarios.json"
     ]
   },
+  "benchmark_card_source_path": null,
   "benchmark_card": {
     "benchmark_details": {
       "name": "helm_classic",

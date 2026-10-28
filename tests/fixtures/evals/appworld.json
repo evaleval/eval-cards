@@ -21,6 +21,7 @@
       "https://github.com/Exgentic/exgentic"
     ]
   },
+  "benchmark_card_source_path": null,
   "benchmark_card": {
     "benchmark_details": {
       "name": "AppWorld Benchmark",

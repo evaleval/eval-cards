@@ -21,6 +21,7 @@
       "https://storage.googleapis.com/crfm-helm-public/lite/benchmark_output/releases/v1.13.0/groups/core_scenarios.json"
     ]
   },
+  "benchmark_card_source_path": "cards/helm-lite.json",
   "benchmark_card": {
     "benchmark_details": {
       "name": "helm_lite",

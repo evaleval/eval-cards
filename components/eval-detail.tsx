@@ -1,6 +1,7 @@
 "use client"
 
 import { useAudienceMode } from "@/components/audience-mode-provider"
+import { AutoBenchmarkCardsInfo } from "@/components/auto-benchmarkcards-info"
 import { Fragment, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { BenchmarkSignalsStrip } from "@/components/signals/benchmark-signals-strip"
@@ -1918,6 +1919,7 @@ export function EvalDetail({
       {summary.benchmark_card && (
         <BenchmarkCardCollapsible
           card={summary.benchmark_card}
+          sourcePath={summary.benchmark_card_source_path}
           isResearchView={isResearchView}
           defaultOpen={isResearchView}
           defaultRisksOpen={false}
@@ -4523,6 +4525,7 @@ function MultiMetricLeaderboard({
 
 function BenchmarkCardCollapsible({
   card,
+  sourcePath,
   isResearchView,
   defaultOpen = true,
   defaultRisksOpen = false,
@@ -4531,6 +4534,7 @@ function BenchmarkCardCollapsible({
   knownIssues = [],
 }: {
   card: BenchmarkCard
+  sourcePath?: string | null
   isResearchView: boolean
   defaultOpen?: boolean
   defaultRisksOpen?: boolean
@@ -4571,8 +4575,7 @@ function BenchmarkCardCollapsible({
         Object.keys(flaggedFieldsRaw).length > 0
   const hasMissingFields = (card.missing_fields ?? []).length > 0
 
-  const hasContent =
-    knownIssues.length > 0 ||
+  const hasCardContent =
     meaningful(purpose.goal) ||
     meaningful(methodology.interpretation) ||
     meaningful(purpose.limitations) ||
@@ -4592,15 +4595,18 @@ function BenchmarkCardCollapsible({
     meaningful(data?.size) ||
     meaningful(data?.format) ||
     usefulFallback(data?.source) ||
+    (isResearchView && (Boolean(hasFlaggedFields) || hasMissingFields))
+  const hasContent =
+    hasCardContent ||
+    knownIssues.length > 0 ||
     usefulFallback(sd?.hf_repo) ||
     usefulFallback(sd?.dataset_name) ||
     sd?.samples_number != null ||
-    meaningful(sd?.source_type) ||
-    (isResearchView && (Boolean(hasFlaggedFields) || hasMissingFields))
-
-  if (!hasContent) return null
+    meaningful(sd?.source_type)
 
   const [open, setOpen] = useState(defaultOpen)
+  if (!hasContent) return null
+
   const sectionLinks: { label: string; id: string }[] = [
     ...(methodology.metrics?.length || tasks.length || audience.length || meaningful(data?.size) || meaningful(data?.format) || usefulFallback(data?.source) || usefulFallback(sd?.hf_repo) || usefulFallback(sd?.dataset_name) || sd?.samples_number != null
       ? [{ label: "dataset", id: "bc-section-dataset" }, { label: "methodology", id: "bc-section-methodology" }]
@@ -4619,60 +4625,73 @@ function BenchmarkCardCollapsible({
   }
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger asChild>
-        <button
-          type="button"
-          className="ec-card flex w-full items-center justify-between text-left transition-colors hover:bg-[color:var(--bg-warm)]"
-          style={{ padding: "14px 20px" }}
-        >
-          <div className="flex items-center gap-3 flex-wrap">
+      <div className="ec-card flex items-center transition-colors hover:bg-[color:var(--bg-warm)]" style={{ padding: 0 }}>
+        <CollapsibleTrigger asChild>
+          <button type="button" className="flex shrink-0 items-center gap-3 text-left" style={{ padding: "14px 0 14px 20px" }}>
             <BookOpen className="h-4 w-4" style={{ color: "var(--fg-muted)" }} />
             <span className="kicker kicker-fg">Benchmark card</span>
-            {sectionLinks.length > 0 && (
-              <span className="flex items-center gap-1.5 flex-wrap">
-                {sectionLinks.map((s, i) => (
-                  <span key={s.id} className="inline-flex items-center gap-1.5">
-                    {i > 0 && (
+          </button>
+        </CollapsibleTrigger>
+        {(hasCardContent || hasFlaggedFields || hasMissingFields) && (
+          <span className="ml-1.5 inline-flex">
+            <AutoBenchmarkCardsInfo sourcePath={sourcePath} />
+          </span>
+        )}
+        <CollapsibleTrigger asChild>
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-label="Toggle benchmark card"
+            className="flex min-w-0 flex-1 items-center justify-between gap-3 self-stretch text-left"
+            style={{ padding: "0 20px 0 12px" }}
+          >
+            <div className="flex items-center gap-3 flex-wrap">
+              {sectionLinks.length > 0 && (
+                <span className="flex items-center gap-1.5 flex-wrap">
+                  {sectionLinks.map((s, i) => (
+                    <span key={s.id} className="inline-flex items-center gap-1.5">
+                      {i > 0 && (
+                        <span
+                          className="font-mono text-[10px]"
+                          style={{ color: "var(--fg-subtle)" }}
+                          aria-hidden
+                        >
+                          ·
+                        </span>
+                      )}
                       <span
-                        className="font-mono text-[10px]"
-                        style={{ color: "var(--fg-subtle)" }}
-                        aria-hidden
-                      >
-                        ·
-                      </span>
-                    )}
-                    <span
-                      role="link"
-                      tabIndex={0}
-                      onClick={(e) => {
-                        e.preventDefault()
-                        e.stopPropagation()
-                        handleSectionJump(s.id)
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
+                        role="link"
+                        tabIndex={0}
+                        onClick={(e) => {
                           e.preventDefault()
                           e.stopPropagation()
                           handleSectionJump(s.id)
-                        }
-                      }}
-                      className="font-mono text-[10px] uppercase tracking-[0.12em] cursor-pointer hover:underline"
-                      style={{ color: "var(--fg-subtle)" }}
-                    >
-                      {s.label}
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            handleSectionJump(s.id)
+                          }
+                        }}
+                        className="font-mono text-[10px] uppercase tracking-[0.12em] cursor-pointer hover:underline"
+                        style={{ color: "var(--fg-subtle)" }}
+                      >
+                        {s.label}
+                      </span>
                     </span>
-                  </span>
-                ))}
-              </span>
+                  ))}
+                </span>
+              )}
+            </div>
+            {open ? (
+              <ChevronUp className="h-4 w-4" style={{ color: "var(--fg-muted)" }} />
+            ) : (
+              <ChevronDown className="h-4 w-4" style={{ color: "var(--fg-muted)" }} />
             )}
-          </div>
-          {open ? (
-            <ChevronUp className="h-4 w-4" style={{ color: "var(--fg-muted)" }} />
-          ) : (
-            <ChevronDown className="h-4 w-4" style={{ color: "var(--fg-muted)" }} />
-          )}
-        </button>
-      </CollapsibleTrigger>
+          </button>
+        </CollapsibleTrigger>
+      </div>
       <CollapsibleContent className="mt-2">
         <BenchmarkCardPanel
           card={card}

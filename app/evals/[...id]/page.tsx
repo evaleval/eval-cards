@@ -10,6 +10,7 @@ import { EvalDetail } from "@/components/eval-detail"
 import { MergedBenchmarkView } from "@/components/merged-benchmark-view"
 import { ParamRangePicker } from "@/components/param-range-picker"
 import { useAudienceMode } from "@/components/audience-mode-provider"
+import { AutoBenchmarkCardsInfo } from "@/components/auto-benchmarkcards-info"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
 import {
   buildCrossSourceContext,
@@ -501,7 +502,10 @@ function CompositeEvalView({
           )}
           <span>{summary.metric_config.lower_is_better ? "Lower is better ↓" : "Higher is better ↑"}</span>
         </div>
-        <p className="ec-page-lede">{lede}</p>
+        <div className="flex items-start gap-2">
+          <p className="ec-page-lede">{lede}</p>
+          {(overview || goal) && <AutoBenchmarkCardsInfo sourcePath={summary.benchmark_card_source_path} />}
+        </div>
 
         <div className="ec-page-meta mt-2">
           <div className="ec-page-meta-item">
@@ -528,7 +532,10 @@ function CompositeEvalView({
       {/* POLICY NOTE (policy mode only) ----------------------------------- */}
       {isPolicy && (overview || limitations || audienceText) && (
         <section className="ec-card warm" style={{ padding: "20px 24px" }}>
-          <div className="kicker mb-3">At a glance</div>
+          <div className="mb-3 flex items-center gap-1.5">
+            <span className="kicker">At a glance</span>
+            <AutoBenchmarkCardsInfo sourcePath={summary.benchmark_card_source_path} />
+          </div>
           <dl className="grid gap-y-2.5 text-[14px]" style={{ gridTemplateColumns: "max-content 1fr", columnGap: 24 }}>
             {overview && (
               <>

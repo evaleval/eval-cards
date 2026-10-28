@@ -21,6 +21,7 @@
       "https://storage.googleapis.com/crfm-helm-public/capabilities/benchmark_output/releases/v1.12.0/groups/core_scenarios.json"
     ]
   },
+  "benchmark_card_source_path": "cards/helm-capabilities.json",
   "benchmark_card": {
     "benchmark_details": {
       "name": "Holistic Evaluation of Language Models (HELM)",

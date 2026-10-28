@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react"
 import { BookOpen, ChevronDown, ChevronUp, ExternalLink, FileText, Globe, Layers, ScrollText, Tag, Users } from "lucide-react"
 import { SignalTooltip } from "@/components/signals/signal-tooltip"
+import { AutoBenchmarkCardsInfo } from "@/components/auto-benchmarkcards-info"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
 import { getKnownIssues } from "@/lib/known-issues"
 import { KnownIssuesPanel } from "@/components/known-issues-panel"
@@ -221,6 +222,11 @@ export function PolicyOverview({ summary }: PolicyOverviewProps) {
     audienceJoined && audienceJoined.toLowerCase() !== "not specified"
       ? audienceJoined
       : ""
+  const hasCardMetadata = Boolean(
+    overview || goal || caveatText || audienceText || showLicense || resources.length > 0 ||
+    (cardMatchesEval && ((card?.benchmark_details?.domains?.length ?? 0) > 0 ||
+      (card?.benchmark_details?.languages?.length ?? 0) > 0)),
+  )
 
   return (
     <section className="ec-card warm" style={{ padding: "20px 24px" }}>
@@ -229,6 +235,7 @@ export function PolicyOverview({ summary }: PolicyOverviewProps) {
         <span className="kicker kicker-fg" style={{ fontSize: 12, letterSpacing: "0.16em" }}>
           At a glance
         </span>
+        {hasCardMetadata && <AutoBenchmarkCardsInfo sourcePath={summary.benchmark_card_source_path} />}
         <span
           className="font-mono text-[10px] uppercase tracking-[0.12em]"
           style={{ color: "var(--fg-subtle)" }}
