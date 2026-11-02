@@ -95,8 +95,10 @@ describe("surfaces with no comparison data", () => {
 
     for (const view of [mount, scores]) {
       expect(view.text).toContain("Overlaps only (0)")
-      expect(view.text).toContain("paperswithcode%2Fterminal-bench-2")
-      expect(view.text).toContain("llm-stats%2Fterminal-bench-2")
+      // Row sub-labels show the decoded id, never the `%2F` route form.
+      expect(view.text).toContain("paperswithcode/terminal-bench-2")
+      expect(view.text).toContain("llm-stats/terminal-bench-2")
+      expect(view.text).not.toContain("%2F")
     }
     expect(loaded[0].text).toContain("Overlaps only (1)")
     expect(loaded[0].text).not.toContain("paperswithcode%2Fterminal-bench-2")
@@ -152,8 +154,9 @@ describe("surfaces with no comparison data", () => {
     const [empty] = await render(null)
     expect(empty.text).toContain("4 shown")
     expect(empty.text).toContain("Overlaps only (0)")
-    expect(empty.text).toContain("paperswithcode%2Fterminal-bench-2")
-    expect(empty.text).toContain("llm-stats%2Fterminal-bench-2")
+    expect(empty.text).toContain("paperswithcode/terminal-bench-2")
+    expect(empty.text).toContain("llm-stats/terminal-bench-2")
+    expect(empty.text).not.toContain("%2F")
     expect(empty.addModelButtons).toBe(0)
     const [loaded] = await render(full)
     expect(loaded.text).toContain("Overlaps only (1)")

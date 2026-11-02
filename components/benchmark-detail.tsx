@@ -3284,7 +3284,7 @@ export function BenchmarkDetail({
     return toggled.filter(
       (r) =>
         r.canonicalDisplayName.toLowerCase().includes(query) ||
-        r.canonicalKey.toLowerCase().includes(query) ||
+        humanizeEvaluationId(r.canonicalKey).toLowerCase().includes(query) ||
         r.appearances.some((a) => a.familyName.toLowerCase().includes(query)),
     )
   }, [overlapsRows, overlapsFilter, benchmarkSearch])
@@ -5654,7 +5654,7 @@ export function BenchmarkDetail({
                           {row.canonicalDisplayName}
                         </div>
                         <div className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[color:var(--fg-subtle)]">
-                          {row.canonicalKey}
+                          {humanizeEvaluationId(row.canonicalKey)}
                         </div>
                       </div>
                       <div className={`text-center font-mono text-[12px] tabular-nums ${strongText}`}>

@@ -388,12 +388,25 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
       // raw 1-10 "points" carry a curated conversion onto [0,1] registry
       // bounds, so they ARE percent-displayable despite the plain unit.
       // Only groups the producer can't settle fall to plain-unit display.
+      // An appearance with no unit at all adopts its siblings' unit: it is
+      // the same benchmark reported by a source that didn't stamp one
+      // (paperswithcode's vending-bench-2 balance beside llm-stats' "usd"),
+      // and a null must not drag the row onto the percent path. Siblings
+      // that DISAGREE on a non-null unit still get no plain unit.
+      const statedUnits = new Set(
+        collected
+          .map((c) => (c.unit ?? "").trim().toLowerCase())
+          .filter((u) => u !== ""),
+      )
+      const sharedUnit =
+        statedUnits.size === 1
+          ? (collected.find((c) => (c.unit ?? "").trim() !== "")?.unit ?? null)
+          : null
       const plainUnit =
         !scaleGroup &&
-        collected.length > 0 &&
-        collected.every((c) => plainUnitFor(c.score, c.unit) !== null) &&
-        new Set(collected.map((c) => (c.unit ?? "").trim().toLowerCase())).size === 1
-          ? collected[0].unit
+        sharedUnit != null &&
+        collected.every((c) => plainUnitFor(c.score, sharedUnit) !== null)
+          ? sharedUnit
           : null
 
       let scaled: OverlapAppearance[]
@@ -410,7 +423,12 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
         })
       } else if (plainUnit) {
         useHigh = false
-        scaled = [...collected]
+        // Re-label every appearance in the shared unit so a unit-less
+        // sibling reads "16484 usd", not the per-row percent guess.
+        scaled = collected.map((c) => ({
+          ...c,
+          displayScore: formatPlainUnitScore(c.score, plainUnit),
+        }))
       } else {
         // Legacy heuristic (old snapshots): cross-appearance scale
         // harmonisation only makes sense for ≥2 appearances. A lone

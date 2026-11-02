@@ -679,6 +679,36 @@ describe("buildOverlapRows: plain-quantity units", () => {
     expect(rows[0].appearances[0].displayScore).toBe("0.0012 usd")
   })
 
+  it("lets a unit-less sibling adopt the row's shared physical unit", () => {
+    // Live case: llm-stats stamps vending-bench-2 "usd", paperswithcode
+    // reports the same balance with no unit. One null must not drag the
+    // row onto the percent path ("16484.1%").
+    const idx = comparisonIndexOf({
+      "fam-a%2Fmmlu": evalEntry("fam-a%2Fmmlu", [
+        metricEntry({ unit: "usd", scores: [ownRow(16484, { scale_conversion: "no_bounds", score_canonical: 16484 })] }),
+      ]),
+      "fam-b%2Fmmlu": evalEntry("fam-b%2Fmmlu", [
+        metricEntry({ unit: null, scores: [ownRow(16484.21, { scale_conversion: "no_bounds", score_canonical: 16484.21 })] }),
+      ]),
+    })
+    const rows = build({ benchmarkIndex: [MMLU_INDEX], comparisonIndex: idx })
+    expect(rows).toHaveLength(1)
+    expect(rows[0].plainUnit).toBe("usd")
+    expect(rows[0].isPercentScale).toBe(false)
+    expect(rows[0].min).toBe(16484)
+    expect(rows[0].max).toBe(16484.21)
+    expect(rows[0].appearances.map((a) => a.displayScore)).toEqual(["16484 usd", "16484 usd"])
+  })
+
+  it("gives no plain unit when siblings state different units", () => {
+    const idx = comparisonIndexOf({
+      "fam-a%2Fmmlu": evalEntry("fam-a%2Fmmlu", [metricEntry({ unit: "usd", scores: [ownRow(16484)] })]),
+      "fam-b%2Fmmlu": evalEntry("fam-b%2Fmmlu", [metricEntry({ unit: "points", scores: [ownRow(16484.21)] })]),
+    })
+    const rows = build({ benchmarkIndex: [MMLU_INDEX], comparisonIndex: idx })
+    expect(rows[0].plainUnit).toBeNull()
+  })
+
   it("keeps the magnitude heuristic when the unit does not settle the scale", () => {
     const rows = build({
       summaryCandidates: [candidate({ score: 1525, unit: null })],
