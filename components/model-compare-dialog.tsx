@@ -418,14 +418,14 @@ export function ModelCompareDialog({
                                   model.reproducibility_summary && model.reproducibility_summary.has_reproducibility_gap_count > 0 ? (
                                     <div>
                                       <div className="font-medium">
-                                        {model.reproducibility_summary.has_reproducibility_gap_count} setup gaps
+                                        {model.reproducibility_summary.has_reproducibility_gap_count} with a reproducibility gap
                                       </div>
                                       <div className="mt-0.5 text-[12px] text-[color:var(--fg-muted)]">
                                         Out of {model.reproducibility_summary.results_total} reported scores
                                       </div>
                                     </div>
                                   ) : (
-                                    <span className="text-[color:var(--fg-muted)]">No setup gaps reported</span>
+                                    <span className="text-[color:var(--fg-muted)]">No reproducibility gaps</span>
                                   )
                                 ) : null}
                                 {row.key === "latest" ? (

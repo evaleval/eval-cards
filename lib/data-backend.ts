@@ -92,6 +92,10 @@ export async function getEvalTrajectories(evalId: string) {
   return (await viewBackend()).getEvalTrajectories(evalId)
 }
 
+export async function getEvalRowReproducibility(resultRow: number, snapshotId: string) {
+  return (await viewBackend()).getEvalRowReproducibility(resultRow, snapshotId)
+}
+
 /**
  * Resolve an evaluator-org slug (/evaluators/<slug>) to the facts the page
  * metadata + OG card need: canonical org name, evals-reported count, and

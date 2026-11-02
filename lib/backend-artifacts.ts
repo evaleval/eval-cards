@@ -31,11 +31,8 @@ export interface BackendManifestStatus {
 // EvalCards interpretive signals v1.0
 // ---------------------------------------------------------------------------
 
-// NOTE: the view layer currently emits `populated_count`/`required_count`
-// and no `has_reproducibility_gap` boolean — the spec'd field names below
-// are what the backend SHOULD emit (INTERPRETIVE_SIGNALS.md) but does not
-// yet. Consumers must treat all of these as possibly absent and derive the
-// gap from `missing_fields` until the producer catches up.
+// The view layer emits `populated_count`/`required_count`; the
+// `*_field_count` spellings are the v1 fixtures'.
 export interface ReproducibilityGap {
   has_reproducibility_gap?: boolean
   missing_fields: string[]
@@ -43,6 +40,10 @@ export interface ReproducibilityGap {
   populated_field_count?: number
   required_count?: number
   populated_count?: number
+  /** One character per setup item, in the order of `SETUP_ITEMS`
+   *  (lib/setup-items.ts): d disclosed, m missing, n not applicable,
+   *  u applicability unknown. */
+  item_states?: string
   signal_version?: string
 }
 
@@ -214,6 +215,8 @@ export interface CorpusAggregates {
   signal_version: string
   stratification_dimensions: ["category"]
   reproducibility: Stratified<ReproducibilityCorpusBlock>
+  /** In item order. */
+  setup_items?: SetupItemFields[]
   completeness: Stratified<CompletenessCorpusBlock>
   provenance: Stratified<ProvenanceCorpusBlock>
   comparability: Stratified<ComparabilityCorpusBlock>
@@ -251,13 +254,33 @@ export interface ReproducibilityCorpusBlock {
   total_triples: number
   triples_with_reproducibility_gap: number
   reproducibility_gap_rate: number | null
-  agentic_triples: number
+  /** Keyed by setup item id. */
   per_field_missingness: Record<string, {
     missing_count: number
     missing_rate: number | null
     denominator: "all_triples" | "agentic_only"
     denominator_count: number
   }>
+}
+
+/** The field and value that disclosed one setup item on one result row. */
+export interface ReproducibilityEvidence {
+  item: string
+  field: string
+  value: string
+}
+
+/** /api/eval-row-reproducibility payload: evidence for the row's disclosed
+ *  items, and the evidence paths each setup item accepts. */
+export interface EvalRowReproducibility {
+  evidence: ReproducibilityEvidence[]
+  accepted_fields: Record<string, string[]>
+}
+
+/** One setup item and the evidence paths that disclose it. */
+export interface SetupItemFields {
+  id: string
+  accepted_fields: string[]
 }
 
 export interface CompletenessCorpusBlock {

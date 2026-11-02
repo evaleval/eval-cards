@@ -28,30 +28,47 @@ and $\mathrm{pop}(f, b)$ is defined analogously for a benchmark $b$ and its Auto
 
 ## Reproducibility
 
-**In plain terms.** For each result, we check whether the small set of fields needed to re-run the evaluation are present. If any are missing, we flag the result.
+**In plain terms.** For each result, we check whether its record discloses each of eight setup items needed to re-run the evaluation. Some items apply only to some kinds of run. A result is flagged if any item that applies to it is undisclosed.
 
-The minimal reproducibility sub-schema is:
-
-$$
-F_{\mathrm{repro}} = \{\, \texttt{temperature},\ \texttt{max\_tokens} \,\}.
-$$
-
-For **agentic** evaluations, $F_{\mathrm{repro}}$ is extended with $\texttt{harness}$, $\texttt{eval\_plan}$, and $\texttt{eval\_limits}$.
-
-A result $r$ is flagged as a reproducibility gap if **any** required field is missing:
+**Disclosure.** Let $S_{\mathrm{repro}}$ be the set of eight setup items in the table below. Each item $k$ has a set of fields $F(k)$, and the item is disclosed if any of its fields is populated:
 
 $$
-G_{\mathrm{repro}}(r) = 1 - \prod_{f \in F_{\mathrm{repro}}} \mathrm{pop}(f, r).
+\mathrm{disc}(k, r) = \max_{f \in F(k)} \mathrm{pop}(f, r).
 $$
 
-That is, $G_{\mathrm{repro}}(r) = 0$ only when every field in $F_{\mathrm{repro}}$ is populated. The interface lists the specific missing fields, $\{\, f \in F_{\mathrm{repro}} : \mathrm{pop}(f, r) = 0 \,\}$.
+**Applicability.** Three properties of the run decide which items apply:
 
-Corpus-level reproducibility is the share of flagged triples, and per-field reporting uses the missingness rate:
+- whether the run is scored from log-probabilities, read from its scoring mode or stated output type;
+- whether the run involves reasoning, for example an affirmative reasoning effort or reasoning-token budget;
+- whether the evaluation has an agentic setup, for example an affirmative scaffold, context-compaction setting, agent plan or agent configuration.
+
+When nothing on a result says whether it involved reasoning or an agentic setup, the items that depend on it are left out of the check for that result.
+
+| Setup item | Fields (any one discloses the item) | Applies to |
+|---|---|---|
+| Decoding | `temperature`, `temperature_raw`, `top_p`, `top_k` | runs not scored from log-probabilities |
+| Reasoning budget | `reasoning`, `reasoning_effort`, `effort`, `reasoning_tokens` | reasoning runs |
+| Output length | `max_tokens`, `token_limit`, `message_limit`, `max_messages` | runs not scored from log-probabilities |
+| Harness | `eval_library.name`, `harness`, `framework`, `lm_eval_task`, `scaffold`, `eval_plan`, `agentic_eval_config` | all runs |
+| Harness version | `eval_library.version`, `eval_library_version`, `harness_version`, `lm_eval_task` | all runs |
+| Context handling | `compaction`, `context_management`, `truncation` | agentic runs |
+| Test set | `split`, `eval_split`, `subset`, `n_tasks`, `n_samples`, `sample_size` | all runs |
+| Attempts | `attempts`, `max_attempts`, `epochs`, `num_runs`, `repeats`, `samples`, `n_trajectories` | agentic runs |
+
+**Flag.** Let $A(r) \subseteq S_{\mathrm{repro}}$ be the setup items that apply to result $r$. A result is flagged as a reproducibility gap if an item that applies to it is undisclosed:
 
 $$
-\bar{G}_{\mathrm{repro}} = \frac{1}{|R|} \sum_{r \in R} G_{\mathrm{repro}}(r),
+G_{\mathrm{repro}}(r) = 1 - \prod_{k \in A(r)} \mathrm{disc}(k, r).
+$$
+
+The interface lists the undisclosed items that apply, $\{\, k \in A(r) : \mathrm{disc}(k, r) = 0 \,\}$.
+
+**Corpus level.** Let $\mathcal{T}$ be the set of (model, benchmark, split, metric) tuples with a score. A tuple is flagged if any of its results is flagged, and the corpus rate is the share of flagged tuples. For each item $k$, the reported share is the share of tuples in which some result leaves $k$ undisclosed while $k$ applies:
+
+$$
+\bar{G}_{\mathrm{repro}} = \frac{1}{|\mathcal{T}|} \sum_{t \in \mathcal{T}} \max_{r \in t} G_{\mathrm{repro}}(r),
 \qquad
-\bar{m}(f) = 1 - \frac{1}{|R|} \sum_{r \in R} \mathrm{pop}(f, r),\quad f \in F_{\mathrm{repro}}.
+\bar{m}(k) = \frac{1}{|\mathcal{T}|} \sum_{t \in \mathcal{T}} \max_{r \in t} \mathbf{1}\bigl[k \in A(r) \text{ and } \mathrm{disc}(k, r) = 0\bigr],\quad k \in S_{\mathrm{repro}}.
 $$
 
 ## Reporting completeness
@@ -78,7 +95,7 @@ $$
 
 The interface surfaces $C(b)$ alongside the count of fully missing fields, $|\{\, f \in F : s(f, b) = 0 \,\}|$. Across the corpus we report the median per-benchmark completeness, $\mathrm{median}_{b \in B}\, C(b)$, and per-field population rates, $\bar{p}(f) = \frac{1}{|B|} \sum_{b \in B} s(f, b)$.
 
-Completeness and reproducibility are distinct: $F_{\mathrm{repro}} \subset F$, so a result with no reproducibility gap may still have low completeness.
+Completeness and reproducibility are distinct, so a result with no reproducibility gap may still have low completeness.
 
 ## Provenance
 

@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest"
 
 import { mergedSummaryToEvalSummary } from "@/lib/merged-adapter"
-import {
-  evaluateReproducibilitySlots,
-  evidenceFromResult,
-} from "@/lib/reproducibility-slots"
 import type {
   MergedBenchmarkSummary,
   MergedObservationRow,
@@ -444,32 +440,31 @@ describe("mergedSummaryToEvalSummary — EvalDetail surface", () => {
     expect(adapted.metric_config.max_score).toBe(1)
   })
 
-  it("carries the harness through, so a source earns the same credit on both pages", () => {
-    // The reproducibility slots ask which harness produced the run. A row
-    // that answers that on its own source page must answer it here too.
+  it("puts the setup-item reading where source pages carry it", () => {
+    // The benchmark tile, the researcher card's chips and the row badge all
+    // read result.evalcards.annotations.reproducibility_gap, on merged and
+    // source pages alike.
+    // Merged rows ship only the item states; the adapter restores the
+    // members a source row's annotation carries.
     const adapted = mergedSummaryToEvalSummary(
       mergedPayload([
-        row({ eval_library: { name: "lm-evaluation-harness", version: "0.4.5" } }),
+        row({ item_states: "muuddumu", result_row: 7 }),
         row({
           model_info: { name: "Model B", id: "org/model-b" },
           model_route_id: "org%2Fmodel-b",
-          eval_library: {} as MergedObservationRow["eval_library"],
         }),
       ]),
     )
-    const [withLibrary, withoutLibrary] = adapted.model_results
-    expect(withLibrary.eval_library).toEqual({
-      name: "lm-evaluation-harness",
-      version: "0.4.5",
+    const [withGap, withoutGap] = adapted.model_results
+    expect(withGap.result.evalcards?.annotations?.reproducibility_gap).toEqual({
+      has_reproducibility_gap: true,
+      missing_fields: ["decoding", "test_set"],
+      populated_count: 2,
+      required_count: 4,
+      item_states: "muuddumu",
     })
-    const credited = evaluateReproducibilitySlots(evidenceFromResult(withLibrary))
-    expect(credited.slots.find((slot) => slot.id === "harness")?.state).toBe("disclosed")
-    expect(credited.slots.find((slot) => slot.id === "harness_pin")?.state).toBe("disclosed")
-
-    // An empty struct names nothing, so it earns nothing.
-    const uncredited = evaluateReproducibilitySlots(evidenceFromResult(withoutLibrary))
-    expect(uncredited.slots.find((slot) => slot.id === "harness")?.state).toBe("missing")
-    expect(uncredited.slots.find((slot) => slot.id === "harness_pin")?.state).toBe("missing")
+    expect(withGap.result_row).toBe(7)
+    expect(withoutGap.result.evalcards).toBeUndefined()
   })
 
   it("infers 0–100 bounds for percent-scale scores", () => {

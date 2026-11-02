@@ -3422,6 +3422,7 @@ export function EvalDetail({
                                     modelResult={modelResult}
                                     benchmarkKey={lb.benchmark_id ?? lb.composite_benchmark_key}
                                     evalName={lb.evaluation_name}
+                                    snapshotId={lb.snapshot_id}
                                   />
                                   <div className="flex justify-end">
                                     <FlagScoreButton
@@ -4469,6 +4470,7 @@ function MultiMetricLeaderboard({
                           modelResult={matchingResult}
                           benchmarkKey={summary.benchmark_id ?? summary.composite_benchmark_key}
                           evalName={summary.evaluation_name}
+                          snapshotId={summary.snapshot_id}
                         />
                         <div className="flex justify-end">
                           <FlagScoreButton

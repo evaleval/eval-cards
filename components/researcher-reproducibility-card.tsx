@@ -6,11 +6,8 @@ import { Term } from "@/components/term"
 import { SignalTooltip } from "@/components/signals/signal-tooltip"
 import type { ModelResultForBenchmark } from "@/lib/eval-processing"
 import type { GenerationConfig, ScoreDetails } from "@/lib/benchmark-schema"
-import {
-  evaluateReproducibilitySlots,
-  evidenceFromResult,
-  SLOT_FIELD_PATHS,
-} from "@/lib/reproducibility-slots"
+import type { EvalRowReproducibility } from "@/lib/backend-artifacts"
+import { SETUP_ITEMS, setupItemState, type SetupItem, type SetupItemState } from "@/lib/setup-items"
 
 interface ResearcherReproducibilityCardProps {
   modelResult: ModelResultForBenchmark
@@ -22,6 +19,8 @@ interface ResearcherReproducibilityCardProps {
    */
   benchmarkKey?: string
   evalName?: string
+  /** The snapshot the page's rows came from (`summary.snapshot_id`). */
+  snapshotId?: string | null
 }
 
 const KNOWN_DECODING_KEYS = ["temperature", "top_p", "top_k", "max_tokens", "seed", "reasoning"] as const
@@ -134,6 +133,20 @@ function formatValue(value: unknown): string | null {
   }
 }
 
+function notCountedReason(item: SetupItem & { state: SetupItemState }): string | undefined {
+  return item.state === "not_applicable" ? item.notApplicableReason : item.unknownReason
+}
+
+/** The backend sends each disclosed value as JSON text. */
+function formatEvidenceValue(value: string | null): string | null {
+  if (value === null) return null
+  try {
+    return formatValue(JSON.parse(value))
+  } catch {
+    return formatValue(value)
+  }
+}
+
 /** "protocol.reasoning_effort" -> "reasoning effort". The namespace is
  *  plumbing; the reader wants the field. */
 function fieldNameOf(path: string): string {
@@ -188,7 +201,7 @@ interface FieldSpec {
   value: string | null
   termKey?: string
   hint?: string
-  /** The slot this field belongs to does not apply to this run, so its
+  /** The setup item this field belongs to does not apply to this run, so its
    *  absence is not a disclosure failure. */
   notApplicable?: boolean
 }
@@ -209,10 +222,13 @@ export function ResearcherReproducibilityCard({
   modelResult,
   benchmarkKey,
   evalName,
+  snapshotId,
 }: ResearcherReproducibilityCardProps) {
   const [enrichedGen, setEnrichedGen] = useState<GenerationConfig | null>(null)
   const [enrichedScore, setEnrichedScore] = useState<ScoreDetails | null>(null)
   const [loading, setLoading] = useState(false)
+  const [evidence, setEvidence] = useState<EvalRowReproducibility | null>(null)
+  const [evidenceLoading, setEvidenceLoading] = useState(false)
 
   // Lazily top up generation_config / score_details from the model's full
   // record. The eval-detail leaderboard endpoint omits these fields; we only
@@ -254,6 +270,32 @@ export function ResearcherReproducibilityCard({
       cancelled = true
     }
   }, [modelResult, benchmarkKey, evalName])
+
+  // The field and value behind each disclosed item, and the fields each item
+  // accepts. Page payloads carry only the item states, so this row's
+  // evidence is fetched when the card mounts, which is when the row is
+  // expanded.
+  useEffect(() => {
+    const resultRow = modelResult.result_row
+    setEvidence(null)
+    if (resultRow == null || !snapshotId) return
+
+    let cancelled = false
+    setEvidenceLoading(true)
+    const params = new URLSearchParams({ row: String(resultRow), snapshot: snapshotId })
+    fetch(`/api/eval-row-reproducibility?${params.toString()}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled && data) setEvidence(data as EvalRowReproducibility)
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setEvidenceLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [modelResult.result_row, snapshotId])
 
   const gen = modelResult.result.generation_config ?? enrichedGen ?? undefined
   const args = gen?.generation_args ?? {}
@@ -395,47 +437,33 @@ export function ResearcherReproducibilityCard({
     },
   ]
 
-  // Mirror the signal-strip's required-fields allowlist (see
-  // BenchmarkSignalsStrip · BASE_REQUIRED_FIELDS / AGENTIC_REQUIRED_FIELDS).
-  // The signal scores reproducibility on temperature + max_tokens only
-  // (plus eval_plan + eval_limits when agentic), so the per-row dropdown
-  // showing all 15 fields was confusing — readers saw "0/15 disclosed"
-  // here but a different ratio in the strip above. Restrict this surface
-  // to the same labels so the two views agree.
-  //
-  // TODO(repro-allowlist): expand both views together once the corpus
-  // populates more fields reliably.
-  // Scored as SLOTS — one per decision a re-runner must pin down, each
-  // satisfiable by any of several fields, and each skipped when the knob
-  // does not exist for this run. The old rule asked every row for
-  // `temperature` and `max_tokens` and nothing else, which read ~0%
-  // across 98% of the corpus and gave a study disclosing scaffold, token
-  // budget and reasoning effort a flat 0/2. The slot table lives in
-  // config/reproducibility-slots.json and is meant to be edited there.
-  const slotSummary = useMemo(
+  const gap = modelResult.result.evalcards?.annotations?.reproducibility_gap
+  const items = useMemo(
     () =>
-      evaluateReproducibilitySlots(
-        evidenceFromResult({
-          ...modelResult,
-          generation_config: gen ?? modelResult.result.generation_config,
-          protocol_condition: modelResult.protocol_condition,
-        })
-      ),
-    [modelResult, gen]
+      SETUP_ITEMS.map((spec) => {
+        const found = evidence?.evidence.find((entry) => entry.item === spec.id)
+        return {
+          ...spec,
+          state: setupItemState(gap, spec.id),
+          field: found?.field ?? null,
+          value: found?.value ?? null,
+          accepted: evidence?.accepted_fields[spec.id] ?? [],
+        }
+      }),
+    [gap, evidence]
   )
 
-  // The audit grid still lists every field the source could have set; the
-  // slots decide what is SCORED.
-  const totalFields = slotSummary.applicable
-  const disclosedFields = slotSummary.disclosed
+  const disclosedFields = items.filter((item) => item.state === "disclosed").length
+  const totalFields = disclosedFields + items.filter((item) => item.state === "missing").length
 
-  // Fields the source reported that no slot scores — standard error, test
-  // instances, judge, and so on. Worth showing; never worth flagging as
+  // Fields the source reported that no setup item accepts: standard error,
+  // test instances, judge, and so on. Worth showing; never worth flagging as
   // missing, so only populated ones appear.
   const otherReportedFields = useMemo(() => {
+    if (!evidence) return []
     const scoredLabels = new Set(
-      slotSummary.slots
-        .flatMap((slot) => slot.candidates ?? [])
+      Object.values(evidence.accepted_fields)
+        .flat()
         .map((path) => path.slice(path.lastIndexOf(".") + 1).replace(/[^a-z0-9]/gi, "").toLowerCase()),
     )
     return groups
@@ -445,7 +473,7 @@ export function ResearcherReproducibilityCard({
           f.value !== null &&
           !scoredLabels.has(f.label.replace(/[^a-z0-9]/gi, "").toLowerCase()),
       )
-  }, [groups, slotSummary])
+  }, [groups, evidence])
 
   return (
     <section
@@ -468,7 +496,7 @@ export function ResearcherReproducibilityCard({
             <div className="text-[12px]" style={{ color: "var(--fg-muted)" }}>
               {disclosedFields === 0
                 ? "How this score was produced wasn't disclosed by the source."
-                : "What the source reported, against what re-running this evaluation needs. Controls this run does not have are marked n/a and left out of the score."}
+                : "What the source reported for each setup item a re-run needs. Items that do not apply to this run are marked n/a and left out of the score."}
             </div>
           </div>
         </div>
@@ -484,7 +512,7 @@ export function ResearcherReproducibilityCard({
             textTransform: "uppercase",
           }}
         >
-          {loading
+          {loading || evidenceLoading
             ? "loading…"
             : totalFields > 0
               ? `${disclosedFields}/${totalFields} applicable`
@@ -492,91 +520,84 @@ export function ResearcherReproducibilityCard({
         </span>
       </header>
 
-      {/* The slots, and why each one counts or doesn't. A bare percentage
-          with a moving denominator is unreadable; showing the slots is
-          what makes "3 of 4" mean something. */}
+      {/* The setup items, and why each one counts or doesn't. A bare
+          percentage with a moving denominator is unreadable; showing the
+          items is what makes "3 of 4" mean something. */}
       <div className="mb-4 flex flex-wrap gap-1.5">
-        {slotSummary.slots.map((slot) => {
+        {items.map((item) => {
           const style =
-            slot.state === "disclosed"
+            item.state === "disclosed"
               ? { color: "var(--fg)", border: "1px solid var(--fg-muted)" }
-              : slot.state === "missing"
+              : item.state === "missing"
                 ? { color: "var(--fg-muted)", border: "1px dashed var(--fg-muted)" }
                 : { color: "var(--fg-subtle)", border: "1px solid var(--border-soft)" }
           const mark =
-            slot.state === "disclosed"
+            item.state === "disclosed"
               ? "✓"
-              : slot.state === "missing"
+              : item.state === "missing"
                 ? "—"
-                : slot.state === "not_applicable"
+                : item.state === "not_applicable"
                   ? "n/a"
                   : "?"
           return (
             <span
-              key={slot.id}
+              key={item.id}
               className="inline-flex items-center gap-1.5 font-mono uppercase"
               style={{ fontSize: 9.5, letterSpacing: "0.08em", padding: "2px 6px", ...style }}
               title={
-                slot.state === "disclosed"
-                  ? `${slot.label}: disclosed via ${slot.satisfiedBy}`
-                  : slot.state === "missing"
-                    ? `${slot.label}: applies to this run but the source did not disclose it.${slot.hint ? ` ${slot.hint}` : ""}`
-                    : `${slot.label}: not counted. ${slot.reason ?? ""}`
+                item.state === "disclosed"
+                  ? item.field
+                    ? `${item.label}: disclosed via ${item.field}`
+                    : `${item.label}: disclosed`
+                  : item.state === "missing"
+                    ? `${item.label}: applies to this run but the source did not disclose it. ${item.hint}`
+                    : `${item.label}: not counted. ${notCountedReason(item) ?? ""}`
               }
             >
               <span aria-hidden="true">{mark}</span>
-              {slot.label}
+              {item.label}
             </span>
           )
         })}
       </div>
 
-      {/* What the source actually reported, per slot. The old fixed grid
-          listed every field the schema knows about and flagged the rest
-          "Not disclosed" — under a dynamic rule that grid says nothing
-          about what was scored, and contradicts the chips above whenever a
-          slot is n/a. This lists the evidence instead. */}
+      {/* What the source reported for each setup item. */}
       <div>
-        {slotSummary.slots.map((slot) => (
+        {items.map((item) => (
           <div
-            key={slot.id}
+            key={item.id}
             className="flex items-baseline justify-between gap-3 border-b border-dashed border-border/50 py-1.5 text-sm last:border-0"
           >
             <span className="min-w-0">
-              <span style={{ color: "var(--fg)" }}>{slot.label}</span>
-              {slot.state === "disclosed" && slot.satisfiedBy && (
+              <span style={{ color: "var(--fg)" }}>{item.label}</span>
+              {item.state === "disclosed" && item.field && (
                 <span className="ml-2 font-mono" style={{ fontSize: 11, color: "var(--fg-subtle)" }}>
-                  {fieldNameOf(slot.satisfiedBy)}
+                  {fieldNameOf(item.field)}
                 </span>
               )}
-              {slot.state === "missing" && slot.candidates && slot.candidates.length > 0 && (
+              {item.state === "missing" && item.accepted.length > 0 && (
                 <span className="ml-2" style={{ fontSize: 11, color: "var(--fg-subtle)" }}>
-                  looked for {slot.candidates.map(fieldNameOf).join(", ")}
+                  looked for {item.accepted.map(fieldNameOf).join(", ")}
                 </span>
               )}
             </span>
-            {slot.state === "disclosed" ? (
+            {item.state === "disclosed" ? (
               <span className="font-medium tabular-nums shrink-0">
-                {formatValue(slot.value) ?? "reported"}
+                {formatEvidenceValue(item.value) ?? "reported"}
               </span>
-            ) : slot.state === "missing" ? (
-              <SignalTooltip
-                content={
-                  slot.hint ??
-                  "This applies to the run but the source did not report it, so the result may not be exactly reproducible."
-                }
-              >
+            ) : item.state === "missing" ? (
+              <SignalTooltip content={item.hint}>
                 <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 dark:text-amber-300 cursor-help shrink-0">
                   <AlertTriangle className="h-3 w-3" /> Not disclosed
                 </span>
               </SignalTooltip>
             ) : (
-              <SignalTooltip content={slot.reason ?? "Not counted for this run."}>
+              <SignalTooltip content={notCountedReason(item) ?? "Not counted for this run."}>
                 <span
                   className="text-xs font-medium cursor-help shrink-0"
                   style={{ color: "var(--fg-subtle)" }}
                 >
-                  {slot.state === "not_applicable" ? "n/a" : "unknown"}
+                  {item.state === "not_applicable" ? "n/a" : "unknown"}
                 </span>
               </SignalTooltip>
             )}
@@ -599,11 +620,6 @@ export function ResearcherReproducibilityCard({
           </div>
         </div>
       )}
-
-      {/* Prompt-template block hidden until the corpus reliably reports
-          it; see TODO(repro-allowlist) above. The signal score doesn't
-          consider prompt_template either, so showing it here would
-          re-introduce the disagreement we just fixed. */}
 
       {modelResult.source_metadata.source_url && (
         <div className="mt-3">

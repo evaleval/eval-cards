@@ -36,7 +36,7 @@ Every record is assessed against four signals. Learn to read them and most of th
 
 | Signal | Question it answers | What a low score means |
 |---|---|---|
-| **R · Reproducibility** | Could a third party re-run this evaluation? | Prompts, decoding settings, harness version, seeds, or code are undisclosed. |
+| **R · Reproducibility** | Could a third party re-run this evaluation? | At least one of the eight setup items that applies to the result is undisclosed, such as decoding, output length or the harness version. |
 | **C · Completeness** | Does the record meet normal reporting expectations for this kind of model? | Whole categories (e.g. safety, robustness, fairness) may be missing. |
 | **P · Provenance & Risk** | Who ran it, and what real-world property does it measure? | Distinguishes **first-party** (the developer) from **third-party** (independent) evaluators. |
 | **X · Comparability** | Can two scores on the same benchmark be put side by side? | Different splits, metric variants, or units make a direct ranking invalid. |
@@ -78,7 +78,7 @@ For example: *MMLU (family) → MMLU-Pro (composite) → a single benchmark → 
    > 🖼️ **Screenshot — `13-card-summary-full.png`**
    > *What to capture:* A full model page in **Summary View** (e.g. `/models/anthropic/claude-opus-4.7`).
 
-2. **Read the `DOCUMENTED` badge.** Near the top, a percentage (e.g. "36%, 14 / 39 reported") tells you for how many of the model's reported scores the **prompting/run setup is documented** well enough to re-run. The rest are missing details like temperature, max tokens, or the harness. (This is the model-level *Reproducibility* read; it's not about completed benchmark cards.) A low number here is common, and that's deliberate.
+2. **Read the `DOCUMENTED` badge.** Near the top, a percentage (e.g. "36%, 14 / 39 reported") tells you how many of the model's reported scores **disclose every setup item that applies to them**, which is what a re-run needs. The rest leave at least one item undisclosed, such as decoding, output length or the harness version. (This is the model-level *Reproducibility* read; it's not about completed benchmark cards.) A low number here is common, and that's deliberate.
 
 3. **Check "Who reports what" (§3).** A donut and per-category bars split results into **first-party** (the developer's own numbers) vs **third-party** (independent). This is your fastest read on how independent the evidence is.
 

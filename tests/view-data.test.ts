@@ -25,7 +25,7 @@ async function writeSyntheticStageJSnapshot(
     includeTrajectories?: boolean
     includeCollectionContext?: boolean
     includeJudgeColumns?: boolean
-    includeScoringMode?: boolean
+    includeReproducibilityEvidence?: boolean
     includeMixedScaleSlice?: boolean
     includeBenchmarkCardSources?: boolean
     dropRawModelIds?: boolean
@@ -43,8 +43,9 @@ async function writeSyntheticStageJSnapshot(
   // includeJudgeColumns=false (the default) emulates a snapshot from
   // before the judge axis: no judge_condition / is_headline / metric_source_label /
   // comparability_status / score_published columns on eval_results_view.
-  // includeScoringMode=false (the default) emulates a snapshot from before
-  // the producer classified a row's scoring mode: no scoring_mode column.
+  // includeReproducibilityEvidence=false (the default) emulates a snapshot from
+  // before the backend scored setup items: no reproducibility_evidence column
+  // and no headline setup_items.
   // includeMixedScaleSlice adds a second mt-bench slice whose two sources
   // publish the same bounds-less metric as a percent and as a fraction.
   const {
@@ -53,7 +54,7 @@ async function writeSyntheticStageJSnapshot(
     includeTrajectories = includeCollections,
     includeCollectionContext = false,
     includeJudgeColumns = false,
-    includeScoringMode = false,
+    includeReproducibilityEvidence = false,
     includeMixedScaleSlice = false,
     includeBenchmarkCardSources = false,
     dropRawModelIds = false,
@@ -422,9 +423,11 @@ async function writeSyntheticStageJSnapshot(
         -- OLD_SHAPE_ANNOTATIONS below reduces this struct to that shape.
         struct_pack(
           reproducibility_gap := struct_pack(
-            missing_fields := ['temperature']::VARCHAR[],
+            has_reproducibility_gap := true,
+            missing_fields := ['decoding']::VARCHAR[],
             populated_count := 1,
-            required_count := 2
+            required_count := 2,
+            item_states := 'muuduuuu'
           ),
           provenance := struct_pack(
             source_type := 'documentation',
@@ -459,7 +462,11 @@ async function writeSyntheticStageJSnapshot(
         NULL::VARCHAR AS metric_source_label,
         'ok' AS comparability_status,
         'log_prob' AS scoring_mode,
-        0.8::DOUBLE AS score_published
+        0.8::DOUBLE AS score_published,
+        [
+          {'item': 'harness', 'field': 'row.eval_library', 'value': '"openai-evals"'},
+          {'item': 'test_set', 'field': 'score.sample_size', 'value': '10'}
+        ] AS reproducibility_evidence
     `
   )
 
@@ -768,7 +775,7 @@ async function writeSyntheticStageJSnapshot(
           "comparability_status",
           "score_published",
         ]),
-    ...(includeScoringMode ? [] : ["scoring_mode"]),
+    ...(includeReproducibilityEvidence ? [] : ["reproducibility_evidence"]),
   ]
   const annotationsProjection = includeJudgeColumns
     ? ""
@@ -1007,6 +1014,14 @@ async function writeSyntheticStageJSnapshot(
         overall: reproducibilityBlock,
         by_category: { Reasoning: reproducibilityBlock },
       },
+      ...(includeReproducibilityEvidence
+        ? {
+            setup_items: [
+              { id: "decoding", accepted_fields: ["generation_args.temperature"] },
+              { id: "harness", accepted_fields: ["row.eval_library"] },
+            ],
+          }
+        : {}),
       completeness: {
         overall: completenessBlock,
         by_category: { Reasoning: completenessBlock },
@@ -1146,7 +1161,7 @@ async function withSnapshot(
     includeTrajectories?: boolean
     includeCollectionContext?: boolean
     includeJudgeColumns?: boolean
-    includeScoringMode?: boolean
+    includeReproducibilityEvidence?: boolean
     includeMixedScaleSlice?: boolean
     includeBenchmarkCardSources?: boolean
     dropRawModelIds?: boolean
@@ -1536,21 +1551,55 @@ describe("collection surfaces (collection-benchmark-page spec)", () => {
 })
 
 
-describe("the producer's scoring_mode column", () => {
-  it("projects it when the snapshot carries it", async () => {
-    await withSnapshot({ includeScoringMode: true }, async (dataBackend) => {
+describe("setup-item evidence for one result row", () => {
+  it("looks a row up by the result_row and snapshot its page carries", async () => {
+    await withSnapshot({ includeReproducibilityEvidence: true }, async (dataBackend) => {
       const summary = await dataBackend.getEvalSummaryById("mmlu")
-      expect(summary!.model_results[0].scoring_mode).toBe("log_prob")
+      const row = summary!.model_results.find((r) => r.model_route_id === "openai%2Fgpt-5")!
+      expect(Number.isInteger(row.result_row)).toBe(true)
+      expect(summary!.snapshot_id).toBeTruthy()
+
+      const evidence = await dataBackend.getEvalRowReproducibility(row.result_row!, summary!.snapshot_id!)
+      expect(evidence!.evidence.find((entry) => entry.item === "harness")).toEqual({
+        item: "harness",
+        field: "row.eval_library",
+        value: '"openai-evals"',
+      })
+      expect(evidence!.accepted_fields).toEqual({
+        decoding: ["generation_args.temperature"],
+        harness: ["row.eval_library"],
+      })
+      expect(await dataBackend.getEvalRowReproducibility(1_000_000, summary!.snapshot_id!)).toBeNull()
     })
   })
 
-  it("reads as unknown on a snapshot without the column, rather than failing the query", async () => {
-    // The whole page binds one SELECT, so an unguarded reference to a
-    // column an older snapshot lacks would empty it, not degrade it.
+  it("refuses a row id from a page built on another snapshot", async () => {
+    await withSnapshot({ includeReproducibilityEvidence: true }, async (dataBackend) => {
+      const summary = await dataBackend.getEvalSummaryById("mmlu")
+      const row = summary!.model_results[0]
+      expect(await dataBackend.getEvalRowReproducibility(row.result_row!, "2020-01-01 00:00:00")).toBeNull()
+    })
+  })
+
+  it("gives a merged row the same result_row, the snapshot and its setup-item reading", async () => {
+    await withSnapshot({ includeReproducibilityEvidence: true }, async (dataBackend) => {
+      const source = await dataBackend.getEvalSummaryById("mmlu")
+      const merged = await dataBackend.getMergedBenchmarkSummary("mmlu")
+      const sourceRow = source!.model_results.find((r) => r.model_route_id === "openai%2Fgpt-5")
+      const mergedRow = merged!.results.find(
+        (r) => r.model_route_id === "openai%2Fgpt-5" && r.evaluation_id === "mmlu",
+      )
+      expect(merged!.snapshot_id).toBe(source!.snapshot_id)
+      expect(mergedRow!.result_row).toBe(sourceRow!.result_row)
+      expect(mergedRow!.item_states).toBe("muuduuuu")
+    })
+  })
+
+  it("returns nothing on a snapshot without the evidence column", async () => {
     await withSnapshot({}, async (dataBackend) => {
       const summary = await dataBackend.getEvalSummaryById("mmlu")
-      expect(summary!.model_results.length).toBeGreaterThan(0)
-      expect(summary!.model_results[0].scoring_mode).toBeUndefined()
+      const row = summary!.model_results[0]
+      expect(await dataBackend.getEvalRowReproducibility(row.result_row!, summary!.snapshot_id!)).toBeNull()
     })
   })
 })

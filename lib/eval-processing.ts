@@ -441,16 +441,10 @@ export interface ModelResultForBenchmark {
   /** The source's own label for the published number (`gpt_score`).
    *  Display and provenance only — never a key. */
   metric_source_label?: string | null
-  /** The harness that produced the run, and its version when the source
-   *  named one. Carried on the row because the reproducibility slots ask
-   *  which harness a re-runner would have to obtain and pin. */
-  eval_library?: EvalLibrary | null
-  /** How the score was produced: `generative` when the model wrote the
-   *  answer, `log_prob` when the harness scored likelihoods over fixed
-   *  choices. The producer's own classification, so it outranks anything
-   *  inferred from a row's raw fields; absent on a snapshot predating the
-   *  column, and null when the producer could not classify the row. */
-  scoring_mode?: string | null
+  /** This row's id in the server's `eval_results_view` table; with the
+   *  page's `snapshot_id` it fetches the row's setup-item evidence from
+   *  /api/eval-row-reproducibility. */
+  result_row?: number
   /** The row's comparability verdict; only `ok` groups were assessed. */
   comparability_status?: ComparabilityStatus | null
   /** The number the source published, before any canonical-scale
@@ -472,6 +466,8 @@ export interface ModelResultForBenchmark {
 
 export interface BenchmarkEvalSummary extends SignalSummaries {
   evaluation_name: string
+  /** The snapshot the page's rows were read from; see `result_row`. */
+  snapshot_id?: string | null
   /** Registry display names for the judge model ids named in this page's
    *  judge conditions, keyed by the raw id the condition carries (which
    *  can be a dated variant that folded into the named model). Built
@@ -738,9 +734,11 @@ export interface MergedObservationRow {
    *  sample count). Absent when the fact row carries none. */
   source_data?: SourceData
   generation_config?: GenerationConfig
-  /** Same meaning as on ModelResultForBenchmark: the harness the
-   *  reproducibility slots ask a re-runner to obtain and pin. */
-  eval_library?: EvalLibrary | null
+  /** The row's setup-item states (see `ReproducibilityGap.item_states`);
+   *  the adapter expands them where source pages carry the reading, under
+   *  `result.evalcards.annotations.reproducibility_gap`. */
+  item_states?: string
+  result_row?: number
   is_verified_evaluator?: boolean
   /** De-aliased evaluator identity (canonical display when resolvable). */
   evaluator_display_name?: string
@@ -756,8 +754,6 @@ export interface MergedObservationRow {
   is_headline?: boolean | null
   metric_source_label?: string | null
   comparability_status?: ComparabilityStatus | null
-  /** Same meaning as on ModelResultForBenchmark. */
-  scoring_mode?: string | null
   /** The number the source published, before any canonical-scale
    *  conversion applied to `score`. */
   score_published?: number
@@ -774,6 +770,8 @@ export interface MergedObservationRow {
 export interface MergedBenchmarkSummary {
   /** Discriminator vs the per-source BenchmarkEvalSummary payload. */
   merged: true
+  /** The snapshot the rows were read from; see `result_row`. */
+  snapshot_id?: string | null
   /** Single-segment percent-encoded benchmark id (never contains %2F). */
   evaluation_id: string
   benchmark_id: string

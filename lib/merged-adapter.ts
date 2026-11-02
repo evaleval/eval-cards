@@ -20,6 +20,7 @@ import type {
   MergedObservationRow,
 } from "@/lib/eval-processing"
 import { isAssistedResult, isHeadlineResult } from "@/lib/eval-processing"
+import { gapFromItemStates } from "@/lib/setup-items"
 import type { ProtocolAxesByCollection, StudyRef } from "@/lib/collections"
 import type { MetricConfig, SourceData } from "@/lib/benchmark-schema"
 
@@ -385,13 +386,12 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
       is_verified_evaluator: row.is_verified_evaluator,
       evaluator_display_name: row.evaluator_display_name,
       collection_id: row.collection_id,
-      eval_library: row.eval_library,
+      result_row: row.result_row,
       protocol_condition: row.protocol_condition,
       judge_condition: row.judge_condition,
       is_headline: row.is_headline,
       metric_source_label: row.metric_source_label,
       comparability_status: row.comparability_status,
-      scoring_mode: row.scoring_mode,
       score_published: row.score_published,
       scale_harmonized: row.scale_harmonized,
       scale_harmonized_total: row.scale_harmonized_total,
@@ -405,6 +405,16 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
         score_details: { score },
         generation_config: row.generation_config,
         is_verified_evaluator: row.is_verified_evaluator,
+        evalcards: row.item_states
+          ? {
+              annotations: {
+                reproducibility_gap: gapFromItemStates(row.item_states),
+                provenance: null,
+                variant_divergence: null,
+                cross_party_divergence: null,
+              },
+            }
+          : undefined,
       },
     }
   })
@@ -435,6 +445,7 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
 
   return {
     evaluation_id: merged.evaluation_id,
+    snapshot_id: merged.snapshot_id,
     evaluation_name: merged.display_name,
     judge_display_names: merged.judge_display_names,
     canonical_display_name: merged.display_name,

@@ -2,8 +2,8 @@
 
 import { useAudienceMode } from "@/components/audience-mode-provider"
 import type { RowAnnotations } from "@/lib/backend-artifacts"
+import { setupItemLabel } from "@/lib/setup-items"
 import { cn } from "@/lib/utils"
-import { formatMissingField } from "./signal-utils"
 import { SignalTooltip } from "./signal-tooltip"
 
 const SQUARE =
@@ -52,18 +52,13 @@ export function RowFlagSquares({
   const squares: React.ReactNode[] = []
 
   const gap = annotations?.reproducibility_gap
-  // The view layer doesn't emit `has_reproducibility_gap` yet — derive the
-  // gap from `missing_fields` (see the type's note in backend-artifacts.ts).
-  const hasGap =
-    gap?.has_reproducibility_gap === true ||
-    (gap?.missing_fields?.length ?? 0) > 0
-  if (gap && hasGap) {
-    const missing = gap.missing_fields.map(formatMissingField)
+  if (gap?.has_reproducibility_gap === true) {
+    const missing = gap.missing_fields.map(setupItemLabel)
     const populated = gap.populated_field_count ?? gap.populated_count
     const required = gap.required_field_count ?? gap.required_count
     const countLine =
       populated != null && required != null
-        ? `${populated} of ${required} setup fields recorded.`
+        ? `${populated} of ${required} setup items disclosed.`
         : ""
     squares.push(
       <FlagSquare
@@ -72,7 +67,7 @@ export function RowFlagSquares({
         className={AMBER}
         tooltip={
           isResearchView
-            ? `Reproducibility gap. Missing: ${missing.join(", ") || "none listed"}. ${countLine}`
+            ? `Reproducibility gap. Undisclosed: ${missing.join(", ") || "none listed"}. ${countLine}`
             : `This score's setup is not fully documented, so it cannot be re-run as-is. ${countLine}`
         }
       />,

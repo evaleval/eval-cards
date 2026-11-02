@@ -38,6 +38,19 @@ function result(overrides: Partial<ModelResultForBenchmark>): ModelResultForBenc
       generation_config: {
         generation_args: { temperature: 0.2, max_tokens: 4096 },
       },
+      evalcards: {
+        annotations: {
+          reproducibility_gap: {
+            missing_fields: ["harness", "harness_version", "test_set"],
+            populated_count: 2,
+            required_count: 5,
+            item_states: "dudmmumu",
+          },
+          provenance: null,
+          variant_divergence: null,
+          cross_party_divergence: null,
+        },
+      },
     },
     ...overrides,
   }
@@ -120,13 +133,9 @@ describe("BenchmarkSignalsStrip — headline-only aggregates", () => {
 
     // The judge rows must not change any page-level number.
     expect(withJudges).toEqual(headlineOnly)
-    // The fixture discloses temperature and max_tokens, which the OLD rule
-    // called a complete setup because those were the only two questions it
-    // asked. Under the slot rule it still has to say which harness produced
-    // the run, which version of it, and over how many items — so "complete"
-    // is no longer the right word for it.
-    expect(withJudges).toContain("2 of 5 applicable setup questions are answered.")
-    // The old behaviour read "1 of 3 triples document the full setup."
+    // The headline row discloses decoding and output length and leaves
+    // harness, harness version and test set undisclosed.
+    expect(withJudges).toContain("2 of 5 setup items that apply are disclosed.")
     expect(withJudges).not.toContain("of 3 triples")
   })
 })

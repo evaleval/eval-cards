@@ -10,10 +10,7 @@ import type {
   EvalHierarchy,
 } from "@/lib/backend-artifacts"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
-import {
-  evaluateReproducibilitySlots,
-  evidenceFromResult,
-} from "@/lib/reproducibility-slots"
+import { SETUP_ITEMS, setupItemState } from "@/lib/setup-items"
 import type { ModelResultForBenchmark } from "@/lib/eval-processing"
 import { isHeadlineResult } from "@/lib/eval-processing"
 
@@ -60,28 +57,6 @@ const SIGNAL_ASKS: Record<SignalId, string> = {
   provenance: "Who reported these scores and how many parties have replicated?",
   comparability: "Where multiple sources report the same benchmark, do their numbers agree?",
   saturation: "Can the top models still be reliably distinguished by their scores?",
-}
-
-/**
- * Reproducibility signal.
- *
- * The spec lists `temperature, top_p, max_tokens, prompt_template` as the
- * base required fields. In the live EEE corpus only `temperature` and
- * `max_tokens` are reliably populated, so we restrict the check to those
- * two for now. Agentic benchmarks additionally
- * require `eval_plan` and `eval_limits` — the spec's classification rule
- * is followed verbatim.
- */
-const BASE_REQUIRED_FIELDS = ["temperature", "max_tokens"] as const
-const AGENTIC_REQUIRED_FIELDS = ["eval_plan", "eval_limits"] as const
-
-const FIELD_LABELS: Record<string, string> = {
-  temperature: "temperature",
-  top_p: "top-p",
-  max_tokens: "max tokens",
-  prompt_template: "prompt template",
-  eval_plan: "eval plan",
-  eval_limits: "eval limits",
 }
 
 interface BreakdownLine {
@@ -204,27 +179,6 @@ export function BenchmarkSignalsStrip({
 // Reproducibility
 // ──────────────────────────────────────────────────────────────────────────
 
-function isAgenticBenchmark(summary: BenchmarkEvalSummary): boolean {
-  const tasks = summary.benchmark_card?.purpose_and_intended_users?.tasks
-  if (Array.isArray(tasks)) {
-    const set = new Set(tasks.map((t) => String(t).toLowerCase()))
-    if (set.has("agentic") || set.has("tool_use") || set.has("multi_step_agent")) return true
-  }
-  for (const r of summary.model_results ?? []) {
-    const args = getGenerationArgs(r)
-    if (args && args.agentic_eval_config != null) return true
-  }
-  return false
-}
-
-function getGenerationArgs(result: ModelResultForBenchmark): Record<string, unknown> | null {
-  const gc = (result.result as { generation_config?: { generation_args?: Record<string, unknown> } } | undefined)
-    ?.generation_config
-  if (!gc) return null
-  const args = gc.generation_args
-  return args && typeof args === "object" ? args : null
-}
-
 function deriveReproducibility(summary: BenchmarkEvalSummary): DerivedSignal {
   const triples = headlineResults(summary)
 
@@ -235,46 +189,45 @@ function deriveReproducibility(summary: BenchmarkEvalSummary): DerivedSignal {
       headline: "Reproducibility doesn't apply (no reported scores).",
       detail: "",
       breakdown: {
-        formula: "Reproducibility = (setup questions answered) / (setup questions that apply).",
+        formula: "Reproducibility = (setup items disclosed) / (setup items that apply).",
         inputs: [{ label: "Reported results", value: "0" }],
         empty: "No model results have been reported for this benchmark yet.",
       },
     }
   }
 
-  // Scored per SLOT, the same engine and the same data file the per-row panel
-  // uses (config/reproducibility-slots.json). The old rule demanded
-  // `temperature` and `max_tokens` of every result: temperature appears on
-  // 1.9% of the corpus and max_tokens on 1.4%, so this read ~0% almost
-  // everywhere — and it read 0% loudest on the studies that document the
-  // most, because they record their setup as a protocol condition rather than
-  // as decoding args, and because a quarter of the corpus is scored from
-  // log-probabilities where neither field exists at all.
-  const perSlot = new Map<string, { disclosed: number; applicable: number; label: string }>()
+  // Each result's setup items as the backend scored them. Items that do not
+  // apply, or whose applicability is unknown, leave both counts.
+  const perItem = new Map<string, { disclosed: number; applicable: number; label: string }>()
   let disclosedTotal = 0
   let applicableTotal = 0
   let fullyDocumented = 0
 
   for (const triple of triples) {
-    const summaryForRow = evaluateReproducibilitySlots(evidenceFromResult(triple))
-    if (summaryForRow.applicable > 0 && summaryForRow.disclosed === summaryForRow.applicable) {
-      fullyDocumented += 1
-    }
-    disclosedTotal += summaryForRow.disclosed
-    applicableTotal += summaryForRow.applicable
-    for (const slot of summaryForRow.slots) {
-      if (slot.state !== "disclosed" && slot.state !== "missing") continue
-      const entry = perSlot.get(slot.id) ?? { disclosed: 0, applicable: 0, label: slot.label }
+    const gap = triple.result.evalcards?.annotations?.reproducibility_gap
+    let disclosed = 0
+    let applicable = 0
+    for (const item of SETUP_ITEMS) {
+      const state = setupItemState(gap, item.id)
+      if (state !== "disclosed" && state !== "missing") continue
+      applicable += 1
+      const entry = perItem.get(item.id) ?? { disclosed: 0, applicable: 0, label: item.label }
       entry.applicable += 1
-      if (slot.state === "disclosed") entry.disclosed += 1
-      perSlot.set(slot.id, entry)
+      if (state === "disclosed") {
+        disclosed += 1
+        entry.disclosed += 1
+      }
+      perItem.set(item.id, entry)
     }
+    if (applicable > 0 && disclosed === applicable) fullyDocumented += 1
+    disclosedTotal += disclosed
+    applicableTotal += applicable
   }
 
   const total = triples.length
   const score = applicableTotal > 0 ? disclosedTotal / applicableTotal : 0
 
-  const worst = [...perSlot.entries()]
+  const worst = [...perItem.entries()]
     .filter(([, v]) => v.applicable - v.disclosed > 0)
     .sort((a, b) => b[1].applicable - b[1].disclosed - (a[1].applicable - a[1].disclosed))
     .slice(0, 2)
@@ -285,35 +238,35 @@ function deriveReproducibility(summary: BenchmarkEvalSummary): DerivedSignal {
     applicableTotal === 0
       ? "Nothing about this run's setup is scorable."
       : score === 1
-        ? "Every setup question that applies to these runs is answered."
+        ? "Every setup item that applies to these runs is disclosed."
         : score === 0
           ? "How these scores were produced wasn't disclosed by the source."
-          : `${disclosedTotal} of ${applicableTotal} applicable setup questions are answered.`
+          : `${disclosedTotal} of ${applicableTotal} setup items that apply are disclosed.`
 
   const detail = worst
-    ? `Most often missing: ${worst}.`
-    : `${fullyDocumented} of ${total} results document everything that applies to them.`
+    ? `Most often undisclosed: ${worst}.`
+    : `${fullyDocumented} of ${total} results disclose every setup item that applies to them.`
 
-  const rows: BreakdownRow[] = [...perSlot.entries()].map(([, v]) => {
+  const rows: BreakdownRow[] = [...perItem.entries()].map(([, v]) => {
     const missing = v.applicable - v.disclosed
     if (missing === 0) {
       return {
         label: v.label,
         status: "ok" as const,
-        detail: `Reported wherever it applies (${v.disclosed}/${v.applicable}).`,
+        detail: `Disclosed wherever it applies (${v.disclosed}/${v.applicable}).`,
       }
     }
     if (v.disclosed === 0) {
       return {
         label: v.label,
         status: "missing" as const,
-        detail: `Applies to ${v.applicable} result${v.applicable === 1 ? "" : "s"}, reported on none.`,
+        detail: `Applies to ${v.applicable} result${v.applicable === 1 ? "" : "s"}, disclosed on none.`,
       }
     }
     return {
       label: v.label,
       status: "warn" as const,
-      detail: `Reported on ${v.disclosed} of ${v.applicable} results it applies to.`,
+      detail: `Disclosed on ${v.disclosed} of ${v.applicable} results it applies to.`,
     }
   })
 
@@ -324,13 +277,13 @@ function deriveReproducibility(summary: BenchmarkEvalSummary): DerivedSignal {
     detail,
     breakdown: {
       formula:
-        "Reproducibility = (setup questions answered) / (setup questions that apply). " +
-        "A control this run demonstrably does not have, such as sampling on a score read " +
+        "Reproducibility = (setup items disclosed) / (setup items that apply). " +
+        "An item that does not apply to a result, such as decoding on a score read " +
         "from log-probabilities, is not counted against it.",
       inputs: [
         { label: "Reported results", value: total.toString() },
-        { label: "Questions answered", value: disclosedTotal.toString() },
-        { label: "Questions applicable", value: applicableTotal.toString() },
+        { label: "Items disclosed", value: disclosedTotal.toString() },
+        { label: "Items that apply", value: applicableTotal.toString() },
         { label: "Fully documented results", value: fullyDocumented.toString() },
       ],
       rows,

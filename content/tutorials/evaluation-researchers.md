@@ -83,7 +83,7 @@ This is where you read off the actual numbers. In Researcher View the section ha
 
 | Signal | What to inspect | Research caution |
 |---|---|---|
-| **Reproducibility** | Disclosure of setup variants, prompts, decoding params, harness version, seeds, code availability. | "Reproducible in principle" ≠ "reproduced." Only ~3% of scores have complete setup documentation corpus-wide. |
+| **Reproducibility** | Disclosure of the eight setup items: decoding, reasoning budget, output length, harness, harness version, context handling, test set, and attempts, each where it applies. | "Reproducible in principle" ≠ "reproduced." A result with no reproducibility gap discloses its setup; nobody has necessarily re-run it. |
 | **Completeness** | Coverage across capability / robustness / safety / fairness for the model class. | A complete *capability* record can still be silent on safety. Completeness is relative to expectations, not absolute. |
 | **Provenance & Risk** | First- vs third-party; mapping to **IBM Risk Atlas** risk domains. | First-party numbers are not wrong, but they are not independent. Check §3 before ranking. |
 | **Comparability** | Split, metric variant, and unit differences within the same benchmark. | Two "MMLU" numbers may use different splits or metrics, flagged here. Do not rank across incomparable setups. |

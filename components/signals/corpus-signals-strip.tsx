@@ -2,6 +2,7 @@ import Link from "next/link"
 import { ArrowUpRight } from "lucide-react"
 
 import type { CorpusAggregates } from "@/lib/backend-artifacts"
+import { setupItemLabel } from "@/lib/setup-items"
 
 type SignalId =
   | "reproducibility"
@@ -65,11 +66,11 @@ export function CorpusSignalsStrip({
         id="reproducibility"
         statValue={pctNum(reproDocumented)}
         statUnit="%"
-        headline="of reported scores have a complete setup recorded. The rest cannot be independently re-run."
+        headline="of results, by model, benchmark, split and metric, disclose every setup item that applies. The rest cannot be independently re-run."
         detail={
           reproDetail
-            ? `${formatPct(reproGapRate)} have at least one undocumented field. Most often missing: ${reproDetail}.`
-            : `${formatPct(reproGapRate)} have at least one undocumented field.`
+            ? `${formatPct(reproGapRate)} leave at least one setup item undisclosed. Most often undisclosed: ${reproDetail}.`
+            : `${formatPct(reproGapRate)} leave at least one setup item undisclosed.`
         }
         asks="Can someone else run this evaluation and get the same number?"
       />
@@ -194,15 +195,6 @@ function rate(numerator: number | null | undefined, denominator: number | null |
   return numerator / denominator
 }
 
-const FIELD_LABELS: Record<string, string> = {
-  temperature: "temperature",
-  max_tokens: "max tokens",
-  top_p: "top-p",
-  prompt_template: "prompt template",
-  eval_plan: "eval plan",
-  eval_limits: "eval limits",
-}
-
 function topMissingFields(
   perField: Record<
     string,
@@ -218,6 +210,6 @@ function topMissingFields(
   if (entries.length === 0) return ""
 
   return entries
-    .map(([key, v]) => `${FIELD_LABELS[key] ?? key.replace(/_/g, " ")} (${formatPct(v.missing_rate)})`)
+    .map(([key, v]) => `${setupItemLabel(key)} (${formatPct(v.missing_rate)})`)
     .join(", ")
 }

@@ -40,6 +40,8 @@ import type {
   ComparabilityStatus,
   CrossPartyDivergence,
   DeveloperListEntry,
+  EvalRowReproducibility,
+  ReproducibilityEvidence,
   RowAnnotations,
   VariantDivergence,
 } from "@/lib/backend-artifacts"
@@ -744,14 +746,11 @@ function reshapeCellToModelResult(row: Row): ModelResultForBenchmark {
     collection_id: optionalString(row.collection_id),
     protocol_condition: optionalString(row.protocol_condition) ?? undefined,
     judge_condition: optionalString(row.judge_condition) ?? undefined,
-    // The reproducibility slots ask which harness a re-runner would have
-    // to obtain and pin, so the row has to carry it.
-    eval_library: parseMaybeJson(row.eval_library) as ModelResultForBenchmark["eval_library"],
+    result_row: optionalNumber(row.result_row),
     // Always projected: the producer's column, or the rule derived from
     // the ranking on a snapshot that predates it.
     is_headline: row.is_headline == null ? undefined : Boolean(row.is_headline),
     metric_source_label: optionalString(row.metric_source_label),
-    scoring_mode: optionalString(row.scoring_mode),
     comparability_status: comparabilityStatusFromRow(row),
     score_published: optionalNumber(row.score_published),
     aggregate_components: asArray<NonNullable<ModelResultForBenchmark["aggregate_components"]>[number]>(
@@ -908,6 +907,18 @@ async function evalsViewHasParentDisplayName(): Promise<boolean> {
 // snapshots instead of binder-erroring the query. Same lifecycle as the
 // parent_display_name probe above.
 let ervColumnsCache: Set<string> | undefined
+let ervSnapshotIdCache: string | null | undefined
+
+/** The snapshot this server's eval_results_view holds. */
+async function evalResultsSnapshotId(): Promise<string | null> {
+  if (ervSnapshotIdCache === undefined) {
+    const rows = await readRows<Row>(
+      "SELECT CAST(any_value(snapshot_id) AS VARCHAR) AS snapshot_id FROM eval_results_view"
+    )
+    ervSnapshotIdCache = optionalString(rows[0]?.snapshot_id) ?? null
+  }
+  return ervSnapshotIdCache
+}
 async function evalResultsViewColumns(): Promise<Set<string>> {
   if (ervColumnsCache === undefined) {
     let columns: Array<{ column_name: string }>
@@ -951,7 +962,6 @@ interface EvalResultsViewCapabilities {
   comparabilityStatus: boolean
   scorePublished: boolean
   divergenceFlags: boolean
-  scoringMode: boolean
 }
 
 /**
@@ -994,7 +1004,6 @@ async function evalResultsViewCapabilities(): Promise<EvalResultsViewCapabilitie
     scorePublished: names.has("score_published"),
     divergenceFlags:
       names.has("has_variant_divergence") && names.has("has_cross_party_divergence"),
-    scoringMode: names.has("scoring_mode"),
   }
 }
 
@@ -1045,21 +1054,19 @@ function collectionRowColumns(caps: EvalResultsViewCapabilities) {
     : "CAST(NULL AS VARCHAR) AS collection_id, CAST(NULL AS VARCHAR) AS protocol_condition"
 }
 
-// How the producer classified the run: `generative`, `log_prob`, or NULL when
-// it could not tell. The reproducibility slots read it in preference to
-// anything they can infer from a row's raw fields, and a snapshot without the
-// column reads as NULL and falls back to that inference.
-function scoringModeColumn(caps: EvalResultsViewCapabilities) {
-  return caps.scoringMode ? "r.scoring_mode" : "CAST(NULL AS VARCHAR) AS scoring_mode"
-}
+// The row's id in this server's eval_results_view table. Page rows carry it,
+// with the page's snapshot_id, so /api/eval-row-reproducibility can read that
+// one row's evidence. The table keeps the parquet's row order (DuckDB's
+// default insertion order), so the id is fixed for a given snapshot.
+const RESULT_ROW_COLUMN = "CAST(r.rowid AS INTEGER) AS result_row"
 
 function additiveEvalRowColumns(caps: EvalResultsViewCapabilities) {
   return `
+  ${RESULT_ROW_COLUMN},
   ${collectionRowColumns(caps)},
   ${caps.evaluatorDisplayName
     ? "r.evaluator_display_name"
-    : "CAST(NULL AS VARCHAR) AS evaluator_display_name"},
-  ${scoringModeColumn(caps)},${issue47Columns(caps)}`
+    : "CAST(NULL AS VARCHAR) AS evaluator_display_name"},${issue47Columns(caps)}`
 }
 
 function evalCellJoinColumns(caps: EvalResultsViewCapabilities) {
@@ -1461,6 +1468,7 @@ export async function getEvalSummaryById(evalId: string): Promise<BenchmarkEvalS
     comparability_summary: parseMaybeJson(evalRow.comparability_summary),
     source_data: parseMaybeJson(evalRow.source_data),
     model_results: cellRows.map(reshapeCellToModelResult),
+    snapshot_id: await evalResultsSnapshotId(),
     judge_display_names: await fetchJudgeDisplayNames([...cellRows, ...matrixJudgeRows]),
   } as unknown as BenchmarkEvalSummary
 
@@ -1752,7 +1760,8 @@ const MERGED_RESULT_COLUMNS = `
   CAST(to_json(r.generation_config) AS VARCHAR) AS generation_config,
   CAST(to_json(r.source_metadata) AS VARCHAR) AS source_metadata,
   CAST(to_json(r.source_data) AS VARCHAR) AS source_data,
-  CAST(to_json(r.eval_library) AS VARCHAR) AS eval_library,
+  json_extract_string(to_json(r.evalcards_annotations.reproducibility_gap), '$.item_states')
+    AS item_states,
   r.is_verified_evaluator
 `
 
@@ -1773,7 +1782,8 @@ function mergedObservationFromRow(row: Row): MergedObservationRow {
     source_metadata: sourceMetadataFromRow(row),
     source_data: (parseMaybeJson(row.source_data) ?? undefined) as SourceData | undefined,
     generation_config: (generationConfig ?? undefined) as GenerationConfig | undefined,
-    eval_library: parseMaybeJson(row.eval_library) as MergedObservationRow["eval_library"],
+    item_states: optionalString(row.item_states),
+    result_row: optionalNumber(row.result_row),
     is_verified_evaluator:
       row.is_verified_evaluator == null ? undefined : Boolean(row.is_verified_evaluator),
     evaluator_display_name: optionalString(row.evaluator_display_name),
@@ -1783,7 +1793,6 @@ function mergedObservationFromRow(row: Row): MergedObservationRow {
     is_headline: row.is_headline == null ? undefined : Boolean(row.is_headline),
     metric_source_label: optionalString(row.metric_source_label),
     comparability_status: comparabilityStatusFromRow(row),
-    scoring_mode: optionalString(row.scoring_mode),
     score_published: optionalNumber(row.score_published),
   }
 }
@@ -1962,6 +1971,7 @@ export async function getMergedBenchmarkSummary(
 
   return {
     merged: true,
+    snapshot_id: await evalResultsSnapshotId(),
     evaluation_id: asString(row.evaluation_id),
     benchmark_id: asString(row.benchmark_id),
     display_name: asString(row.display_name, asString(row.benchmark_id)),
@@ -1991,6 +2001,37 @@ export async function getMergedBenchmarkSummary(
     benchmark_card: benchmarkCard,
     benchmark_card_source_path: benchmarkCardSourcePath,
     collections,
+  }
+}
+
+/**
+ * The field and value behind each disclosed setup item of one result row,
+ * plus the fields each item accepts. Read on demand because page payloads
+ * carry only the item states. `resultRow` is the row's `result_row` on a
+ * page built from `snapshotId`. Null when this server holds another
+ * snapshot (a page opened before a data update), when the snapshot has no
+ * evidence column, or when there is no such row.
+ */
+export async function getEvalRowReproducibility(
+  resultRow: number,
+  snapshotId: string,
+): Promise<EvalRowReproducibility | null> {
+  if (snapshotId !== (await evalResultsSnapshotId())) return null
+  if (!(await evalResultsViewColumns()).has("reproducibility_evidence")) return null
+  const rows = await readRows<Row>(
+    `SELECT CAST(to_json(reproducibility_evidence) AS VARCHAR) AS evidence
+     FROM eval_results_view
+     WHERE rowid = ?`,
+    [resultRow],
+    { contextLabel: `result_row=${resultRow}` }
+  )
+  if (rows.length === 0) return null
+  const headline = await fetchHeadline()
+  return {
+    evidence: asArray<ReproducibilityEvidence>(parseMaybeJson(rows[0].evidence)),
+    accepted_fields: Object.fromEntries(
+      (headline.setup_items ?? []).map((item) => [item.id, item.accepted_fields]),
+    ),
   }
 }
 

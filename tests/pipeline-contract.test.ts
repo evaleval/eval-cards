@@ -17,6 +17,7 @@ import {
 import type { MergedBenchmarkSummary } from "../lib/eval-processing"
 import type { HFEvalDetail, HFEvalModelResult, HFModelDetail } from "../lib/hf-data"
 import { mergedSummaryToEvalSummary } from "../lib/merged-adapter"
+import { SETUP_ITEMS, setupItemLabel, setupItemState } from "../lib/setup-items"
 
 import { fixtureEntries, loadAllFixtures, walkHierarchyResults } from "./fixtures/loader"
 
@@ -563,6 +564,43 @@ describe("Tier A — pipeline contracts (judge-condition view columns)", () => {
     const adapted = mergedSummaryToEvalSummary(merged)
     expect(adapted.leaderboard_metrics?.[0].column_key).toBe("wb-score")
     expect(adapted.model_results[0].result.metric_key).toBe("wb-score")
+  })
+})
+
+describe("Tier A — pipeline contracts (setup-item reproducibility)", () => {
+  // The backend scores every result against these item ids, in this order,
+  // and the view row's reproducibility_gap carries them in three lists.
+  it("names every setup item the backend scores, in its order", () => {
+    expect(SETUP_ITEMS.map((item) => item.id)).toEqual([
+      "decoding",
+      "reasoning_budget",
+      "output_length",
+      "harness",
+      "harness_version",
+      "context_handling",
+      "test_set",
+      "attempts",
+    ])
+  })
+
+  it("reads each item's state from its character in item_states", () => {
+    const gap = {
+      missing_fields: ["harness_version", "test_set"],
+      populated_count: 1,
+      required_count: 3,
+      item_states: "nundmumu",
+    }
+    expect(SETUP_ITEMS.map((item) => setupItemState(gap, item.id))).toEqual([
+      "not_applicable",
+      "unknown",
+      "not_applicable",
+      "disclosed",
+      "missing",
+      "unknown",
+      "missing",
+      "unknown",
+    ])
+    expect(gap.missing_fields.map(setupItemLabel)).toEqual(["Harness version", "Test set"])
   })
 })
 

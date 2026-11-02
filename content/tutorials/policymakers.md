@@ -38,7 +38,7 @@ For policy, the headline score is rarely the variable that matters. The document
 
 | Signal | Governance question | Why it matters for policy |
 |---|---|---|
-| **Reproducibility** | Could an independent party verify this claim? | A score that cannot be reproduced cannot be relied on for oversight. Corpus-wide, only ~3% of scores have complete setup documentation. |
+| **Reproducibility** | Could an independent party verify this claim? | A score that cannot be reproduced cannot be relied on for oversight. Each result is checked against eight setup items, and a result that leaves any applicable item undisclosed is flagged with a reproducibility gap. |
 | **Completeness** | Were the relevant risk areas evaluated at all? | A strong capability record can be silent on safety, robustness, or fairness. Absence of a result is not evidence of safety. |
 | **Provenance & Risk** | Who ran the evaluation, and what real-world risk does it speak to? | Self-reported results lack independent corroboration. Results map to **IBM Risk Atlas** risk domains, connecting scores to recognized risk categories. |
 | **Comparability** | Can these two models actually be compared on this benchmark? | "Model A beats Model B" is often invalid if they used different setups. The site flags when a comparison is not legitimate. |

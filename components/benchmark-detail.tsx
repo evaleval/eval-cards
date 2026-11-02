@@ -2661,12 +2661,12 @@ export function BenchmarkDetail({
       reproducibilityGapCount === 0
         ? null
         : reproducibilityGapCount === reproducibilityResultsTotal
-          ? "How this model was prompted during testing is not documented. Scores cannot be independently confirmed."
-          : `${reproducibilityGapCount} of ${reproducibilityResultsTotal} reported scores are missing enough setup detail to be re-run as-is.`
+          ? "No reported score discloses every setup item that applies to it. Scores cannot be independently confirmed."
+          : `${reproducibilityGapCount} of ${reproducibilityResultsTotal} reported scores leave at least one setup item undisclosed, so they cannot be re-run as-is.`
 
     const comparabilityCopy =
       reproducibilityGapCount > 0
-        ? `${benchmarkCount > 0 ? `These results cover ${benchmarkCount} benchmark${benchmarkCount === 1 ? "" : "s"},` : "These results"} but missing prompting details mean apparent score gaps may partly reflect setup differences as well as capability.`
+        ? `${benchmarkCount > 0 ? `These results cover ${benchmarkCount} benchmark${benchmarkCount === 1 ? "" : "s"},` : "These results"} but undisclosed setup items mean apparent score gaps may partly reflect setup differences as well as capability.`
         : "Shared benchmark coverage helps, but evaluator choices, benchmark mix, and model size can still limit direct apples-to-apples comparison."
 
     const sizeCaveat =

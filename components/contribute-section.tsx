@@ -37,8 +37,8 @@ export function ContributeSection() {
               so your scores appear on the model page with a backlink.
             </li>
             <li>
-              Document the run-level details that raise your signals — temperature and max tokens,
-              the harness, and (for agentic evaluations) the eval plan and limits.
+              Disclose the setup items that raise your reproducibility signal: decoding, reasoning
+              budget, output length, harness and its version, context handling, test set, and attempts.
             </li>
             <li>
               See a wrong or missing number for your model? Flag it in the{" "}

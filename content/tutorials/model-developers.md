@@ -65,10 +65,11 @@ Three things to look at first:
 Each signal maps to concrete, mostly low-cost actions.
 
 ### 🔁 Reproducibility: *make it re-runnable*
-Disclose, per result: **setup variants, prompts, decoding parameters, harness name + version, random seeds, and code/artifacts**. Corpus-wide only ~3% of scores have complete setup documentation, so even modest disclosure stands out.
+Each result is checked against eight setup items: **decoding, reasoning budget, output length, harness, harness version, context handling, test set, and attempts**. Some items apply only to some runs: decoding and output length do not apply to a run scored from log-probabilities, a reasoning budget applies to reasoning runs, and context handling and attempts apply to agentic runs. A result that leaves any applicable item undisclosed has a reproducibility gap.
 
 - ✅ Publish the exact harness + version (e.g. the eval framework and commit).
-- ✅ State decoding settings (temperature, top-p, max tokens) and seeds.
+- ✅ State decoding settings (temperature, top-p) and the output limit (max tokens).
+- ✅ State the test set (split, subset or item count), and for agentic runs the number of attempts and how context was handled.
 - ✅ Link runnable code or a config, not just a number.
 
 ### 📋 Completeness: *cover the categories that matter*

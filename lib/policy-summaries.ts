@@ -111,7 +111,7 @@ export interface ModelPolicySummary {
   gapSentence: string | null
   /** "Reported by Anthropic (the developer) and one independent third party." */
   reportingSentence: string
-  /** "How this model was prompted is documented for X of Y reported scores." or null when fully documented / no data. */
+  /** "X% of reported scores (N of M) disclose every setup item that applies to them." or null when there is no data. */
   reproducibilitySentence: string | null
   /** "Comparing scores directly is limited because reporting setups differ." or null. */
   comparabilitySentence: string | null
@@ -229,14 +229,14 @@ export function buildModelPolicySummary({
   let reproducibilitySentence: string | null = null
   if (reproTotal > 0) {
     if (reproGap === 0) {
-      reproducibilitySentence = "How this model was prompted during testing is documented for every reported score."
+      reproducibilitySentence = "Every reported score discloses the setup items that apply to it."
     } else if (reproGap === reproTotal) {
       reproducibilitySentence =
-        "How this model was prompted during testing is not documented. Scores cannot be independently re-run as reported."
+        "No reported score discloses every setup item that applies to it. Scores cannot be independently re-run as reported."
     } else {
       const documented = reproTotal - reproGap
       const pct = Math.round((documented / reproTotal) * 100)
-      reproducibilitySentence = `Prompting setup is documented for ${pct}% of reported scores (${documented} of ${reproTotal}); the rest are missing enough detail to be re-run as-is.`
+      reproducibilitySentence = `${pct}% of reported scores (${documented} of ${reproTotal}) disclose every setup item that applies to them. The rest cannot be re-run as-is.`
     }
   }
 
@@ -335,14 +335,14 @@ function formatReproducibilitySentence(repro?: ReproducibilitySummary): string |
   const total = repro.results_total
   const gap = repro.has_reproducibility_gap_count
   if (gap === 0) {
-    return "How models were prompted during testing is documented for every reported score."
+    return "Every reported score discloses the setup items that apply to it."
   }
   if (gap === total) {
-    return "How models were prompted during testing is not documented. Scores cannot be independently re-run as reported."
+    return "No reported score discloses every setup item that applies to it. Scores cannot be independently re-run as reported."
   }
   const documented = total - gap
   const pct = Math.round((documented / total) * 100)
-  return `Prompting setup is documented for ${pct}% of reported scores (${documented} of ${total}).`
+  return `${pct}% of reported scores (${documented} of ${total}) disclose every setup item that applies to them.`
 }
 
 function formatProvenanceSentence(summary: BenchmarkEvalSummary): string | null {
