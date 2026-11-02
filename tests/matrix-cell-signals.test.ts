@@ -19,7 +19,7 @@ function renderCell(
     createElement(
       AudienceModeProvider,
       null,
-      createElement(SignalsRowBadges, { annotations, comparabilityStatus, variant: "cell" }),
+      createElement(SignalsRowBadges, { annotations, comparabilityStatus }),
     ),
   )
 }
@@ -56,5 +56,41 @@ describe("matrix cell comparability badges", () => {
     expect(renderCell(CLEAN_ANNOTATIONS, "mixed_scale")).toContain("Not assessable")
     // One chip per row, not two: the cross-party badge stays silent.
     expect((renderCell(CLEAN_ANNOTATIONS, "mixed_scale").match(/Not assessable/g) ?? []).length).toBe(1)
+  })
+})
+
+// The reproducibility gap fires on most rows, so the row strip leaves it to
+// the merged view's R flag square and the eval page's signals strip. The
+// strip has no audience-mode branch, so this holds in research and policy
+// views alike.
+const GAP_ANNOTATIONS = {
+  ...CLEAN_ANNOTATIONS,
+  reproducibility_gap: {
+    has_reproducibility_gap: true,
+    missing_fields: ["harness_version"],
+    item_states: null,
+  },
+} as unknown as RowAnnotations
+
+describe("row badges and the reproducibility gap", () => {
+  it("renders nothing for a row whose only signal is a reproducibility gap", () => {
+    expect(renderCell(GAP_ANNOTATIONS, "ok")).toBe("")
+  })
+
+  it("shows a gap row's divergence badge without a reproducibility label", () => {
+    const html = renderCell(
+      {
+        ...GAP_ANNOTATIONS,
+        variant_divergence: {
+          has_variant_divergence: true,
+          divergence_magnitude: 0.12,
+          threshold_used: 0.05,
+          differing_setup_fields: [],
+        },
+      } as unknown as RowAnnotations,
+      "ok",
+    )
+    expect(html).toContain("Variant divergence")
+    expect(html).not.toMatch(/Reproducibility gap|Setup not documented/)
   })
 })

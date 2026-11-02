@@ -3086,9 +3086,8 @@ export function EvalDetail({
                                 {datasetName}
                               </div>
                             )}
-                          {/* Per-row signal badges (reproducibility,
-                              provenance, variant/cross-party divergence)
-                              — make the apples-to-apples banner's
+                          {/* Per-row divergence badges (variant and
+                              cross-party) — make the apples-to-apples banner's
                               "per-row signal badges below" reference
                               concrete on the single-metric leaderboard. */}
                           <SignalsRowBadges
@@ -4404,7 +4403,6 @@ function MultiMetricLeaderboard({
                         <SignalsRowBadges
                           annotations={annotations}
                           comparabilityStatus={comparabilityStatus}
-                          variant="cell"
                         />
                       </td>
                     )
