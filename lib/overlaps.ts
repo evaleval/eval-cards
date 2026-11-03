@@ -213,6 +213,10 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
   }
 
   const out: OverlapRow[] = []
+  // Eval ids whose llm-stats copy the aggregator dedup dropped: the copy is
+  // accounted for by the row that dropped it, so the summary merge below
+  // must not bring it back as a row of its own.
+  const droppedAggregatorEvalIds = new Set<string>()
 
   if (benchmarkIndex && comparisonIndex) {
     // `by_model` is an optional acceleration: lookups must keep working off
@@ -350,7 +354,10 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
       const seenScores = new Set<number>()
       const collected: OverlapAppearance[] = []
       for (const c of distinctByEvalId) {
-        if (isAggregator(c.familyKey) && seenScores.has(c.score)) continue
+        if (isAggregator(c.familyKey) && seenScores.has(c.score)) {
+          droppedAggregatorEvalIds.add(c.evalSummaryId)
+          continue
+        }
         seenScores.add(c.score)
         collected.push(c)
       }
@@ -482,7 +489,7 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
   // Dedup key is eval_summary_id — a candidate is skipped when ANY of its
   // variant ids is already represented (group keys can be synthesized parent
   // ids for slice-folded groups, so they aren't reliable here).
-  const representedEvalIds = new Set<string>()
+  const representedEvalIds = new Set<string>(droppedAggregatorEvalIds)
   for (const row of out) {
     for (const a of row.appearances) {
       if (a.evalSummaryId) representedEvalIds.add(a.evalSummaryId)

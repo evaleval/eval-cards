@@ -587,6 +587,44 @@ describe("buildOverlapRows: single-source rows", () => {
     expect(summaryRow?.isPercentScale).toBe(false)
   })
 
+  it("does not resurrect a deduped aggregator copy as its own summary row", () => {
+    // Live case (google/gemini-4-carbon): llm-stats republishes
+    // paperswithcode's AutomationBench 0.539, so the aggregator dedup drops
+    // it from the benchmark row; its summary group must not come back as a
+    // second "1 source" row keyed on the llm-stats eval id.
+    const pwc = "paperswithcode%2Fautomationbench"
+    const llm = "llm-stats%2Fautomationbench"
+    const cell = (score: number) => ({ score, rank: 1, total: 2, submission_count: 1, submission_axis: "default" as const })
+    const rows = build({
+      benchmarkIndex: [
+        indexEntry("automationbench", "AutomationBench", [
+          { family: "llm-stats", evalIds: [llm] },
+          { family: "paperswithcode", evalIds: [pwc] },
+        ]),
+      ],
+      comparisonIndex: comparisonIndexOf(
+        {
+          [llm]: evalEntry(llm, [metricEntry({ metric_summary_id: "automationbench%3Ascore", metric_name: "Score" })]),
+          [pwc]: evalEntry(pwc, [
+            metricEntry({ metric_summary_id: "automationbench%3Atask-success-rate", metric_name: "Task Success Rate" }),
+          ]),
+        },
+        {
+          [MODEL_ROUTE]: {
+            [llm]: { "automationbench%3Ascore": cell(0.539) },
+            [pwc]: { "automationbench%3Atask-success-rate": cell(0.539) },
+          },
+        },
+      ),
+      summaryCandidates: [
+        candidate({ groupKey: llm, displayName: "AutomationBench", evalSummaryIds: [llm], familyKey: "automationbench", score: 0.539 }),
+        candidate({ groupKey: pwc, displayName: "AutomationBench", evalSummaryIds: [pwc], familyKey: "automationbench", score: 0.539 }),
+      ],
+    })
+    expect(rows.map((r) => r.canonicalKey)).toEqual(["automationbench"])
+    expect(rows[0].appearances.map((a) => a.evalSummaryId)).toEqual([pwc])
+  })
+
   it("builds summary rows even when the comparison index is unavailable", () => {
     const rows = build({
       benchmarkIndex: undefined,
