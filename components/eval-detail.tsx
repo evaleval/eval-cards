@@ -77,6 +77,7 @@ import {
   declaredKeysOf,
   protocolFilterOptions,
   protocolValueId,
+  isStudyProtocolRow,
   readProtocolAxis,
   summariseProtocolReadings,
   unionProtocolAxes,
@@ -1049,11 +1050,15 @@ export function EvalDetail({
     () => lb.model_results.some((r) => r.protocol_condition != null),
     [lb.model_results]
   )
-  const protocolRowCount = useMemo(
-    () => lb.model_results.filter((r) => r.protocol_condition != null).length,
+  // The study caution counts only rows under a study's own protocol. A row
+  // whose protocol point is a reasoning-effort tier or thinking budget read
+  // off the model name is an ordinary result and raises no caution.
+  const studyRowCount = useMemo(
+    () => lb.model_results.filter((r) => isStudyProtocolRow(r.protocol_condition)).length,
     [lb.model_results]
   )
-  const allRowsHaveProtocol = protocolRowCount === lb.model_results.length
+  const hasStudyRows = studyRowCount > 0
+  const allRowsAreStudyRows = studyRowCount === lb.model_results.length
   const hasAssistedRows = useMemo(
     () => lb.model_results.some((r) => isAssistedResult(r.protocol_condition)),
     [lb.model_results]
@@ -2360,7 +2365,7 @@ export function EvalDetail({
 
           {/* Score distribution — paper-themed mean/median/quartile summary,
               with an optional Frontier toggle when models carry release dates. */}
-          {hasProtocolRows && (
+          {hasStudyRows && (
             <div
               className="mb-4 flex items-start gap-3 px-4 py-3"
               style={{
@@ -2372,9 +2377,9 @@ export function EvalDetail({
             >
               <div className="text-[13px] leading-relaxed">
                 <span style={{ fontWeight: 600 }}>Study-specific protocol.</span>{" "}
-                {allRowsHaveProtocol
+                {allRowsAreStudyRows
                   ? "This study ran models with much larger inference budgets than standard evaluations. Compare with published scores with caution."
-                  : `${protocolRowCount} of the results below come from a study that used much larger inference budgets. Compare them with the other rows or with published scores with caution.`}
+                  : `${studyRowCount} of the results below come from a study that used much larger inference budgets. Compare them with the other rows or with published scores with caution.`}
                 {hasAssistedRows && (assistedRowsAreNonHeadline ? (
                   <>
                     {" "}Assisted runs, where the model is told when its answer

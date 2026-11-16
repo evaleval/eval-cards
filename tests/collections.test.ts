@@ -10,6 +10,7 @@ import {
   compareProtocolTuples,
   feedbackConditionOf,
   formatProtocolValue,
+  isStudyProtocolRow,
   protocolFilterOptions,
   protocolValueId,
   protocolValueTitle,
@@ -781,5 +782,24 @@ describe("compareProtocolTuples", () => {
       10_000_000,
     ])
     expect(JSON.parse(sorted[2]).reasoning_tokens).toBeNull()
+  })
+})
+
+
+describe("isStudyProtocolRow", () => {
+  it("counts a row under a study's own protocol", () => {
+    expect(isStudyProtocolRow('{"token_limit":1000000}')).toBe(true)
+    expect(isStudyProtocolRow('{"feedback":"none","reasoning_effort":"high"}')).toBe(true)
+  })
+
+  it("does not count a run condition read off the model name", () => {
+    expect(isStudyProtocolRow('{"reasoning_effort":"high"}')).toBe(false)
+    expect(isStudyProtocolRow('{"reasoning_tokens":16000}')).toBe(false)
+    expect(isStudyProtocolRow('{"reasoning_effort":"high","reasoning_tokens":16000}')).toBe(false)
+  })
+
+  it("does not count a row with no protocol point", () => {
+    expect(isStudyProtocolRow(null)).toBe(false)
+    expect(isStudyProtocolRow("not json")).toBe(false)
   })
 })

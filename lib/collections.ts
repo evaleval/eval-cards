@@ -83,6 +83,27 @@ export function parseProtocolCondition(
   }
 }
 
+/** The run conditions the pipeline reads off a model name
+ *  (`o1-2024-12-17-low`, `…-thinking-16k`). Any source can state them, so
+ *  on their own they do not mark a row as part of a study. */
+const MODEL_NAME_CONDITION_KEYS: ReadonlySet<string> = new Set([
+  "reasoning_effort",
+  "reasoning_tokens",
+])
+
+/** Whether a row's protocol point is a study's own protocol, as opposed to
+ *  a run condition any ordinary result can carry. Only a study's rows
+ *  warrant the study caution: a leaderboard row at `high` effort used no
+ *  unusual inference budget. A study's point states more than the model
+ *  name can (a token budget, a feedback arm, a scaffold). */
+export function isStudyProtocolRow(
+  protocolCondition: string | null | undefined,
+): boolean {
+  const fields = parseProtocolCondition(protocolCondition)
+  if (fields == null) return false
+  return Object.keys(fields).some((key) => !MODEL_NAME_CONDITION_KEYS.has(key))
+}
+
 /** The comparability-bearing condition family. Unknown stays unknown —
  *  unparseable or missing feedback never gets promoted to a clean
  *  condition. */
