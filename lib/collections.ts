@@ -104,6 +104,18 @@ export function isStudyProtocolRow(
   return Object.keys(fields).some((key) => !MODEL_NAME_CONDITION_KEYS.has(key))
 }
 
+/** The row whose per-source page is the study behind a merged page's study
+ *  links: the first study-protocol row that names its source page. A row
+ *  that only states an effort tier or a thinking budget is an ordinary
+ *  leaderboard result, so its source is not a study to link to. */
+export function studySourceRow<
+  T extends { protocol_condition?: string | null; evaluation_id?: string | null },
+>(rows: readonly T[]): T | undefined {
+  return rows.find(
+    (row) => isStudyProtocolRow(row.protocol_condition) && !!row.evaluation_id,
+  )
+}
+
 /** The comparability-bearing condition family. Unknown stays unknown —
  *  unparseable or missing feedback never gets promoted to a clean
  *  condition. */

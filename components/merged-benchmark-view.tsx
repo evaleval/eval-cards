@@ -35,6 +35,7 @@ import {
   type MergedBenchmarkSummary,
   type ModelResultForBenchmark,
 } from "@/lib/eval-processing"
+import { studySourceRow } from "@/lib/collections"
 import type { EvalHierarchy } from "@/lib/backend-artifacts"
 import { crossSuiteSiblingEvalIds } from "@/components/signals/benchmark-signals-strip"
 import { useComparisonIndex } from "@/lib/use-comparison-index"
@@ -212,9 +213,7 @@ export function MergedBenchmarkView({
   // has no per-source evaluation_id in scope on merged pages, so resolve
   // the study source here — the protocol-carrying observation rows name
   // their per-source page directly.
-  const studyRow = summary.results.find(
-    (row) => row.protocol_condition != null && row.evaluation_id,
-  )
+  const studyRow = studySourceRow(summary.results)
   const studySourceHref = studyRow ? `/evals/${routeIdToPath(studyRow.evaluation_id)}` : undefined
 
   return (

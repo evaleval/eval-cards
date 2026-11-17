@@ -11,6 +11,7 @@ import {
   feedbackConditionOf,
   formatProtocolValue,
   isStudyProtocolRow,
+  studySourceRow,
   protocolFilterOptions,
   protocolValueId,
   protocolValueTitle,
@@ -785,6 +786,24 @@ describe("compareProtocolTuples", () => {
   })
 })
 
+
+describe("studySourceRow", () => {
+  const effort = { protocol_condition: '{"reasoning_effort":"high"}', evaluation_id: "livebench/x" }
+  const budget = { protocol_condition: '{"reasoning_tokens":16000}', evaluation_id: "arc/x" }
+  const study = { protocol_condition: '{"token_limit":1000000}', evaluation_id: "aisi/x" }
+
+  it("skips effort and budget rows and returns the study row", () => {
+    expect(studySourceRow([effort, budget, study])).toBe(study)
+  })
+
+  it("returns nothing on a page with no study rows", () => {
+    expect(studySourceRow([effort, budget, { protocol_condition: null, evaluation_id: "a" }])).toBeUndefined()
+  })
+
+  it("skips a study row that names no source page", () => {
+    expect(studySourceRow([{ protocol_condition: '{"token_limit":1}', evaluation_id: null }, study])).toBe(study)
+  })
+})
 
 describe("isStudyProtocolRow", () => {
   it("counts a row under a study's own protocol", () => {
