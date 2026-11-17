@@ -10,6 +10,7 @@ import {
   compareProtocolTuples,
   feedbackConditionOf,
   formatProtocolValue,
+  hasProtocolPointRow,
   isStudyProtocolRow,
   protocolSourceRow,
   studySourceRow,
@@ -820,8 +821,19 @@ describe("protocolSourceRow", () => {
     expect(protocolSourceRow([effort, study])).toBeUndefined()
   })
 
+  it("returns nothing when a protocol row names no source page", () => {
+    expect(protocolSourceRow([effort, { protocol_condition: '{"reasoning_effort":"low"}', evaluation_id: null }])).toBeUndefined()
+  })
+
   it("returns nothing when no row carries a readable protocol point", () => {
     expect(protocolSourceRow([plain, { protocol_condition: "not json", evaluation_id: "b" }])).toBeUndefined()
+  })
+})
+
+describe("hasProtocolPointRow", () => {
+  it("is true only when a row carries a readable protocol point", () => {
+    expect(hasProtocolPointRow([{ protocol_condition: null }, { protocol_condition: "not json" }])).toBe(false)
+    expect(hasProtocolPointRow([{ protocol_condition: null }, { protocol_condition: '{"reasoning_effort":"high"}' }])).toBe(true)
   })
 })
 

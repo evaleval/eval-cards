@@ -77,6 +77,7 @@ import {
   declaredKeysOf,
   protocolFilterOptions,
   protocolValueId,
+  hasProtocolPointRow,
   isStudyProtocolRow,
   readProtocolAxis,
   summariseProtocolReadings,
@@ -2296,7 +2297,7 @@ export function EvalDetail({
                 onToggle={toggleProtocolFilter}
                 onClear={clearProtocolFilters}
               />
-              {summary.merged_view && (
+              {summary.merged_view && hasProtocolPointRow(lb.model_results) && (
                 <p className="mt-2 text-[12px]" style={{ color: "var(--fg-muted)" }}>
                   This page carries one headline protocol point per source and model.
                   {protocolPointsHref && (

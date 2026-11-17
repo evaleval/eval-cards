@@ -116,18 +116,27 @@ export function studySourceRow<
   )
 }
 
+/** Whether any row carries a readable protocol point. */
+export function hasProtocolPointRow(
+  rows: readonly { protocol_condition?: string | null }[],
+): boolean {
+  return rows.some((row) => parseProtocolCondition(row.protocol_condition) != null)
+}
+
 /** The row whose per-source page lists every protocol point behind a merged
  *  page's one-headline-point-per-model view. Only when a single source page
  *  carries them all: with several, no one page lists every point, so there
- *  is nothing to link to. */
+ *  is nothing to link to. A protocol row that names no source page counts as
+ *  a page of its own, since its points are listed nowhere we can link. */
 export function protocolSourceRow<
   T extends { protocol_condition?: string | null; evaluation_id?: string | null },
 >(rows: readonly T[]): T | undefined {
   const withPoint = rows.filter(
-    (row) => parseProtocolCondition(row.protocol_condition) != null && !!row.evaluation_id,
+    (row) => parseProtocolCondition(row.protocol_condition) != null,
   )
-  const pages = new Set(withPoint.map((row) => row.evaluation_id))
-  return pages.size === 1 ? withPoint[0] : undefined
+  const pages = new Set(withPoint.map((row) => row.evaluation_id || null))
+  if (pages.size !== 1 || pages.has(null)) return undefined
+  return withPoint[0]
 }
 
 /** The comparability-bearing condition family. Unknown stays unknown —
