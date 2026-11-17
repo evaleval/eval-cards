@@ -164,6 +164,9 @@ interface EvalDetailProps {
    *  per-source evaluation_id in scope here, so MergedBenchmarkView
    *  passes the resolved per-source href down. */
   studySourceHref?: string
+  /** Merged pages only: the per-source page that lists every protocol
+   *  point, for the note under the protocol filters. */
+  protocolPointsHref?: string
   /** Merged pages only: notes about how rows were put on one scale,
    *  shown directly above the leaderboard table. */
   leaderboardNotes?: string[]
@@ -799,6 +802,7 @@ export function EvalDetail({
   splitConfig,
   rowHighlight,
   studySourceHref,
+  protocolPointsHref,
   leaderboardNotes,
   crossSourceContextLoader,
 }: EvalDetailProps) {
@@ -2292,11 +2296,11 @@ export function EvalDetail({
                 onToggle={toggleProtocolFilter}
                 onClear={clearProtocolFilters}
               />
-              {summary.merged_view && studySourceHref && (
+              {summary.merged_view && protocolPointsHref && (
                 <p className="mt-2 text-[12px]" style={{ color: "var(--fg-muted)" }}>
                   This page carries one headline protocol point per source and model.{" "}
                   <Link
-                    href={studySourceHref}
+                    href={protocolPointsHref}
                     className="underline underline-offset-2 hover:text-[color:var(--accent)]"
                     style={{ color: "var(--fg)" }}
                   >

@@ -116,6 +116,15 @@ export function studySourceRow<
   )
 }
 
+/** The row whose per-source page lists every protocol point behind a merged
+ *  page's one-headline-point-per-model view: the first row that carries any
+ *  protocol point and names its source page. */
+export function protocolSourceRow<
+  T extends { protocol_condition?: string | null; evaluation_id?: string | null },
+>(rows: readonly T[]): T | undefined {
+  return rows.find((row) => row.protocol_condition != null && !!row.evaluation_id)
+}
+
 /** The comparability-bearing condition family. Unknown stays unknown —
  *  unparseable or missing feedback never gets promoted to a clean
  *  condition. */

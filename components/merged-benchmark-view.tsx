@@ -35,7 +35,7 @@ import {
   type MergedBenchmarkSummary,
   type ModelResultForBenchmark,
 } from "@/lib/eval-processing"
-import { studySourceRow } from "@/lib/collections"
+import { protocolSourceRow, studySourceRow } from "@/lib/collections"
 import type { EvalHierarchy } from "@/lib/backend-artifacts"
 import { crossSuiteSiblingEvalIds } from "@/components/signals/benchmark-signals-strip"
 import { useComparisonIndex } from "@/lib/use-comparison-index"
@@ -215,6 +215,12 @@ export function MergedBenchmarkView({
   // their per-source page directly.
   const studyRow = studySourceRow(summary.results)
   const studySourceHref = studyRow ? `/evals/${routeIdToPath(studyRow.evaluation_id)}` : undefined
+  // The "View all protocol points" note is about any protocol point, study
+  // or not, so it links to the first source that carries one.
+  const protocolRow = protocolSourceRow(summary.results)
+  const protocolPointsHref = protocolRow
+    ? `/evals/${routeIdToPath(protocolRow.evaluation_id)}`
+    : undefined
 
   return (
     <div className="space-y-8">
@@ -317,6 +323,7 @@ export function MergedBenchmarkView({
         splitConfig={metricSplitConfig}
         rowHighlight={rowHighlight}
         studySourceHref={studySourceHref}
+        protocolPointsHref={protocolPointsHref}
         leaderboardNotes={harmonizedNotes}
       />
 

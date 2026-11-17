@@ -11,6 +11,7 @@ import {
   feedbackConditionOf,
   formatProtocolValue,
   isStudyProtocolRow,
+  protocolSourceRow,
   studySourceRow,
   protocolFilterOptions,
   protocolValueId,
@@ -802,6 +803,17 @@ describe("studySourceRow", () => {
 
   it("skips a study row that names no source page", () => {
     expect(studySourceRow([{ protocol_condition: '{"token_limit":1}', evaluation_id: null }, study])).toBe(study)
+  })
+})
+
+describe("protocolSourceRow", () => {
+  it("returns the first row with any protocol point, study or not", () => {
+    const effort = { protocol_condition: '{"reasoning_effort":"high"}', evaluation_id: "livebench/x" }
+    expect(protocolSourceRow([{ protocol_condition: null, evaluation_id: "a" }, effort])).toBe(effort)
+  })
+
+  it("returns nothing when no row carries a protocol point", () => {
+    expect(protocolSourceRow([{ protocol_condition: null, evaluation_id: "a" }])).toBeUndefined()
   })
 })
 
