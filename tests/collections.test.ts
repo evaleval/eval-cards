@@ -807,13 +807,21 @@ describe("studySourceRow", () => {
 })
 
 describe("protocolSourceRow", () => {
-  it("returns the first row with any protocol point, study or not", () => {
-    const effort = { protocol_condition: '{"reasoning_effort":"high"}', evaluation_id: "livebench/x" }
-    expect(protocolSourceRow([{ protocol_condition: null, evaluation_id: "a" }, effort])).toBe(effort)
+  const effort = { protocol_condition: '{"reasoning_effort":"high"}', evaluation_id: "livebench/x" }
+  const plain = { protocol_condition: null, evaluation_id: "a" }
+
+  it("returns a row of the one source page that carries protocol points, study or not", () => {
+    const low = { protocol_condition: '{"reasoning_effort":"low"}', evaluation_id: "livebench/x" }
+    expect(protocolSourceRow([plain, effort, low])).toBe(effort)
   })
 
-  it("returns nothing when no row carries a protocol point", () => {
-    expect(protocolSourceRow([{ protocol_condition: null, evaluation_id: "a" }])).toBeUndefined()
+  it("returns nothing when several source pages carry protocol points", () => {
+    const study = { protocol_condition: '{"token_limit":1000000}', evaluation_id: "aisi/x" }
+    expect(protocolSourceRow([effort, study])).toBeUndefined()
+  })
+
+  it("returns nothing when no row carries a readable protocol point", () => {
+    expect(protocolSourceRow([plain, { protocol_condition: "not json", evaluation_id: "b" }])).toBeUndefined()
   })
 })
 

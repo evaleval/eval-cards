@@ -215,8 +215,8 @@ export function MergedBenchmarkView({
   // their per-source page directly.
   const studyRow = studySourceRow(summary.results)
   const studySourceHref = studyRow ? `/evals/${routeIdToPath(studyRow.evaluation_id)}` : undefined
-  // The "View all protocol points" note is about any protocol point, study
-  // or not, so it links to the first source that carries one.
+  // The "View all protocol points" link is about any protocol point, study
+  // or not, and exists only when one source page lists them all.
   const protocolRow = protocolSourceRow(summary.results)
   const protocolPointsHref = protocolRow
     ? `/evals/${routeIdToPath(protocolRow.evaluation_id)}`

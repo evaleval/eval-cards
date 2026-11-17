@@ -2296,16 +2296,21 @@ export function EvalDetail({
                 onToggle={toggleProtocolFilter}
                 onClear={clearProtocolFilters}
               />
-              {summary.merged_view && protocolPointsHref && (
+              {summary.merged_view && (
                 <p className="mt-2 text-[12px]" style={{ color: "var(--fg-muted)" }}>
-                  This page carries one headline protocol point per source and model.{" "}
-                  <Link
-                    href={protocolPointsHref}
-                    className="underline underline-offset-2 hover:text-[color:var(--accent)]"
-                    style={{ color: "var(--fg)" }}
-                  >
-                    View all protocol points
-                  </Link>
+                  This page carries one headline protocol point per source and model.
+                  {protocolPointsHref && (
+                    <>
+                      {" "}
+                      <Link
+                        href={protocolPointsHref}
+                        className="underline underline-offset-2 hover:text-[color:var(--accent)]"
+                        style={{ color: "var(--fg)" }}
+                      >
+                        View all protocol points
+                      </Link>
+                    </>
+                  )}
                 </p>
               )}
             </div>
