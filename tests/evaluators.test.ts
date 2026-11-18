@@ -5,6 +5,7 @@ import {
   groupEvalsByEvaluator,
   getEvalsForEvaluator,
   verifiedEvalIds,
+  isRecognizedEvaluator,
 } from "../lib/evaluators"
 import type { BenchmarkEvalListItem } from "../lib/eval-processing"
 
@@ -131,5 +132,19 @@ describe("verifiedEvalIds", () => {
   it("collects ids with at least one verified evaluator", () => {
     const ids = verifiedEvalIds(corpus)
     expect(Array.from(ids).sort()).toEqual(["e1", "e2", "e4"])
+  })
+})
+
+describe("isRecognizedEvaluator", () => {
+  it("gives the grey tier to each ingested public leaderboard, in any case", () => {
+    for (const name of ["Artificial Analysis", "LLM Stats", "Hugging Face", "kaggle", "Vals.ai", " vals.ai "]) {
+      expect(isRecognizedEvaluator(name)).toBe(true)
+    }
+  })
+
+  it("refuses other orgs, near-miss spellings, and empty names", () => {
+    for (const name of ["OpenAI", "Vals AI", "vals", "Stanford CRFM", "", null, undefined]) {
+      expect(isRecognizedEvaluator(name)).toBe(false)
+    }
   })
 })
