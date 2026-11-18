@@ -77,6 +77,8 @@ import {
   declaredKeysOf,
   protocolFilterOptions,
   protocolValueId,
+  hasProtocolPointRow,
+  isStudyProtocolRow,
   readProtocolAxis,
   summariseProtocolReadings,
   unionProtocolAxes,
@@ -163,6 +165,9 @@ interface EvalDetailProps {
    *  per-source evaluation_id in scope here, so MergedBenchmarkView
    *  passes the resolved per-source href down. */
   studySourceHref?: string
+  /** Merged pages only: the per-source page that lists every protocol
+   *  point, for the note under the protocol filters. */
+  protocolPointsHref?: string
   /** Merged pages only: notes about how rows were put on one scale,
    *  shown directly above the leaderboard table. */
   leaderboardNotes?: string[]
@@ -798,6 +803,7 @@ export function EvalDetail({
   splitConfig,
   rowHighlight,
   studySourceHref,
+  protocolPointsHref,
   leaderboardNotes,
   crossSourceContextLoader,
 }: EvalDetailProps) {
@@ -1049,11 +1055,15 @@ export function EvalDetail({
     () => lb.model_results.some((r) => r.protocol_condition != null),
     [lb.model_results]
   )
-  const protocolRowCount = useMemo(
-    () => lb.model_results.filter((r) => r.protocol_condition != null).length,
+  // The study caution counts only rows under a study's own protocol. A row
+  // whose protocol point is a reasoning-effort tier or thinking budget read
+  // off the model name is an ordinary result and raises no caution.
+  const studyRowCount = useMemo(
+    () => lb.model_results.filter((r) => isStudyProtocolRow(r.protocol_condition)).length,
     [lb.model_results]
   )
-  const allRowsHaveProtocol = protocolRowCount === lb.model_results.length
+  const hasStudyRows = studyRowCount > 0
+  const allRowsAreStudyRows = studyRowCount === lb.model_results.length
   const hasAssistedRows = useMemo(
     () => lb.model_results.some((r) => isAssistedResult(r.protocol_condition)),
     [lb.model_results]
@@ -2287,16 +2297,21 @@ export function EvalDetail({
                 onToggle={toggleProtocolFilter}
                 onClear={clearProtocolFilters}
               />
-              {summary.merged_view && studySourceHref && (
+              {summary.merged_view && hasProtocolPointRow(lb.model_results) && (
                 <p className="mt-2 text-[12px]" style={{ color: "var(--fg-muted)" }}>
-                  This page carries one headline protocol point per source and model.{" "}
-                  <Link
-                    href={studySourceHref}
-                    className="underline underline-offset-2 hover:text-[color:var(--accent)]"
-                    style={{ color: "var(--fg)" }}
-                  >
-                    View all protocol points
-                  </Link>
+                  This page carries one headline protocol point per source and model.
+                  {protocolPointsHref && (
+                    <>
+                      {" "}
+                      <Link
+                        href={protocolPointsHref}
+                        className="underline underline-offset-2 hover:text-[color:var(--accent)]"
+                        style={{ color: "var(--fg)" }}
+                      >
+                        View all protocol points
+                      </Link>
+                    </>
+                  )}
                 </p>
               )}
             </div>
@@ -2360,7 +2375,7 @@ export function EvalDetail({
 
           {/* Score distribution — paper-themed mean/median/quartile summary,
               with an optional Frontier toggle when models carry release dates. */}
-          {hasProtocolRows && (
+          {hasStudyRows && (
             <div
               className="mb-4 flex items-start gap-3 px-4 py-3"
               style={{
@@ -2372,9 +2387,9 @@ export function EvalDetail({
             >
               <div className="text-[13px] leading-relaxed">
                 <span style={{ fontWeight: 600 }}>Study-specific protocol.</span>{" "}
-                {allRowsHaveProtocol
+                {allRowsAreStudyRows
                   ? "This study ran models with much larger inference budgets than standard evaluations. Compare with published scores with caution."
-                  : `${protocolRowCount} of the results below come from a study that used much larger inference budgets. Compare them with the other rows or with published scores with caution.`}
+                  : `${studyRowCount} of the results below come from a study that used much larger inference budgets. Compare them with the other rows or with published scores with caution.`}
                 {hasAssistedRows && (assistedRowsAreNonHeadline ? (
                   <>
                     {" "}Assisted runs, where the model is told when its answer

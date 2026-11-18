@@ -10,6 +10,10 @@ import {
   compareProtocolTuples,
   feedbackConditionOf,
   formatProtocolValue,
+  hasProtocolPointRow,
+  isStudyProtocolRow,
+  protocolSourceRow,
+  studySourceRow,
   protocolFilterOptions,
   protocolValueId,
   protocolValueTitle,
@@ -781,5 +785,72 @@ describe("compareProtocolTuples", () => {
       10_000_000,
     ])
     expect(JSON.parse(sorted[2]).reasoning_tokens).toBeNull()
+  })
+})
+
+
+describe("studySourceRow", () => {
+  const effort = { protocol_condition: '{"reasoning_effort":"high"}', evaluation_id: "livebench/x" }
+  const budget = { protocol_condition: '{"reasoning_tokens":16000}', evaluation_id: "arc/x" }
+  const study = { protocol_condition: '{"token_limit":1000000}', evaluation_id: "aisi/x" }
+
+  it("skips effort and budget rows and returns the study row", () => {
+    expect(studySourceRow([effort, budget, study])).toBe(study)
+  })
+
+  it("returns nothing on a page with no study rows", () => {
+    expect(studySourceRow([effort, budget, { protocol_condition: null, evaluation_id: "a" }])).toBeUndefined()
+  })
+
+  it("skips a study row that names no source page", () => {
+    expect(studySourceRow([{ protocol_condition: '{"token_limit":1}', evaluation_id: null }, study])).toBe(study)
+  })
+})
+
+describe("protocolSourceRow", () => {
+  const effort = { protocol_condition: '{"reasoning_effort":"high"}', evaluation_id: "livebench/x" }
+  const plain = { protocol_condition: null, evaluation_id: "a" }
+
+  it("returns a row of the one source page that carries protocol points, study or not", () => {
+    const low = { protocol_condition: '{"reasoning_effort":"low"}', evaluation_id: "livebench/x" }
+    expect(protocolSourceRow([plain, effort, low])).toBe(effort)
+  })
+
+  it("returns nothing when several source pages carry protocol points", () => {
+    const study = { protocol_condition: '{"token_limit":1000000}', evaluation_id: "aisi/x" }
+    expect(protocolSourceRow([effort, study])).toBeUndefined()
+  })
+
+  it("returns nothing when a protocol row names no source page", () => {
+    expect(protocolSourceRow([effort, { protocol_condition: '{"reasoning_effort":"low"}', evaluation_id: null }])).toBeUndefined()
+  })
+
+  it("returns nothing when no row carries a readable protocol point", () => {
+    expect(protocolSourceRow([plain, { protocol_condition: "not json", evaluation_id: "b" }])).toBeUndefined()
+  })
+})
+
+describe("hasProtocolPointRow", () => {
+  it("is true only when a row carries a readable protocol point", () => {
+    expect(hasProtocolPointRow([{ protocol_condition: null }, { protocol_condition: "not json" }])).toBe(false)
+    expect(hasProtocolPointRow([{ protocol_condition: null }, { protocol_condition: '{"reasoning_effort":"high"}' }])).toBe(true)
+  })
+})
+
+describe("isStudyProtocolRow", () => {
+  it("counts a row under a study's own protocol", () => {
+    expect(isStudyProtocolRow('{"token_limit":1000000}')).toBe(true)
+    expect(isStudyProtocolRow('{"feedback":"none","reasoning_effort":"high"}')).toBe(true)
+  })
+
+  it("does not count a run condition read off the model name", () => {
+    expect(isStudyProtocolRow('{"reasoning_effort":"high"}')).toBe(false)
+    expect(isStudyProtocolRow('{"reasoning_tokens":16000}')).toBe(false)
+    expect(isStudyProtocolRow('{"reasoning_effort":"high","reasoning_tokens":16000}')).toBe(false)
+  })
+
+  it("does not count a row with no protocol point", () => {
+    expect(isStudyProtocolRow(null)).toBe(false)
+    expect(isStudyProtocolRow("not json")).toBe(false)
   })
 })
