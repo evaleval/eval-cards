@@ -29,11 +29,12 @@ export type OrgMetaMap = Record<string, OrgMetadata>
  * "Recognized" evaluator orgs — public leaderboards whose results we ingest
  * directly but which are not submitter-verified. They get the grey
  * VerifiedBadge tier (vs the blue verified one). Keys are the view-layer
- * evaluator/source names of the four ingested sources:
+ * evaluator/source names of the five ingested sources:
  *   artificial_analysis → "Artificial Analysis"
  *   llm_stats           → "LLM Stats"
  *   hfopenllm_v2        → "Hugging Face"
  *   global-mmlu-lite    → "kaggle"
+ *   vals_ai             → "Vals.ai"
  * Matched case-insensitively (see isRecognizedEvaluator).
  */
 export const RECOGNIZED_EVALUATOR_NAMES = new Set([
@@ -41,6 +42,7 @@ export const RECOGNIZED_EVALUATOR_NAMES = new Set([
   "llm stats",
   "hugging face",
   "kaggle",
+  "vals.ai",
 ])
 
 /** True when the org name is one of the recognized leaderboard sources. */
