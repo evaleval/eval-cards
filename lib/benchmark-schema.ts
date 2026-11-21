@@ -3,7 +3,7 @@
  * Based on the evalevalai.com schema structure
  */
 
-import type { EvalcardsAnnotations, RowAnnotations, SignalSummaries } from "@/lib/backend-artifacts"
+import type { EvalcardsAnnotations, RowAnnotations, ScaleConversion, SignalSummaries } from "@/lib/backend-artifacts"
 import type { CollectionsSidecarEntry } from "@/lib/collections"
 
 // TODO: standardize eval-id naming across the frontend. `eval_summary_id`
@@ -133,6 +133,20 @@ export interface EvaluationResult {
    *  snapshots produced before the column shipped — treated as
    *  unverified. */
   is_verified_evaluator?: boolean
+  /** Model-page rows: TRUE on the one reading a model's row for this eval
+   *  leads with (`eval_results_view.is_lead_metric`, or the rule view-data
+   *  derives on a snapshot without the column). */
+  is_lead_metric?: boolean
+  /** Model-page rows: the model's rank on this reading's own metric, out of
+   *  `total` ranked models. Absent when the pipeline did not rank the row. */
+  position?: number
+  total?: number
+  /** Model-page rows: the dataset split the source states, and the
+   *  producer's canonical-scale fields (`score_canonical`,
+   *  `scale_conversion`). Absent when the snapshot or row has none. */
+  split?: string
+  score_canonical?: number
+  scale_conversion?: ScaleConversion
 }
 
 export interface MetricConfig {

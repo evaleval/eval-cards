@@ -3,11 +3,17 @@ import os from "os"
 import path from "path"
 
 import { DuckDBConnection } from "@duckdb/node-api"
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it, vi } from "vitest"
 
 import collectionContextFixture from "./fixtures/collection_context.json"
+import { SummaryMetricsList, buildBenchmarkGroups } from "../components/benchmark-detail"
 import { isNotAssessable } from "../components/signals/signal-utils"
+import type { EvalTag, ModelEvaluationSummary } from "../lib/benchmark-schema"
 import { mergedSummaryToEvalSummary } from "../lib/merged-adapter"
+
+vi.mock("next/navigation", () => import("./next-navigation-stub"))
 
 function sqlString(value: string) {
   return `'${value.replace(/'/g, "''")}'`
@@ -29,6 +35,7 @@ async function writeSyntheticStageJSnapshot(
     includeMixedScaleSlice?: boolean
     includeBenchmarkCardSources?: boolean
     dropRawModelIds?: boolean
+    leadMetric?: "derived" | "column"
   } = {},
 ) {
   // includeMergedView=false emulates a pre-merged-view snapshot: no
@@ -48,6 +55,9 @@ async function writeSyntheticStageJSnapshot(
   // and no headline setup_items.
   // includeMixedScaleSlice adds a second mt-bench slice whose two sources
   // publish the same bounds-less metric as a percent and as a fraction.
+  // leadMetric gives gpt-5 several metrics per eval. "derived" (every
+  // snapshot so far) ships no is_lead_metric column; "column" ships the
+  // pipeline's, set to a reading the derived rule would not pick.
   const {
     includeMergedView = true,
     includeCollections = false,
@@ -58,6 +68,7 @@ async function writeSyntheticStageJSnapshot(
     includeMixedScaleSlice = false,
     includeBenchmarkCardSources = false,
     dropRawModelIds = false,
+    leadMetric,
   } = options
   await mkdir(snapshotDir, { recursive: true })
   const connection = await DuckDBConnection.create()
@@ -314,6 +325,22 @@ async function writeSyntheticStageJSnapshot(
        FROM evals_fixture WHERE evaluation_id = 'mmlu'`
     )
   }
+  if (leadMetric) {
+    // An eval whose primary metric (accuracy) gpt-5 has no reading on.
+    await connection.run(
+      `INSERT INTO evals_fixture
+       SELECT * REPLACE (
+         'src-l%2Fbbq' AS evaluation_id,
+         'bbq' AS benchmark_id,
+         'BBQ' AS evaluation_name,
+         'BBQ' AS canonical_display_name,
+         'src-l' AS composite_slug,
+         'bbq' AS family_id,
+         'BBQ' AS family_display_name
+       )
+       FROM evals_fixture WHERE evaluation_id = 'mmlu'`
+    )
+  }
   await copyParquet(
     connection,
     "SELECT * FROM evals_fixture",
@@ -459,6 +486,7 @@ async function writeSyntheticStageJSnapshot(
         NULL::VARCHAR AS protocol_condition,
         NULL::VARCHAR AS judge_condition,
         true AS is_headline,
+        true AS is_lead_metric,
         NULL::VARCHAR AS metric_source_label,
         'ok' AS comparability_status,
         'log_prob' AS scoring_mode,
@@ -742,6 +770,56 @@ async function writeSyntheticStageJSnapshot(
     await judgeRow("meta/llama-4", "llama_score", 0.77, "ok", "false")
   }
 
+  if (leadMetric) {
+    // More readings for gpt-5, each ranked on its own metric. Seeded from
+    // its one ranked mmlu row, so each insert adds exactly one row.
+    const reading = (
+      evaluationId: string,
+      metricId: string,
+      name: string,
+      score: number,
+      rank: [number, number] | null,
+      pipelineLead: boolean,
+    ) =>
+      connection.run(
+        `INSERT INTO eval_results_fixture
+         SELECT * REPLACE (
+           '${evaluationId}' AS evaluation_id,
+           '${evaluationId}%3A${metricId}' AS metric_summary_id,
+           '${metricId}' AS metric_id,
+           '${metricId}' AS metric_id_effective,
+           '${name}' AS metric_display_name,
+           ${score} AS score,
+           ${score} AS score_canonical,
+           ${score} AS score_published,
+           struct_pack(
+             score := ${score}::DOUBLE,
+             standard_error := 0.01::DOUBLE,
+             sample_size := 10,
+             confidence_interval := struct_pack(
+               lower := 0.7::DOUBLE, upper := 0.9::DOUBLE, confidence_level := 0.95::DOUBLE
+             )
+           ) AS score_details,
+           ${rank ? rank[0] : "NULL"}::INTEGER AS position,
+           ${rank ? rank[1] : "NULL"}::INTEGER AS total,
+           ${pipelineLead} AS is_lead_metric
+         )
+         FROM eval_results_fixture
+         WHERE evaluation_id = 'mmlu' AND model_key = 'openai/gpt-5'
+           AND metric_id = 'accuracy' AND position IS NOT NULL`
+      )
+    // mmlu: the model has the primary metric (accuracy, 1 of 1); F1 ranks
+    // more models and still does not lead.
+    await reading("mmlu", "f1", "F1", 0.7, [2, 9], false)
+    // bbq: no reading on the primary. BLEU and exact match rank the most
+    // models (9 each), and BLEU sorts first. The pipeline's flag is put on
+    // F1 so the "column" snapshot can show the column wins.
+    await reading("src-l%2Fbbq", "f1", "F1", 0.61, [2, 5], true)
+    await reading("src-l%2Fbbq", "exact-match", "Exact Match", 0.55, [4, 9], false)
+    await reading("src-l%2Fbbq", "bleu", "BLEU", 0.33, [1, 9], false)
+    await reading("src-l%2Fbbq", "chrf", "chrF", 0.4, null, false)
+  }
+
   // The pre-judge warehouse struct: no `comparability_status`, and neither
   // divergence block carries a verdict at all — the flat columns are the
   // only place that answer lives on those snapshots.
@@ -776,6 +854,7 @@ async function writeSyntheticStageJSnapshot(
           "score_published",
         ]),
     ...(includeReproducibilityEvidence ? [] : ["reproducibility_evidence"]),
+    ...(leadMetric === "column" ? [] : ["is_lead_metric"]),
   ]
   const annotationsProjection = includeJudgeColumns
     ? ""
@@ -1165,6 +1244,7 @@ async function withSnapshot(
     includeMixedScaleSlice?: boolean
     includeBenchmarkCardSources?: boolean
     dropRawModelIds?: boolean
+    leadMetric?: "derived" | "column"
   },
   run: (
     dataBackend: typeof import("../lib/data-backend"),
@@ -1849,6 +1929,79 @@ describe("judge conditions and headline rows", () => {
       // them either.
       expect(merged!.results).toHaveLength(6)
       expect(merged!.results.every((r) => r.is_headline === true)).toBe(true)
+    })
+  })
+})
+
+describe("model page lead metric", () => {
+  type Summary = ModelEvaluationSummary
+
+  // [eval, metric, leads the row, position, total] per reading.
+  function readings(model: Summary) {
+    return model.evaluations_by_tag.applied_reasoning
+      .map((evaluation) => {
+        const result = evaluation.evaluation_results[0]
+        return [
+          evaluation.eval_summary_id,
+          result.metric_key,
+          result.is_lead_metric,
+          result.position,
+          result.total,
+        ]
+      })
+      .sort((a, b) => `${a[0]} ${a[1]}`.localeCompare(`${b[0]} ${b[1]}`))
+  }
+
+  // The Summary view's text for the model, as a reader sees it.
+  function summaryText(model: Summary) {
+    const entries = Object.entries(model.evaluations_by_tag).flatMap(([tag, evaluations]) =>
+      evaluations.flatMap((evaluation) =>
+        evaluation.evaluation_results.map((result) => ({ evaluation, result, category: tag as EvalTag })),
+      ),
+    )
+    return renderToStaticMarkup(
+      createElement(SummaryMetricsList, {
+        groups: buildBenchmarkGroups(entries, undefined),
+        hierarchyIndex: null,
+        sourcePrefixFamily: new Map(),
+      }),
+    )
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;|\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+  }
+
+  it("derives the lead reading on a snapshot without is_lead_metric", async () => {
+    await withSnapshot({ leadMetric: "derived" }, async (dataBackend) => {
+      const model = (await dataBackend.getModelSummaryById("openai%2Fgpt-5"))!
+
+      expect(readings(model)).toEqual([
+        // The eval's primary metric leads, though F1 ranks more models.
+        ["mmlu", "accuracy", true, 1, 1],
+        ["mmlu", "f1", false, 2, 9],
+        // No reading on the primary: the metric ranking the most models
+        // leads, the tie going to the first metric id.
+        ["src-l%2Fbbq", "bleu", true, 1, 9],
+        ["src-l%2Fbbq", "chrf", false, undefined, undefined],
+        ["src-l%2Fbbq", "exact-match", false, 4, 9],
+        ["src-l%2Fbbq", "f1", false, 2, 5],
+      ])
+
+      const text = summaryText(model)
+      expect(text).toContain("Bbq Applied reasoning ↑ Higher is better · BLEU rank 1 of 9 33.0% ")
+      expect(text).toContain("MMLU Applied reasoning ↑ Higher is better · Accuracy rank 1 of 1 80.0% ")
+    })
+  })
+
+  it("takes the pipeline's is_lead_metric over the derived rule when the snapshot has it", async () => {
+    await withSnapshot({ leadMetric: "column", includeJudgeColumns: true }, async (dataBackend) => {
+      const model = (await dataBackend.getModelSummaryById("openai%2Fgpt-5"))!
+
+      expect(readings(model).filter((reading) => reading[2])).toEqual([
+        ["mmlu", "accuracy", true, 1, 1],
+        ["src-l%2Fbbq", "f1", true, 2, 5],
+      ])
+      expect(summaryText(model)).toContain("Bbq Applied reasoning ↑ Higher is better · F1 rank 2 of 5 61.0% ")
     })
   })
 })

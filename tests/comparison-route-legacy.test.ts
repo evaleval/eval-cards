@@ -9,7 +9,14 @@ import type { ComparisonIndex, EvalHierarchy } from "@/lib/backend-artifacts"
 import type { BenchmarkEvalSummary, ModelEvaluationSummary } from "@/lib/eval-processing"
 import { parseJsonWithBounds } from "@/lib/json-bounds"
 
-import { FIXTURE_DIR, fixtureIndex, fixtureRawHierarchy, identityKeysOf, useSnapshot } from "./comparison-fixture"
+import {
+  FIXTURE_DIR,
+  fixtureIndex,
+  fixtureRawHierarchy,
+  identityKeysOf,
+  leadReadingsOf,
+  useSnapshot,
+} from "./comparison-fixture"
 
 // The legacy (non-v2) data backend publishes only the whole comparison index.
 // The route keeps loading it the way it always did and serves it sliced. The
@@ -129,6 +136,7 @@ function modelConsumers(index: ComparisonIndex, summary: ModelEvaluationSummary)
     currentModelRouteId: routeId,
     currentModelIdentityKeys: keys,
     familyDisplayByKey: new Map(hierarchy.families.map((f) => [f.key, f.display_name])),
+    leadReadings: leadReadingsOf(summary),
   })
   return { histograms, peers, overlapRows }
 }

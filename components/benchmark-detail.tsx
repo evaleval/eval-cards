@@ -47,6 +47,12 @@ import { formatTagLabel } from "@/lib/benchmark-tags"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
 import type { ModelSummaryCore } from "@/lib/benchmark-schema"
 import { lookupBenchmarkCard } from "@/lib/benchmark-metadata-utils"
+import {
+  averageReadings,
+  partsCountLabel,
+  partsMeanLabel,
+  type AverageableReading,
+} from "@/lib/headline-readings"
 import type { BenchmarkEvaluationCardData } from "@/components/benchmark-evaluation-card"
 import type {
   BenchmarkIndexEntry,
@@ -70,6 +76,7 @@ import {
   buildOverlapRows,
   countMultiSourceRows,
   formatPlainUnitScore,
+  type OverlapLeadReading,
   type OverlapRow,
   type OverlapSummaryCandidate,
   type OverlapSummaryJoinRow,
@@ -149,24 +156,38 @@ interface BenchmarkGroup {
   category: EvalTag
   description: string
   scoreType: EvaluationResult["metric_config"]["score_type"] | "mixed"
+  /** The number under the benchmark's name; see GroupHeadline. NaN and
+   *  `N parts` when the group has none. */
   avgRawScore: number
   avgNormalizedScore: number
   avgDisplayScore: string
+  /** `avg of N parts` beside a mean of parts; null beside a reading. */
+  scoreNote: string | null
+  headline: GroupHeadline
   bestRankPosition: number | null
   bestRankTotal: number | null
-  bestRankRatio: number | null
   domains: string[]
   benchmarkCard?: BenchmarkCard
   variants: BenchmarkVariant[]
 }
 
+/**
+ * The number a Researcher-view group shows under its benchmark's name.
+ * `own`: the benchmark's own eval is in the group, and the number is that
+ * eval's lead reading. Otherwise the group is the benchmark's parts (one
+ * lead reading per part eval): their mean when they are averageable
+ * (`parts-mean`), else no number (`parts`).
+ */
+type GroupHeadline =
+  | { kind: "own"; reading: BenchmarkVariant; parts: BenchmarkVariant[] }
+  | { kind: "parts-mean"; parts: BenchmarkVariant[]; mean: number; unit: string | null }
+  | { kind: "parts"; parts: BenchmarkVariant[] }
+
 interface CompositeGroup {
   compositeKey: string
   compositeName: string
   benchmarks: BenchmarkGroup[]
-  avgRawScore: number
   avgNormalizedScore: number
-  avgDisplayScore: string
   bestRank: { position: number; total: number } | null
 }
 
@@ -475,8 +496,6 @@ function getCompositeName(
 
 function groupByComposite(
   groups: BenchmarkGroup[],
-  modelIds: string[],
-  peerRanks: PeerRanksMap,
   hierarchyIndex: Map<string, HierarchyEvalLocation> | null
 ): CompositeGroup[] {
   const composites = new Map<string, BenchmarkGroup[]>()
@@ -490,13 +509,11 @@ function groupByComposite(
   return Array.from(composites.entries()).map(([compositeKey, benchmarks]) => {
     const scores = benchmarks.map(b => b.avgNormalizedScore).filter(Number.isFinite)
     const avgScore = scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : 0
-    const rawScores = benchmarks.map((benchmark) => benchmark.avgRawScore).filter(Number.isFinite)
-    const avgRawScore = rawScores.length > 0 ? rawScores.reduce((a, b) => a + b, 0) / rawScores.length : 0
 
     // Find best rank across all benchmarks in the composite
     let bestRank: { position: number; total: number } | null = null
     for (const b of benchmarks) {
-      const rank = getGroupPeerRank(b, modelIds, peerRanks)
+      const rank = getGroupPeerRank(b)
       if (!rank) continue
       if (!bestRank || (rank.position / rank.total) < (bestRank.position / bestRank.total)) {
         bestRank = rank
@@ -507,9 +524,7 @@ function groupByComposite(
       compositeKey,
       compositeName: benchmarks[0] ? getCompositeName(benchmarks[0], compositeKey, hierarchyIndex) : getCompositeDisplayName(compositeKey),
       benchmarks,
-      avgRawScore,
       avgNormalizedScore: avgScore,
-      avgDisplayScore: formatRawScoreValue(avgRawScore),
       bestRank,
     }
   }).sort((a, b) => {
@@ -1274,115 +1289,6 @@ function ScoreRail({
   )
 }
 
-function parseNumericRank(value: unknown) {
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : null
-  }
-
-  if (typeof value === "string") {
-    const parsed = Number.parseFloat(value.replace(/[^0-9.]/g, ""))
-    return Number.isFinite(parsed) ? parsed : null
-  }
-
-  return null
-}
-
-function parseRankFraction(value: unknown) {
-  if (typeof value !== "string") {
-    return null
-  }
-
-  const match = value.match(/(\d+)\s*\/\s*(\d+)/)
-  if (!match) {
-    return null
-  }
-
-  const position = Number.parseInt(match[1], 10)
-  const total = Number.parseInt(match[2], 10)
-  if (!Number.isFinite(position) || !Number.isFinite(total) || total <= 0) {
-    return null
-  }
-
-  return { position, total }
-}
-
-function findRankFromObject(value: unknown, depth = 0): { position: number; total: number | null } | null {
-  if (depth > 4 || value == null) {
-    return null
-  }
-
-  const fraction = parseRankFraction(value)
-  if (fraction) {
-    return fraction
-  }
-
-  if (typeof value !== "object" || Array.isArray(value)) {
-    return null
-  }
-
-  const record = value as Record<string, unknown>
-  const keys = Object.keys(record)
-  const lowered = Object.fromEntries(keys.map((key) => [key.toLowerCase(), record[key]]))
-
-  const positionCandidates = ["rank", "position", "place", "standing"]
-  const totalCandidates = ["total", "out_of", "num_models", "model_count", "total_models", "population"]
-
-  let position: number | null = null
-  let total: number | null = null
-
-  for (const key of positionCandidates) {
-    if (key in lowered) {
-      position = parseNumericRank(lowered[key])
-      if (position != null) {
-        break
-      }
-    }
-  }
-
-  for (const key of totalCandidates) {
-    if (key in lowered) {
-      total = parseNumericRank(lowered[key])
-      if (total != null) {
-        break
-      }
-    }
-  }
-
-  if (position != null) {
-    return { position, total }
-  }
-
-  for (const nestedValue of Object.values(record)) {
-    const nested = findRankFromObject(nestedValue, depth + 1)
-    if (nested) {
-      return nested
-    }
-  }
-
-  return null
-}
-
-function getVariantPeerRank(result: EvaluationResult) {
-  const fromDetails = findRankFromObject(result.score_details.details)
-  if (fromDetails?.position != null) {
-    return fromDetails
-  }
-
-  const fromSource = findRankFromObject(result.source_data)
-  if (fromSource?.position != null) {
-    return fromSource
-  }
-
-  if (result.evaluation_name.toLowerCase().includes("rank")) {
-    const scoreRank = parseNumericRank(result.score_details.score)
-    if (scoreRank != null) {
-      return { position: scoreRank, total: null }
-    }
-  }
-
-  return null
-}
-
 function buildVariantStructuredSections(variant: BenchmarkVariant) {
   const detailEntries = variant.result.score_details.details
     ? Object.entries(variant.result.score_details.details)
@@ -1494,38 +1400,18 @@ function getEvalSummaryIdFromHref(href: string) {
   return id.split("?")[0]?.split("#")[0] ?? ""
 }
 
-function getGroupPeerRank(
-  group: BenchmarkGroup,
-  modelIds: string[],
-  peerRanks: PeerRanksMap
-): { position: number; total: number } | null {
-  let best: { position: number; total: number } | null = null
+/** A reading's rank on its own metric; null when the pipeline did not rank it. */
+function readingRank(result: EvaluationResult): { position: number; total: number } | null {
+  const { position, total } = result
+  return position != null && total != null && total > 0 ? { position, total } : null
+}
 
-  for (const variant of group.variants) {
-    const evalSummaryId =
-      variant.evaluation.eval_summary_id ??
-      getEvalSummaryIdFromHref(getEvalDetailHref(variant.evaluation, variant.result))
-    const evalRanks = peerRanks[evalSummaryId]
-    if (!evalRanks) continue
-
-    // Try all known model IDs for this model family
-    for (const mid of modelIds) {
-      const rank = evalRanks[mid]
-      if (rank == null) continue
-
-      if (best == null) {
-        best = rank
-      } else {
-        const rankRatio = rank.total > 0 ? rank.position / rank.total : rank.position
-        const bestRatio = best.total > 0 ? best.position / best.total : best.position
-        if (rankRatio < bestRatio) {
-          best = rank
-        }
-      }
-    }
-  }
-
-  return best ?? (group.bestRankPosition != null ? { position: group.bestRankPosition, total: group.bestRankTotal ?? 0 } : null)
+/**
+ * The rank shown beside a group's number: its own eval's lead reading's own
+ * rank. A group of parts has no rank: its number is no one reading.
+ */
+export function getGroupPeerRank(group: BenchmarkGroup): { position: number; total: number } | null {
+  return group.headline.kind === "own" ? readingRank(group.headline.reading.result) : null
 }
 
 // peer-ranks.json now ships as a sidecar inside the pinned `SNAPSHOT_URL`
@@ -1541,11 +1427,6 @@ function loadPeerRanks(): Promise<PeerRanksMap> {
     peerRanksPromise = fetchPeerRanks().catch(() => ({} as PeerRanksMap))
   }
   return peerRanksPromise
-}
-
-async function fetchPeerRankForModel(evalSummaryId: string, modelId: string) {
-  const ranks = await loadPeerRanks()
-  return ranks[evalSummaryId]?.[modelId] ?? null
 }
 
 function formatResultDisplayScore(result: EvaluationResult) {
@@ -1588,7 +1469,81 @@ function getVariantDedupKey(variant: BenchmarkVariant) {
   })
 }
 
-function buildBenchmarkGroups(
+// The metric's own name: the producer's display name, else the metric id
+// tidied up. `evaluation_name` is no source for it: on a metric the registry
+// has not named, it carries the eval's name instead.
+function getResultMetricName(result: EvaluationResult) {
+  return (
+    result.display_name ||
+    result.canonical_display_name ||
+    normalizeDisplayLabel(result.metric_key) ||
+    "Metric"
+  )
+}
+
+/** A deep-dive row's metric name, when none of its labels already names it. */
+function metricNameIfUnnamed(variant: BenchmarkVariant, labels: Array<string | null | undefined>): string | null {
+  const name = getResultMetricName(variant.result)
+  const needle = name.toLowerCase()
+  return labels.some((label) => label?.toLowerCase().includes(needle)) ? null : name
+}
+
+function averageableReading(variant: BenchmarkVariant): AverageableReading {
+  const { result } = variant
+  return {
+    metricKey: result.metric_key,
+    lowerIsBetter: result.metric_config.lower_is_better,
+    split: result.split,
+    unit: result.metric_config.unit,
+    score: result.score_details.score,
+    scoreCanonical: result.score_canonical,
+    scaleConversion: result.scale_conversion,
+  }
+}
+
+/**
+ * The group's number: its own eval's lead reading when the group holds the
+ * benchmark's own eval (the eval whose id is the group key), else its
+ * parts' lead readings, averaged only when they are averageable.
+ */
+/**
+ * The number on a Researcher-list family header. One group: that group's
+ * number. Several: the mean of their own readings when every group's number
+ * is its own eval's lead reading and those are averageable (`avg of N`);
+ * otherwise no number, and `N benchmarks` in its place.
+ */
+export function familyScore(groups: BenchmarkGroup[]): { text: string; note: string | null } {
+  if (groups.length === 1) return { text: groups[0].avgDisplayScore, note: groups[0].scoreNote }
+  const readings = groups.map((group) => (group.headline.kind === "own" ? group.headline.reading : null))
+  const average = readings.every((reading): reading is BenchmarkVariant => reading != null)
+    ? averageReadings(readings.map(averageableReading))
+    : null
+  return average
+    ? { text: formatRawScoreValue(average.mean, average.unit ?? undefined), note: `avg of ${groups.length}` }
+    : { text: `${groups.length} benchmarks`, note: null }
+}
+
+function groupHeadline(group: BenchmarkGroup): GroupHeadline {
+  const leads = group.variants.filter((variant) => variant.result.is_lead_metric)
+  const reading = leads.find((variant) => variant.evaluation.eval_summary_id === group.key)
+  const parts = leads.filter((variant) => variant !== reading)
+  if (reading) return { kind: "own", reading, parts }
+  const average = averageReadings(parts.map(averageableReading))
+  return average
+    ? { kind: "parts-mean", parts, mean: average.mean, unit: average.unit }
+    : { kind: "parts", parts }
+}
+
+// Descending by score, with "no headline number" (NaN) after every number.
+function compareScoreDesc(a: number, b: number) {
+  const aFinite = Number.isFinite(a)
+  const bFinite = Number.isFinite(b)
+  if (aFinite && bFinite) return b - a
+  if (aFinite === bFinite) return 0
+  return aFinite ? -1 : 1
+}
+
+export function buildBenchmarkGroups(
   entries: Array<{ evaluation: BenchmarkEvaluation; result: EvaluationResult; category: EvalTag }>,
   benchmarkCards: Record<string, BenchmarkCard> | undefined,
   returnTo?: string
@@ -1676,16 +1631,10 @@ function buildBenchmarkGroups(
       : undefined
     const normalizedScore = normalizeScoreForDisplay(entry.result)
     const displayScore = formatResultDisplayScore(entry.result)
-    const rawScore = entry.result.score_details.score
-    const rankInfo = getVariantPeerRank(entry.result)
+    const rankInfo = readingRank(entry.result)
     const rankPosition = rankInfo?.position ?? null
     const rankTotal = rankInfo?.total ?? null
-    const rankRatio =
-      rankPosition != null && rankTotal != null && rankTotal > 0
-        ? rankPosition / rankTotal
-        : rankPosition != null
-          ? rankPosition
-          : null
+    const rankRatio = rankInfo ? rankInfo.position / rankInfo.total : null
     const descriptor = getVariantDescriptor(entry.evaluation, entry.result)
     const pairKey = metricPairKey(entry.result.metric_summary_id ?? "")
     const auxStderrEntry = pairKey ? stderrByPair.get(`${groupKey}::${pairKey}`) : undefined
@@ -1718,12 +1667,13 @@ function buildBenchmarkGroups(
         category: entry.category,
         description: entry.result.metric_config.evaluation_description ?? "",
         scoreType: entry.result.metric_config.score_type ?? "continuous",
-        avgRawScore: rawScore,
-        avgNormalizedScore: normalizedScore,
-        avgDisplayScore: formatRawScoreValue(rawScore, entry.result.metric_config.unit),
-        bestRankPosition: rankPosition,
-        bestRankTotal: rankTotal,
-        bestRankRatio: rankRatio,
+        avgRawScore: Number.NaN,
+        avgNormalizedScore: Number.NaN,
+        avgDisplayScore: "",
+        scoreNote: null,
+        headline: { kind: "parts", parts: [] },
+        bestRankPosition: null,
+        bestRankTotal: null,
         domains: card?.benchmark_details?.domains ?? [],
         benchmarkCard: card,
         variants: [variant],
@@ -1824,19 +1774,41 @@ function buildBenchmarkGroups(
 
         return b.normalizedScore - a.normalizedScore
       })
-      group.avgRawScore =
-        group.variants.reduce((sum, variant) => sum + variant.result.score_details.score, 0) / group.variants.length
-      group.avgNormalizedScore =
-        group.variants.reduce((sum, variant) => sum + variant.normalizedScore, 0) / group.variants.length
-      group.avgDisplayScore = formatRawScoreValue(group.avgRawScore)
-
-      const rankedVariants = group.variants
-        .filter((variant) => variant.rankRatio != null)
-        .sort((a, b) => (a.rankRatio ?? Number.POSITIVE_INFINITY) - (b.rankRatio ?? Number.POSITIVE_INFINITY))
-
-      group.bestRankPosition = rankedVariants[0]?.rankPosition ?? null
-      group.bestRankTotal = rankedVariants[0]?.rankTotal ?? null
-      group.bestRankRatio = rankedVariants[0]?.rankRatio ?? null
+      const headline = groupHeadline(group)
+      group.headline = headline
+      if (headline.kind === "own") {
+        group.avgRawScore = headline.reading.result.score_details.score
+        group.avgNormalizedScore = headline.reading.normalizedScore
+        group.avgDisplayScore = headline.reading.displayScore
+        group.scoreNote = null
+        group.bestRankPosition = headline.reading.rankPosition
+        group.bestRankTotal = headline.reading.rankTotal
+      } else {
+        group.bestRankPosition = null
+        group.bestRankTotal = null
+        if (headline.kind === "parts-mean") {
+          group.avgRawScore = headline.mean
+          // The parts share one metric and direction, so their places on
+          // it are averageable too; this is the sort key and signal level.
+          group.avgNormalizedScore =
+            averageReadings(
+              headline.parts.map((variant) => ({
+                ...averageableReading(variant),
+                score: variant.normalizedScore,
+                unit: null,
+                scoreCanonical: undefined,
+                scaleConversion: undefined,
+              })),
+            )?.mean ?? Number.NaN
+          group.avgDisplayScore = formatRawScoreValue(headline.mean, headline.unit ?? undefined)
+          group.scoreNote = partsMeanLabel(headline.parts.length)
+        } else {
+          group.avgRawScore = Number.NaN
+          group.avgNormalizedScore = Number.NaN
+          group.avgDisplayScore = partsCountLabel(headline.parts.length)
+          group.scoreNote = null
+        }
+      }
       // Attach a warning if scales were mixed
       if (scaleWarning) {
         // Patch: extend group with a warning property for UI
@@ -1844,7 +1816,109 @@ function buildBenchmarkGroups(
       }
       return group
     })
-    .sort((a, b) => b.avgNormalizedScore - a.avgNormalizedScore)
+    .sort((a, b) => compareScoreDesc(a.avgNormalizedScore, b.avgNormalizedScore))
+}
+
+/**
+ * Inputs for the overlaps builder sourced from the model's own rows: the
+ * reading each eval's row leads with, one candidate per benchmark group
+ * (merged in when the benchmark has no benchmark_index entry) and one join
+ * row per result row (backfills generation params / annotations onto
+ * comparison-index appearances).
+ *
+ * A candidate carries the group's number (GroupHeadline): its own eval's
+ * lead reading, or its parts.
+ */
+export function buildOverlapSummaryInputs(benchmarkGroups: BenchmarkGroup[]) {
+  const leadReadings = new Map<string, OverlapLeadReading>()
+  const candidates: OverlapSummaryCandidate[] = []
+  const joinRows: OverlapSummaryJoinRow[] = []
+  for (const group of benchmarkGroups) {
+    const ids: string[] = []
+    for (const variant of group.variants) {
+      const id = variant.evaluation.eval_summary_id
+      if (!id) continue
+      if (!ids.includes(id)) ids.push(id)
+      if (variant.result.is_lead_metric && variant.result.metric_summary_id) {
+        leadReadings.set(id, {
+          metricSummaryId: variant.result.metric_summary_id,
+          split: variant.result.split ?? null,
+          rank: readingRank(variant.result),
+        })
+      }
+      const gc = variant.result.generation_config ?? variant.evaluation.generation_config
+      joinRows.push({
+        evalSummaryId: id,
+        temperature: gc?.generation_args?.temperature ?? null,
+        maxTokens: gc?.generation_args?.max_tokens ?? null,
+        collectionId: variant.evaluation.collection_id ?? null,
+        protocolCondition: variant.evaluation.protocol_condition ?? null,
+        studyFamilyKey: variant.evaluation.composite_slug ?? null,
+        annotations: variant.result.evalcards?.annotations ?? null,
+      })
+    }
+    const { headline } = group
+    const shown = headline.kind === "own" ? headline.reading : headline.parts[0]
+    if (!shown) continue
+    const gc = shown.result.generation_config ?? shown.evaluation.generation_config
+    const source = {
+      groupKey: group.key,
+      displayName: group.title,
+      evalSummaryIds: ids,
+      familyKey:
+        shown.evaluation.family_id ??
+        shown.evaluation.source_metadata.source_organization_name ??
+        "source",
+      familyName:
+        shown.evaluation.benchmark_family_name ||
+        getOrganizationDisplayName(shown.evaluation.source_metadata.source_organization_name),
+      collectionId: shown.evaluation.collection_id ?? null,
+      protocolCondition: shown.evaluation.protocol_condition ?? null,
+      studyFamilyKey: shown.evaluation.composite_slug ?? null,
+    }
+    const parts = headline.parts.map((variant) => ({
+      evalSummaryId: variant.evaluation.eval_summary_id ?? "",
+      name: variant.evaluation.display_name || variant.evaluation.benchmark || group.title,
+      metricName: getResultMetricName(variant.result),
+      score: variant.result.score_details.score,
+      unit: variant.result.metric_config.unit ?? null,
+      rank: readingRank(variant.result),
+    }))
+    if (headline.kind === "own") {
+      const { result } = headline.reading
+      candidates.push({
+        ...source,
+        score: result.score_details.score,
+        unit: result.metric_config.unit ?? null,
+        metricSummaryId: result.metric_summary_id ?? "",
+        metricName: getResultMetricName(result),
+        metricKey: result.metric_key ?? null,
+        lowerIsBetter: Boolean(result.metric_config.lower_is_better),
+        split: result.split ?? null,
+        temperature: gc?.generation_args?.temperature ?? null,
+        maxTokens: gc?.generation_args?.max_tokens ?? null,
+        annotations: result.evalcards?.annotations ?? null,
+        ...(parts.length > 0 ? { ownEvalParts: parts } : {}),
+      })
+      continue
+    }
+    const mean = headline.kind === "parts-mean"
+    candidates.push({
+      ...source,
+      score: mean ? headline.mean : Number.NaN,
+      unit: mean ? headline.unit : null,
+      metricSummaryId: "",
+      metricName: Array.from(new Set(parts.map((part) => part.metricName))).join(", "),
+      metricKey: mean ? (shown.result.metric_key ?? null) : null,
+      lowerIsBetter: mean && Boolean(shown.result.metric_config.lower_is_better),
+      split: null,
+      temperature: null,
+      maxTokens: null,
+      annotations: null,
+      parts,
+    })
+  }
+  return { leadReadings, candidates, joinRows }
 }
 
 function getEvaluationVariantLabel(evaluation: BenchmarkEvaluation) {
@@ -2329,24 +2403,6 @@ export function BenchmarkDetail({
     return query ? `${pathname}?${query}` : pathname
   }, [pathname, searchParams])
   const modelId = summary.model_info.id
-  // Collect all known model IDs for peer rank lookup (family ID + raw variant IDs)
-  const modelIds = useMemo(() => {
-    const ids = new Set<string>([modelId])
-    if ('raw_model_ids' in summary) {
-      for (const id of (summary as any).raw_model_ids ?? []) {
-        ids.add(id)
-      }
-    }
-    // Also add IDs from individual evaluations, including pipeline-computed family_id
-    for (const evals of Object.values(summary.evaluations_by_tag)) {
-      for (const e of evals) {
-        if (e.model_info?.id) ids.add(e.model_info.id)
-        const familyId = (e.model_info as any)?.family_id
-        if (familyId) ids.add(familyId)
-      }
-    }
-    return Array.from(ids)
-  }, [modelId, summary])
 
   const [peerRanks, setPeerRanks] = useState<PeerRanksMap>({})
 
@@ -2506,7 +2562,7 @@ export function BenchmarkDetail({
     const tsRange = maxTs - minTs || 1
 
     return (group: BenchmarkGroup): number => {
-      const rank = getGroupPeerRank(group, modelIds, peerRanks)
+      const rank = getGroupPeerRank(group)
 
       // Population: how many models were compared (0-1)
       const population = rank ? Math.min(rank.total / maxPop, 1) : 0
@@ -2528,7 +2584,7 @@ export function BenchmarkDetail({
 
       return population * 0.4 + rankExtremity * 0.3 + hasMetadata * 0.2 + recency * 0.1
     }
-  }, [peerRanks, modelIds, summary.evaluations_by_tag])
+  }, [peerRanks, summary.evaluations_by_tag])
 
   const allEvaluations = useMemo(
     () => Object.values(summary.evaluations_by_tag).flat(),
@@ -2628,7 +2684,7 @@ export function BenchmarkDetail({
         title: group.canonicalTitle,
         label: narrative.label,
         description: narrative.description,
-        scoreText: group.avgDisplayScore,
+        scoreText: group.scoreNote ? `${group.avgDisplayScore} (${group.scoreNote})` : group.avgDisplayScore,
         level,
       }
     })
@@ -2872,7 +2928,7 @@ export function BenchmarkDetail({
     filtered.sort((a, b) => getRelevanceScore(b) - getRelevanceScore(a))
 
     return filtered
-  }, [benchmarkGroups, benchmarkSearch, selectedCategories, selectedFamilies, hierarchyIndex, sourcePrefixFamily, modelId, peerRanks, getRelevanceScore])
+  }, [benchmarkGroups, benchmarkSearch, selectedCategories, selectedFamilies, hierarchyIndex, sourcePrefixFamily, modelId, getRelevanceScore])
 
   const groupedFilteredBenchmarkGroups = useMemo(() => {
     const order = new Map(availableCategories.map((category, index) => [category, index]))
@@ -2979,28 +3035,28 @@ export function BenchmarkDetail({
   }
 
   const compositeGroups = useMemo(() => {
-    const groups = groupByComposite(filteredBenchmarkGroups, modelIds, peerRanks, hierarchyIndex)
+    const groups = groupByComposite(filteredBenchmarkGroups, hierarchyIndex)
     // Re-sort composites by max relevance of their benchmarks
     return groups.sort((a, b) => {
       const aMax = Math.max(...a.benchmarks.map(getRelevanceScore))
       const bMax = Math.max(...b.benchmarks.map(getRelevanceScore))
       return bMax - aMax
     })
-  }, [filteredBenchmarkGroups, modelIds, peerRanks, getRelevanceScore, hierarchyIndex])
+  }, [filteredBenchmarkGroups, getRelevanceScore, hierarchyIndex])
 
   const categoryCompositeSections = useMemo(
     () =>
       groupedFilteredBenchmarkGroups
         .map(({ category, groups }) => ({
           category,
-          composites: groupByComposite(groups, modelIds, peerRanks, hierarchyIndex).sort((a, b) => {
+          composites: groupByComposite(groups, hierarchyIndex).sort((a, b) => {
             const aMax = Math.max(...a.benchmarks.map(getRelevanceScore))
             const bMax = Math.max(...b.benchmarks.map(getRelevanceScore))
             return bMax - aMax
           }),
         }))
         .filter((section) => section.composites.length > 0),
-    [groupedFilteredBenchmarkGroups, modelIds, peerRanks, getRelevanceScore, hierarchyIndex]
+    [groupedFilteredBenchmarkGroups, getRelevanceScore, hierarchyIndex]
   )
 
   const categoryScoreRanges = useMemo(() => {
@@ -3067,37 +3123,36 @@ export function BenchmarkDetail({
       ? filteredBenchmarkGroups
       : benchmarkGroups
 
-  // Only groups with actual sidecar ordinal rank data (total > 0) qualify
-  // for the "ranks high / low in" summary. Fallback bestRankPosition values
-  // are raw scores (0–1), not ordinal positions, so they must be excluded.
+  // Only groups with a rank of their own qualify for the "ranks high / low
+  // in" summary.
   const rankedBenchmarkGroups = useMemo(
     () =>
       overviewBenchmarkGroups.filter((group) => {
-        const rank = getGroupPeerRank(group, modelIds, peerRanks)
+        const rank = getGroupPeerRank(group)
         return rank != null && rank.total > 0
       }),
-    [overviewBenchmarkGroups, modelId, peerRanks]
+    [overviewBenchmarkGroups]
   )
   const strongRankedBenchmarks = useMemo(() => {
     const sorted = [...rankedBenchmarkGroups].sort((a, b) => {
-      const aRank = getGroupPeerRank(a, modelIds, peerRanks)!
-      const bRank = getGroupPeerRank(b, modelIds, peerRanks)!
+      const aRank = getGroupPeerRank(a)!
+      const bRank = getGroupPeerRank(b)!
       return aRank.position / aRank.total - bRank.position / bRank.total
     })
     return sorted.slice(0, 3)
-  }, [rankedBenchmarkGroups, modelId, peerRanks])
+  }, [rankedBenchmarkGroups])
 
   const weakRankedBenchmarks = useMemo(() => {
     const strongKeys = new Set(strongRankedBenchmarks.map((g) => g.key))
     const sorted = [...rankedBenchmarkGroups]
       .filter((g) => !strongKeys.has(g.key))
       .sort((a, b) => {
-        const aRank = getGroupPeerRank(a, modelIds, peerRanks)!
-        const bRank = getGroupPeerRank(b, modelIds, peerRanks)!
+        const aRank = getGroupPeerRank(a)!
+        const bRank = getGroupPeerRank(b)!
         return bRank.position / bRank.total - aRank.position / aRank.total
       })
     return sorted.slice(0, 3)
-  }, [rankedBenchmarkGroups, strongRankedBenchmarks, modelId, peerRanks])
+  }, [rankedBenchmarkGroups, strongRankedBenchmarks])
   const repeatedBenchmarkCount = overviewBenchmarkGroups.filter((group) => group.variants.length > 1).length
   const setupDrivenBenchmarkCount = overviewBenchmarkGroups.filter((group) =>
     group.variants.some((variant) => variant.variantType === "setup" || variant.variantType === "setup+slice")
@@ -3176,60 +3231,7 @@ export function BenchmarkDetail({
   // percent-encoded keys don't use.
   const currentModelRouteId = useMemo(() => comparisonRouteIdOf(summary), [summary])
 
-  // Inputs for the overlaps builder sourced from the model's own summary
-  // payload: one candidate per benchmark group (merged in when the benchmark
-  // has no benchmark_index entry) and one join row per result row (backfills
-  // generation params / annotations onto comparison-index appearances).
-  const overlapSummaryInputs = useMemo(() => {
-    const candidates: OverlapSummaryCandidate[] = []
-    const joinRows: OverlapSummaryJoinRow[] = []
-    for (const group of benchmarkGroups) {
-      const ids: string[] = []
-      for (const variant of group.variants) {
-        const id = variant.evaluation.eval_summary_id
-        if (!id) continue
-        if (!ids.includes(id)) ids.push(id)
-        const gc = variant.result.generation_config ?? variant.evaluation.generation_config
-        joinRows.push({
-          evalSummaryId: id,
-          temperature: gc?.generation_args?.temperature ?? null,
-          maxTokens: gc?.generation_args?.max_tokens ?? null,
-          collectionId: variant.evaluation.collection_id ?? null,
-          protocolCondition: variant.evaluation.protocol_condition ?? null,
-          studyFamilyKey: variant.evaluation.composite_slug ?? null,
-          annotations: variant.result.evalcards?.annotations ?? null,
-        })
-      }
-      const primary = group.variants[0]
-      if (!primary) continue
-      const score = primary.result.score_details.score
-      if (!Number.isFinite(score)) continue
-      const gc = primary.result.generation_config ?? primary.evaluation.generation_config
-      candidates.push({
-        groupKey: group.key,
-        displayName: group.title,
-        evalSummaryIds: ids,
-        familyKey:
-          primary.evaluation.family_id ??
-          primary.evaluation.source_metadata.source_organization_name ??
-          "source",
-        familyName:
-          primary.evaluation.benchmark_family_name ||
-          getOrganizationDisplayName(primary.evaluation.source_metadata.source_organization_name),
-        score,
-        unit: primary.result.metric_config.unit ?? null,
-        metricSummaryId: primary.result.metric_summary_id ?? "",
-        metricName: primary.metricLabel,
-        temperature: gc?.generation_args?.temperature ?? null,
-        maxTokens: gc?.generation_args?.max_tokens ?? null,
-        collectionId: primary.evaluation.collection_id ?? null,
-        protocolCondition: primary.evaluation.protocol_condition ?? null,
-        studyFamilyKey: primary.evaluation.composite_slug ?? null,
-        annotations: primary.result.evalcards?.annotations ?? null,
-      })
-    }
-    return { candidates, joinRows }
-  }, [benchmarkGroups])
+  const overlapSummaryInputs = useMemo(() => buildOverlapSummaryInputs(benchmarkGroups), [benchmarkGroups])
 
   // The family keys /evals?family= can actually resolve: the cleaned
   // hierarchy nests and drops composites, and the listing matches
@@ -3255,6 +3257,7 @@ export function BenchmarkDetail({
       currentModelRouteId,
       currentModelIdentityKeys,
       familyDisplayByKey,
+      leadReadings: overlapSummaryInputs.leadReadings,
       summaryCandidates: overlapSummaryInputs.candidates,
       summaryJoinRows: overlapSummaryInputs.joinRows,
     })
@@ -5227,7 +5230,7 @@ export function BenchmarkDetail({
                 <dd>
                   <div className="flex flex-wrap gap-1.5">
                     {strongRankedBenchmarks.map((group) => {
-                      const rank = getGroupPeerRank(group, modelIds, peerRanks)
+                      const rank = getGroupPeerRank(group)
                       return (
                         <button
                           key={`strong-${group.key}`}
@@ -5257,7 +5260,7 @@ export function BenchmarkDetail({
                 <dd>
                   <div className="flex flex-wrap gap-1.5">
                     {weakRankedBenchmarks.map((group) => {
-                      const rank = getGroupPeerRank(group, modelIds, peerRanks)
+                      const rank = getGroupPeerRank(group)
                       return (
                         <button
                           key={`weak-${group.key}`}
@@ -5463,8 +5466,6 @@ export function BenchmarkDetail({
               currentDetailHref={currentDetailHref}
               hierarchyIndex={hierarchyIndex}
               sourcePrefixFamily={sourcePrefixFamily}
-              modelIds={modelIds}
-              peerRanks={peerRanks}
             />
           </>
         )}
@@ -5627,7 +5628,11 @@ export function BenchmarkDetail({
                 const fmt = (v: number) =>
                   row.plainUnit ? formatPlainUnitScore(v, row.plainUnit) : `${fmtNum(v)}%`
                 const isSingle = row.appearances.length < 2
-                const isOpen = expandedOverlapRows.has(row.canonicalKey)
+                // A source that reports the benchmark only through its parts:
+                // their mean, labelled, or no number when they have none.
+                const parts = row.appearances[0]?.parts ?? null
+                const hasNumber = Number.isFinite(row.mean)
+                const isOpen = expandedOverlapRows.has(row.rowKey)
                 const isLast = idx === visibleOverlaps.length - 1
                 const ciLabel = row.ci95
                   ? row.appearances.length === 2
@@ -5638,10 +5643,10 @@ export function BenchmarkDetail({
                   ? "text-[color:var(--fg-muted)]"
                   : "text-[color:var(--fg)]"
                 return (
-                  <Fragment key={`overlap-${row.canonicalKey}`}>
+                  <Fragment key={`overlap-${row.rowKey}`}>
                     <button
                       type="button"
-                      onClick={() => toggleOverlapRow(row.canonicalKey)}
+                      onClick={() => toggleOverlapRow(row.rowKey)}
                       aria-expanded={isOpen}
                       className="grid w-full grid-cols-[minmax(0,2.2fr)_56px_minmax(0,1.6fr)_minmax(0,1.4fr)_minmax(0,1.6fr)] items-baseline gap-3 px-3 py-3 text-left transition-colors hover:bg-[color:var(--bg-warm)]"
                       style={{
@@ -5661,13 +5666,17 @@ export function BenchmarkDetail({
                         {row.appearances.length}
                       </div>
                       <div className={`font-mono text-[12px] tabular-nums ${strongText}`}>
-                        {fmt(row.mean)}
-                        <div className="mt-0.5 font-mono text-[10px] tabular-nums text-[color:var(--fg-subtle)]">
-                          {ciLabel}
-                        </div>
+                        {hasNumber ? fmt(row.mean) : partsCountLabel(parts?.length ?? 0)}
+                        {hasNumber && (
+                          <div className="mt-0.5 font-mono text-[10px] tabular-nums text-[color:var(--fg-subtle)]">
+                            {parts ? partsMeanLabel(parts.length) : ciLabel}
+                          </div>
+                        )}
                       </div>
                       <div className={`font-mono text-[11px] tabular-nums ${isSingle ? "text-[color:var(--fg-subtle)]" : "text-[color:var(--fg-muted)]"}`}>
-                        {isSingle
+                        {!hasNumber
+                          ? null
+                          : isSingle
                           ? `${fmtNum(row.min)} to ${fmt(row.max)}`
                           : `${fmt(row.min)} – ${fmt(row.max)}`}
                         {!isSingle && (
@@ -5703,7 +5712,7 @@ export function BenchmarkDetail({
                             <span className="text-[color:var(--fg-subtle)]">not reported</span>
                           )
                           const sourceNode =
-                            app.sourceKind === "comparison-index" ? (
+                            app.sourceKind === "comparison-index" && app.evalSummaryId ? (
                               <Link
                                 href={`/evals/${routeIdToPath(app.evalSummaryId)}?from=${encodeURIComponent(currentDetailHref)}`}
                                 className="ec-tag outline hover:border-[color:var(--accent)] hover:text-[color:var(--accent)] transition-colors"
@@ -5720,7 +5729,9 @@ export function BenchmarkDetail({
                                 {app.familyName}
                               </span>
                             )
-                          const scoreNode = fmt(app.score)
+                          const scoreNode = Number.isFinite(app.score)
+                            ? fmt(app.score)
+                            : partsCountLabel(app.parts?.length ?? 0)
                           const temperatureNode =
                             app.temperature != null
                               ? Number.isInteger(app.temperature)
@@ -5734,7 +5745,7 @@ export function BenchmarkDetail({
                           )
                           return (
                             <div
-                              key={`${row.canonicalKey}::${app.familyKey}::${app.evalSummaryId}`}
+                              key={`${row.rowKey}::${app.familyKey}::${app.evalSummaryId}`}
                               className="border-t border-[color:var(--border-soft)]"
                             >
                               {/* Wide layout: single-row grid */}
@@ -5782,6 +5793,28 @@ export function BenchmarkDetail({
                                   </dd>
                                 </dl>
                               </div>
+                              {(app.parts ?? app.ownEvalParts) && (
+                                <ul className="px-1 pb-2">
+                                  {(app.parts ?? app.ownEvalParts)!.map((part) => (
+                                    <li
+                                      key={part.evalSummaryId}
+                                      className="grid grid-cols-[minmax(0,1.8fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,0.9fr)] items-baseline gap-3 py-1 text-[12px]"
+                                    >
+                                      <Link
+                                        href={`/evals/${routeIdToPath(part.evalSummaryId)}?from=${encodeURIComponent(currentDetailHref)}`}
+                                        className="truncate text-[color:var(--fg)] hover:text-[color:var(--accent)]"
+                                      >
+                                        {part.name}
+                                      </Link>
+                                      <span className="truncate text-[color:var(--fg-muted)]">{part.metricName}</span>
+                                      <span className="font-mono tabular-nums text-[color:var(--fg)]">{part.displayScore}</span>
+                                      <span className="font-mono tabular-nums text-[color:var(--fg-muted)]">
+                                        {part.rank ? `#${part.rank.position}/${part.rank.total}` : null}
+                                      </span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
                               <RunProtocolSummary
                                 collectionId={app.collectionId}
                                 protocolCondition={app.protocolCondition}
@@ -6250,20 +6283,11 @@ export function BenchmarkDetail({
                       // got absorbed into an earlier family's merged row).
                       if (allRows.length === 0) return null
                       const { firstParty, thirdParty } = partyRowsFor(allRows)
-                      // Family-level summary score = avg of avgs across child groups
-                      const avgScores = family.groups
-                        .map((g) => g.avgNormalizedScore)
-                        .filter((v) => Number.isFinite(v) && v >= 0)
-                      const familyAvg = avgScores.length
-                        ? avgScores.reduce((s, v) => s + v, 0) / avgScores.length
-                        : null
-                      const familyAvgDisplay = familyAvg != null
-                        ? `${(familyAvg * 100).toFixed(1)}%`
-                        : family.groups[0]?.avgDisplayScore ?? "–"
+                      const { text: familyScoreText, note: familyScoreNote } = familyScore(family.groups)
                       // Best peer rank across this family's groups
                       let bestRank: { position: number; total: number } | null = null
                       for (const g of family.groups) {
-                        const r = getGroupPeerRank(g, modelIds, peerRanks)
+                        const r = getGroupPeerRank(g)
                         if (!r) continue
                         if (!bestRank || r.position < bestRank.position) bestRank = r
                       }
@@ -6307,7 +6331,10 @@ export function BenchmarkDetail({
                               </div>
                             </div>
                             <div className="font-mono text-[13px] tabular-nums text-[color:var(--fg)]">
-                              {familyAvgDisplay}
+                              {familyScoreText}
+                              {familyScoreNote && (
+                                <span className="ml-1 text-[10px] text-[color:var(--fg-subtle)]">{familyScoreNote}</span>
+                              )}
                             </div>
                             <div className="font-mono text-[10.5px] tabular-nums text-[color:var(--fg-muted)] min-w-[60px] text-right">
                               {bestRank
@@ -6328,7 +6355,7 @@ export function BenchmarkDetail({
                                       group: childGroup,
                                       variant: v,
                                     }))
-                                    const childRank = getGroupPeerRank(childGroup, modelIds, peerRanks)
+                                    const childRank = getGroupPeerRank(childGroup)
                                     return (
                                       <div key={`fam-${family.familyKey}-eval-${childGroup.key}`}>
                                         <div className="flex items-baseline justify-between gap-3 pb-1.5 pt-1">
@@ -6341,6 +6368,9 @@ export function BenchmarkDetail({
                                           </button>
                                           <span className="font-mono text-[10px] tabular-nums text-[color:var(--fg-muted)]">
                                             {childGroup.avgDisplayScore}
+                                            {childGroup.scoreNote && (
+                                              <span className="ml-1 text-[color:var(--fg-subtle)]">{childGroup.scoreNote}</span>
+                                            )}
                                             {childRank && (
                                               <span className="ml-2 text-[color:var(--fg-subtle)]">
                                                 #{childRank.position}{childRank.total ? `/${childRank.total}` : ""}
@@ -6958,7 +6988,7 @@ function BenchmarkResultCard({
   )
 }
 
-function BenchmarkDeepDiveDialogPanel({
+export function BenchmarkDeepDiveDialogPanel({
   group,
   comparisonIndex,
   evalHierarchy,
@@ -6971,8 +7001,6 @@ function BenchmarkDeepDiveDialogPanel({
 }) {
   const { mode } = useAudienceMode()
   const isResearchView = mode === "research"
-  const [resolvedRanks, setResolvedRanks] = useState<Record<string, { position: number; total: number | null }>>({})
-  const [isResolvingRanks, setIsResolvingRanks] = useState(false)
   const compactDomains = group.domains.slice(0, 2)
   const sliceCount = getGroupSliceCount(group)
   const hasSliceMatrix = sliceCount > 0
@@ -7163,24 +7191,14 @@ function BenchmarkDeepDiveDialogPanel({
     return labels
   }, [comparisonIndex, rowsByPrimaryLabel])
 
-  const bestResolvedRank = useMemo(() => {
-    const candidates = variantRows
-      .map((row) => {
-        const resolved = resolvedRanks[row.rowKey]
-        if (resolved) return resolved
-        if (row.variant.rankPosition != null) {
-          return { position: row.variant.rankPosition, total: row.variant.rankTotal }
-        }
-        return null
-      })
-      .filter((r): r is { position: number; total: number | null } => r != null)
-      .sort((a, b) => {
-        const aRatio = a.total != null && a.total > 0 ? a.position / a.total : a.position
-        const bRatio = b.total != null && b.total > 0 ? b.position / b.total : b.position
-        return aRatio - bRatio
-      })
-    return candidates[0] ?? null
-  }, [resolvedRanks, variantRows])
+  // Each row's rank is its own: the model's place on that row's metric.
+  const bestRank = useMemo(() => {
+    const ranks = variantRows
+      .map((row) => readingRank(row.variant.result))
+      .filter((rank): rank is { position: number; total: number } => rank != null)
+      .sort((a, b) => a.position / a.total - b.position / b.total)
+    return ranks[0] ?? null
+  }, [variantRows])
 
   // Kept only to drive the single-setup overview: when every reported row is
   // reported under the same setup, the detail table collapses into a compact
@@ -7197,55 +7215,6 @@ function BenchmarkDeepDiveDialogPanel({
 
   const useSingleSetupOverview = Boolean(sliceSetups && sliceSetups.setupOrder.length === 1)
   const singleSetupDisplayLabel = useSingleSetupOverview ? sliceSetups?.setupOrder[0] ?? null : null
-
-  useEffect(() => {
-    const pendingRows = variantRows.filter(
-      (row) => row.variant.rankPosition == null && !resolvedRanks[row.rowKey] && row.evalSummaryId
-    )
-
-    if (pendingRows.length === 0) {
-      return
-    }
-
-    let isCancelled = false
-
-    const resolveRanks = async () => {
-      setIsResolvingRanks(true)
-
-      const nextResolvedEntries = await Promise.all(
-        pendingRows.map(async (row) => {
-          const rank = await fetchPeerRankForModel(row.evalSummaryId, row.variant.evaluation.model_info.id)
-          return rank ? ([row.rowKey, rank] as const) : null
-        })
-      )
-
-      if (isCancelled) {
-        return
-      }
-
-      setResolvedRanks((current) => {
-        const patch: Record<string, { position: number; total: number | null }> = {}
-
-        for (const entry of nextResolvedEntries) {
-          if (!entry) {
-            continue
-          }
-
-          patch[entry[0]] = entry[1]
-        }
-
-        return Object.keys(patch).length > 0 ? { ...current, ...patch } : current
-      })
-
-      setIsResolvingRanks(false)
-    }
-
-    resolveRanks()
-
-    return () => {
-      isCancelled = true
-    }
-  }, [resolvedRanks, variantRows])
 
   return (
     <>
@@ -7278,7 +7247,11 @@ function BenchmarkDeepDiveDialogPanel({
           </div>
 
           <div className="text-right shrink-0">
-            <div className="kicker mb-1">Avg score</div>
+            {group.headline.kind !== "parts" && (
+              <div className="kicker mb-1">
+                {group.headline.kind === "own" ? "Score" : `Avg of ${group.headline.parts.length} parts`}
+              </div>
+            )}
             <div className="text-[24px] font-semibold tabular-nums leading-none">
               {group.avgDisplayScore}
             </div>
@@ -7301,11 +7274,7 @@ function BenchmarkDeepDiveDialogPanel({
           <div className="border-r border-b border-[color:var(--border-soft)] px-4 py-3">
             <div className="kicker">Best rank</div>
             <div className="mt-1 text-[18px] font-semibold tabular-nums">
-              {bestResolvedRank != null
-                ? `#${bestResolvedRank.position}${bestResolvedRank.total ? `/${bestResolvedRank.total}` : ""}`
-                : isResolvingRanks
-                  ? "…"
-                  : "N/A"}
+              {bestRank ? `#${bestRank.position}/${bestRank.total}` : "N/A"}
             </div>
           </div>
           <div className="border-r border-b border-[color:var(--border-soft)] px-4 py-3">
@@ -7510,7 +7479,7 @@ function BenchmarkDeepDiveDialogPanel({
                 <tbody>
                   {variantRows.map((row, index) => {
                     const { rowKey, variant, configEntries } = row
-                    const resolvedRank = resolvedRanks[rowKey]
+                    const rank = readingRank(variant.result)
                     const primaryLabel = getVariantPrimaryLabel(variant, group.title)
                     const filteredConfigEntries = configEntries.filter(([key]) => key.toLowerCase() !== "setup")
                     const disambiguationLabel = rowDisambiguationLabels.get(rowKey)
@@ -7523,12 +7492,17 @@ function BenchmarkDeepDiveDialogPanel({
                         ? disambiguationLabel
                         : null
 
+                    const unnamedMetric = metricNameIfUnnamed(variant, [leadLabel, supportingLabel])
+
                     return (
                       <tr key={rowKey} className="align-top">
                         <td className="align-top">
                           <div className="text-[14px] font-medium leading-[1.4]">{leadLabel}</div>
                           {supportingLabel && (
                             <div className="mt-0.5 text-[12px] text-[color:var(--fg-muted)]">{supportingLabel}</div>
+                          )}
+                          {unnamedMetric && (
+                            <div className="mt-0.5 text-[12px] text-[color:var(--fg-muted)]">{unnamedMetric}</div>
                           )}
                           {(!variant.evaluation.slice_key || variant.variantType !== "default") && (
                             <div className="mt-1 flex flex-wrap gap-x-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[color:var(--fg-subtle)]">
@@ -7556,12 +7530,8 @@ function BenchmarkDeepDiveDialogPanel({
                           <div>{variant.displayScore}</div>
                         </td>
                         <td className="num align-top tabular-nums text-[color:var(--fg-muted)]">
-                          {variant.rankPosition != null || resolvedRank ? (
-                            `#${resolvedRank?.position ?? variant.rankPosition}${
-                              (resolvedRank?.total ?? variant.rankTotal)
-                                ? `/${resolvedRank?.total ?? variant.rankTotal}`
-                                : ""
-                            }`
+                          {rank ? (
+                            `#${rank.position}/${rank.total}`
                           ) : (
                             <span className="text-[color:var(--fg-subtle)]">—</span>
                           )}
@@ -7600,7 +7570,7 @@ function BenchmarkDeepDiveDialogPanel({
               <tbody>
                 {variantRows.map((row) => {
                   const { rowKey, variant, configEntries } = row
-                  const resolvedRank = resolvedRanks[rowKey]
+                  const rank = readingRank(variant.result)
                   const rawPrimaryLabel = getVariantPrimaryLabel(variant, group.title)
                   const primaryLabel = humanizeBenchmarkName(rawPrimaryLabel)
                   const setupDisplayLabel = formatSetupDisplayLabel(variant.setupLabel)
@@ -7611,10 +7581,15 @@ function BenchmarkDeepDiveDialogPanel({
                     return v
                   })()
 
+                  const unnamedMetric = metricNameIfUnnamed(variant, [primaryLabel, rawVariantLabel])
+
                   return (
                     <tr key={rowKey} className="align-top">
                       <td className="align-top">
                         <div className="text-[14px] font-medium leading-[1.4]">{primaryLabel}</div>
+                        {unnamedMetric && (
+                          <div className="mt-0.5 text-[12px] text-[color:var(--fg-muted)]">{unnamedMetric}</div>
+                        )}
                         <div className="mt-1 flex flex-wrap gap-x-2 font-mono text-[10px] uppercase tracking-[0.12em] text-[color:var(--fg-subtle)]">
                           <span>{getVariantTypeLabel(variant.variantType)}</span>
                           {rawVariantLabel && <span className="line-clamp-1 normal-case tracking-normal text-[color:var(--fg-muted)] text-[12px]">· {rawVariantLabel}</span>}
@@ -7636,12 +7611,8 @@ function BenchmarkDeepDiveDialogPanel({
                         <div>{variant.displayScore}</div>
                       </td>
                       <td className="num align-top tabular-nums text-[color:var(--fg-muted)]">
-                        {variant.rankPosition != null || resolvedRank ? (
-                          `#${resolvedRank?.position ?? variant.rankPosition}${
-                            (resolvedRank?.total ?? variant.rankTotal)
-                              ? `/${resolvedRank?.total ?? variant.rankTotal}`
-                              : ""
-                          }`
+                        {rank ? (
+                          `#${rank.position}/${rank.total}`
                         ) : (
                           <span className="text-[color:var(--fg-subtle)]">—</span>
                         )}
@@ -8115,40 +8086,34 @@ type EvaluatorMixData = {
 }
 
 /**
- * Plain-language scoreboard for Summary view. Renders every reported
- * benchmark as a text-only row — raw score on the right, a medal emoji
- * (🥇🥈🥉) for top-3 peer ranks. No charts; non-technical readers can
- * scan the list quickly without parsing per-benchmark plots.
+ * Plain-language scoreboard for Summary view. Renders every eval the model
+ * reports as a text-only row: raw score on the right, a gold / silver /
+ * bronze chip for a top-3 rank. No charts; non-technical readers can scan
+ * the list quickly without parsing per-benchmark plots.
  *
- * Rows group by family (Vals.ai · BFCL · HELM …). Within each family,
- * rows order by peer rank (best first) and fall back to score when rank
- * is unavailable. Each row links to the benchmark detail page; the
- * eval_summary_id appears as a small "on …" subline so the source of
- * the number is obvious.
+ * Rows group by source (the eval id's prefix). Within a source, rows order
+ * by rank (best first) and fall back to score when there is no rank. Each
+ * row links to its eval's detail page.
+ *
+ * One row is one eval, and it leads with one reading: the one view-data
+ * flags `is_lead_metric`. The row's number, unit, direction, metric name
+ * and rank are that reading's own. An eval with several readings lists each
+ * under the row the same way. Nothing is averaged, across metrics or across
+ * evals: parts of a benchmark are evals of their own and get their own rows.
  */
-function SummaryMetricsList({
+export function SummaryMetricsList({
   groups,
   currentDetailHref,
   hierarchyIndex,
   sourcePrefixFamily,
-  modelIds,
-  peerRanks,
 }: {
   groups: BenchmarkGroup[]
   currentDetailHref?: string
   hierarchyIndex: Map<string, HierarchyEvalLocation> | null
   sourcePrefixFamily: Map<string, { key: string; displayName: string }>
-  modelIds: string[]
-  peerRanks: PeerRanksMap
 }) {
   const router = useRouter()
 
-  // Eval IDs ship as "<source>%2F<bench-path>". The source prefix is
-  // the section header; the bench-path determines the row identity.
-  // Branching: variants whose bench-paths share an identifier before
-  // any `.` separator (e.g. "swebench.>4 hours" and "swebench.1-4 hours")
-  // collapse into one row with sub-variants. Variants whose bench-paths
-  // are genuinely distinct ("arc-agi" vs "arc-agi-2") stay separate.
   const humanizeSlug = (slug: string): string => {
     const ACRONYMS = new Set([
       "agi", "ai", "aime", "api", "arc", "bbh", "bfcl", "ctf", "cve",
@@ -8168,7 +8133,9 @@ function SummaryMetricsList({
       .join(" ")
   }
 
-  const parseEvalId = (evalId: string | null | undefined): { source: string; benchPath: string; benchKey: string } | null => {
+  // Eval IDs ship as "<source>%2F<bench-path>". The source prefix is the
+  // section header; the bench-path names the row.
+  const parseEvalId = (evalId: string | null | undefined): { source: string; benchPath: string } | null => {
     if (!evalId) return null
     // Accept both encoded (%2F) and decoded (/) forms.
     const decoded = decodeURIComponent(evalId)
@@ -8177,16 +8144,11 @@ function SummaryMetricsList({
     const source = decoded.slice(0, slashIdx)
     const benchPath = decoded.slice(slashIdx + 1)
     if (!source || !benchPath) return null
-    // benchKey = bench-path up to the first "." — same benchKey across
-    // variants collapses them into one row.
-    const dotIdx = benchPath.indexOf(".")
-    const benchKey = dotIdx >= 0 ? benchPath.slice(0, dotIdx) : benchPath
-    return { source, benchPath, benchKey }
+    return { source, benchPath }
   }
 
-  // Pull a usable benchmark label from a variant when the parsed benchKey
-  // is degenerate (equals the source name) — happens for rows that come
-  // in as variants under a source-level group with no per-bench title.
+  // Pull a usable benchmark label from a variant when the bench-path is
+  // degenerate (equals the source name).
   const deriveBenchLabel = (v: BenchmarkVariant, fallback: string): string => {
     const candidates = [
       v.label,
@@ -8200,192 +8162,76 @@ function SummaryMetricsList({
     return candidates[0] ?? fallback
   }
 
-  // Flatten every variant of every group into a single list, paired
-  // with the parsed source/benchKey. Variants without a usable eval
-  // id fall back to the group's title.
-  type FlatVariant = {
-    group: BenchmarkGroup
-    variant: BenchmarkVariant
-    source: string
-    sourceKey: string
-    benchKey: string
-    benchPath: string
-    benchLabel: string
-    rawScore: number
-    unit?: string
-    lowerIsBetter: boolean
-    rankPosition: number | null
-    rankTotal: number | null
-  }
-  const flat: FlatVariant[] = []
+  type Bucket = { key: string; name: string; rows: SummaryRow[] }
+  const buckets = new Map<string, Bucket>()
   for (const g of groups) {
     for (const v of g.variants ?? []) {
       const raw = v.result?.score_details?.score
       if (!Number.isFinite(raw)) continue
-      // Resolve eval_summary_id, falling back to the detail-href derivation
-      // (mirrors getGroupPeerRank). Without this, variants whose
-      // eval_summary_id is null still register correctly with peerRanks.
-      const resolvedEvalIdRaw =
-        v.evaluation?.eval_summary_id ??
-        getEvalSummaryIdFromHref(getEvalDetailHref(v.evaluation, v.result))
-      const resolvedEvalId = resolvedEvalIdRaw || null
-      const parsed = parseEvalId(resolvedEvalId)
+      const evalSummaryId = v.evaluation?.eval_summary_id ?? null
+      const parsed = parseEvalId(evalSummaryId)
       const source = parsed?.source ?? "other"
-      const benchKey = parsed?.benchKey ?? g.key
-      const benchPath = parsed?.benchPath ?? g.title
-      // Pick a row label: usually the humanized benchKey, but when
-      // benchKey collides with the source slug (group fell back to the
-      // family key), use evaluation_name / variant label instead.
-      const benchKeySlug = benchKey.toLowerCase()
-      const sourceSlug = source.toLowerCase()
-      // Always pass through humanizeSlug so labels match the "Tau2 Telecom"
-      // style regardless of whether they came from benchKey or a fallback.
-      const labelFallback = humanizeSlug(
-        benchKeySlug === sourceSlug
-          ? deriveBenchLabel(v, benchKey)
-          : benchKey,
-      )
-      // Sidecar rank lookup. The sidecar ships eval keys AND model
-      // keys in URL-encoded form (e.g. `llm-stats%2Faa-index`,
-      // `openai%2Fgpt-5.5`); the runtime `modelIds` carries the decoded
-      // slash form (`openai/gpt-5.5`). Try both encodings on both
-      // dimensions before falling back to the in-record rank.
-      let rankPosition: number | null = null
-      let rankTotal: number | null = null
-      const tryRankLookup = (eid: string | null | undefined): boolean => {
-        if (!eid) return false
-        const evalRanks = peerRanks[eid]
-        if (!evalRanks) return false
-        for (const mid of modelIds) {
-          const candidates = [mid, encodeURIComponent(mid), mid.replace(/\//g, "%2F")]
-          for (const cand of candidates) {
-            const r = evalRanks[cand]
-            if (r != null) {
-              rankPosition = r.position
-              rankTotal = r.total
-              return true
-            }
-          }
-        }
-        return false
+      const sourceKey = source.toLowerCase()
+      let bucket = buckets.get(sourceKey)
+      if (!bucket) {
+        bucket = { key: sourceKey, name: humanizeSlug(source), rows: [] }
+        buckets.set(sourceKey, bucket)
       }
-      if (!tryRankLookup(resolvedEvalId)) {
-        if (resolvedEvalId) {
-          const decoded = decodeURIComponent(resolvedEvalId)
-          if (decoded !== resolvedEvalId) tryRankLookup(decoded)
-          const reencoded = resolvedEvalId.replace(/\//g, "%2F")
-          if (reencoded !== resolvedEvalId) tryRankLookup(reencoded)
+      // The eval is the row. A group can fold several evals (the parts of a
+      // benchmark); each still gets its own row here.
+      const rowKey = evalSummaryId ?? g.key
+      let row = bucket.rows.find((r) => r.key === rowKey)
+      if (!row) {
+        const benchPath = parsed?.benchPath ?? g.title
+        row = {
+          key: rowKey,
+          benchName: humanizeSlug(
+            benchPath.toLowerCase() === sourceKey ? deriveBenchLabel(v, benchPath) : benchPath,
+          ),
+          evalSummaryId,
+          detailHref: getEvalDetailHref(v.evaluation, v.result, currentDetailHref),
+          category: g.category,
+          readings: [],
         }
-        if (rankPosition == null && v.rankPosition != null) {
-          rankPosition = v.rankPosition
-          rankTotal = v.rankTotal
-        }
+        bucket.rows.push(row)
       }
-      // Use the label-derived benchKey when we fell back, so two variants
-      // with the same evaluation_name still collapse into one row.
-      const effectiveBenchKey =
-        benchKeySlug === sourceSlug
-          ? labelFallback.toLowerCase().replace(/\s+/g, "-")
-          : benchKeySlug
-      flat.push({
-        group: g,
+      // The rank is the reading's own: the model's place among the models
+      // ranked on this metric of this eval.
+      const position = v.result.position ?? null
+      const total = v.result.total ?? null
+      const ranked = position != null && total != null && total > 0
+      row.readings.push({
         variant: v,
-        source,
-        sourceKey: source.toLowerCase(),
-        benchKey: effectiveBenchKey,
-        benchPath,
-        benchLabel: labelFallback,
+        metricName: getResultMetricName(v.result),
         rawScore: raw as number,
         unit: v.result?.metric_config?.unit,
         lowerIsBetter: Boolean(v.result?.metric_config?.lower_is_better),
-        rankPosition,
-        rankTotal,
+        rankPosition: ranked ? position : null,
+        rankTotal: ranked ? total : null,
       })
     }
   }
 
-  type Row = {
-    benchKey: string
-    benchName: string
-    group: BenchmarkGroup
-    variants: FlatVariant[]
-    avgRaw: number
-    unit?: string
-    lowerIsBetter: boolean
-    rankPosition: number | null
-    rankTotal: number | null
-    rankRatio: number | null
-    evalSummaryId: string | null
-    category: EvalTag
+  const rankRatio = (row: SummaryRow) => {
+    const lead = summaryLeadReading(row)
+    return lead.rankPosition != null && lead.rankTotal != null ? lead.rankPosition / lead.rankTotal : Infinity
   }
-  type Bucket = { key: string; name: string; rows: Row[] }
-  const buckets = new Map<string, Bucket>()
-  for (const fv of flat) {
-    let bucket = buckets.get(fv.sourceKey)
-    if (!bucket) {
-      bucket = { key: fv.sourceKey, name: humanizeSlug(fv.source), rows: [] }
-      buckets.set(fv.sourceKey, bucket)
-    }
-    let row = bucket.rows.find((r) => r.benchKey === fv.benchKey)
-    if (!row) {
-      row = {
-        benchKey: fv.benchKey,
-        benchName: fv.benchLabel,
-        group: fv.group,
-        variants: [],
-        avgRaw: 0,
-        unit: fv.unit,
-        lowerIsBetter: fv.lowerIsBetter,
-        rankPosition: null,
-        rankTotal: null,
-        rankRatio: null,
-        evalSummaryId: fv.variant.evaluation?.eval_summary_id ?? null,
-        category: fv.group.category,
-      }
-      bucket.rows.push(row)
-    }
-    row.variants.push(fv)
-  }
-
-  // Finalize each row: avg raw, best rank across variants. As a final
-  // fallback delegate to getGroupPeerRank (same call Researcher view
-  // makes) so we never miss a rank Researcher view surfaces.
-  for (const bucket of buckets.values()) {
-    for (const row of bucket.rows) {
-      const scores = row.variants.map((v) => v.rawScore)
-      row.avgRaw = scores.reduce((a, b) => a + b, 0) / scores.length
-      let best: { p: number; t: number } | null = null
-      for (const v of row.variants) {
-        if (v.rankPosition == null || v.rankTotal == null || v.rankTotal <= 0) continue
-        const ratio = v.rankPosition / v.rankTotal
-        if (!best || ratio < best.p / best.t) best = { p: v.rankPosition, t: v.rankTotal }
-      }
-      if (!best) {
-        const groupRank = getGroupPeerRank(row.group, modelIds, peerRanks)
-        if (groupRank && groupRank.total > 0) best = { p: groupRank.position, t: groupRank.total }
-      }
-      if (best) {
-        row.rankPosition = best.p
-        row.rankTotal = best.t
-        row.rankRatio = best.p / best.t
-      }
-    }
-  }
-
   const orderedBuckets = Array.from(buckets.values())
     .map((b) => ({
       ...b,
       rows: b.rows.slice().sort((a, b) => {
-        const ar = a.rankRatio == null ? Infinity : a.rankRatio
-        const br = b.rankRatio == null ? Infinity : b.rankRatio
+        const ar = rankRatio(a)
+        const br = rankRatio(b)
         if (ar !== br) return ar - br
-        if (a.lowerIsBetter && b.lowerIsBetter) return a.avgRaw - b.avgRaw
-        return b.avgRaw - a.avgRaw
+        const aLead = summaryLeadReading(a)
+        const bLead = summaryLeadReading(b)
+        if (aLead.lowerIsBetter && bLead.lowerIsBetter) return aLead.rawScore - bLead.rawScore
+        return bLead.rawScore - aLead.rawScore
       }),
     }))
     .sort((a, b) => {
-      const ar = Math.min(...a.rows.map((r) => r.rankRatio ?? Infinity))
-      const br = Math.min(...b.rows.map((r) => r.rankRatio ?? Infinity))
+      const ar = Math.min(...a.rows.map(rankRatio))
+      const br = Math.min(...b.rows.map(rankRatio))
       if (ar !== br) return ar - br
       return a.name.localeCompare(b.name)
     })
@@ -8401,9 +8247,10 @@ function SummaryMetricsList({
   return (
     <div className="space-y-8 mx-auto" style={{ maxWidth: "72rem" }}>
       <p className="text-[13px] leading-[1.65] text-[color:var(--fg-muted)]">
-        Reported benchmarks grouped by source (the prefix of the eval ID, e.g., wasp, vals-ai, reward-bench-2), ordered best peer rank first. The number on the right is the model's
-        raw score; <em className="not-italic font-mono text-[12px]">12 / 107</em> next to it is
-        its peer rank. A medal (🥇 🥈 🥉) marks a top-3 finish. Switch to{" "}
+        Reported benchmarks grouped by source (the prefix of the eval ID, e.g., wasp, vals-ai, reward-bench-2), ordered best rank first. The number on the right is the model's
+        raw score on the metric named in the row; <em className="not-italic font-mono text-[12px]">rank 12 of 107</em> next to it is
+        where the model stands among the models ranked on that metric. A gold, silver or bronze
+        chip marks a top-3 finish. Switch to{" "}
         <em className="text-[color:var(--fg)] not-italic font-medium">Researcher view</em>{" "}
         for per-benchmark plots, setup variants, and cross-suite comparisons.
       </p>
@@ -8414,20 +8261,15 @@ function SummaryMetricsList({
           bucketName={bucket.name}
           rows={bucket.rows}
           router={router}
-          currentDetailHref={currentDetailHref}
         />
       ))}
     </div>
   )
 }
 
-type SummaryFlatVariant = {
-  group: BenchmarkGroup
+type SummaryReading = {
   variant: BenchmarkVariant
-  source: string
-  sourceKey: string
-  benchKey: string
-  benchPath: string
+  metricName: string
   rawScore: number
   unit?: string
   lowerIsBetter: boolean
@@ -8436,30 +8278,32 @@ type SummaryFlatVariant = {
 }
 
 type SummaryRow = {
-  benchKey: string
+  /** The eval the row is for. */
+  key: string
   benchName: string
-  group: BenchmarkGroup
-  variants: SummaryFlatVariant[]
-  avgRaw: number
-  unit?: string
-  lowerIsBetter: boolean
-  rankPosition: number | null
-  rankTotal: number | null
-  rankRatio: number | null
   evalSummaryId: string | null
+  detailHref: string
   category: EvalTag
+  /** Every reading the model has on the eval; never empty. */
+  readings: SummaryReading[]
+}
+
+// The reading a row leads with. view-data flags exactly one reading per
+// model and eval, so the first-reading arm is reached only if the flagged
+// row never made it into the group; the row then still names a real metric
+// rather than going blank.
+function summaryLeadReading(row: SummaryRow): SummaryReading {
+  return row.readings.find((reading) => reading.variant.result.is_lead_metric) ?? row.readings[0]
 }
 
 function SummaryBucketBlock({
   bucketName,
   rows,
   router,
-  currentDetailHref,
 }: {
   bucketName: string
   rows: SummaryRow[]
   router: ReturnType<typeof useRouter>
-  currentDetailHref?: string
 }) {
   return (
     <div>
@@ -8482,12 +8326,7 @@ function SummaryBucketBlock({
       </div>
       <ul className="m-0 p-0 list-none">
         {rows.map((row) => (
-          <SummaryBenchRow
-            key={`${row.benchKey}-${row.evalSummaryId ?? ""}`}
-            row={row}
-            router={router}
-            currentDetailHref={currentDetailHref}
-          />
+          <SummaryBenchRow key={row.key} row={row} router={router} />
         ))}
       </ul>
     </div>
@@ -8497,26 +8336,14 @@ function SummaryBucketBlock({
 function SummaryBenchRow({
   row,
   router,
-  currentDetailHref,
 }: {
   row: SummaryRow
   router: ReturnType<typeof useRouter>
-  currentDetailHref?: string
 }) {
-  const isBranched = row.variants.length > 1
-  const detailHref = row.group.evalDetailHref
-  const navigate = () => {
-    if (!detailHref) return
-    const href = currentDetailHref
-      ? `${detailHref}${detailHref.includes("?") ? "&" : "?"}from=${encodeURIComponent(currentDetailHref)}`
-      : detailHref
-    router.push(href)
-  }
-  const interactive = Boolean(detailHref)
-  const hasRank = row.rankPosition != null && row.rankTotal != null && row.rankTotal > 0
-  const parentScore = formatSummaryScore(row.avgRaw, row.unit)
+  const lead = summaryLeadReading(row)
+  const isBranched = row.readings.length > 1
   const categoryLabel = formatTagLabel(row.category as unknown as string)
-  const primaryEvalId = row.variants[0]?.variant.evaluation?.eval_summary_id ?? null
+  const navigate = () => router.push(row.detailHref)
 
   return (
     <>
@@ -8525,21 +8352,17 @@ function SummaryBenchRow({
         style={{
           gridTemplateColumns: "1fr auto",
           borderBottom: "1px solid var(--border-soft)",
-          cursor: interactive ? "pointer" : "default",
+          cursor: "pointer",
         }}
-        role={interactive ? "link" : undefined}
-        tabIndex={interactive ? 0 : -1}
-        onClick={interactive ? navigate : undefined}
-        onKeyDown={
-          interactive
-            ? (e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault()
-                  navigate()
-                }
-              }
-            : undefined
-        }
+        role="link"
+        tabIndex={0}
+        onClick={navigate}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault()
+            navigate()
+          }
+        }}
       >
         <div className="min-w-0">
           <div className="flex items-baseline flex-wrap gap-x-2 gap-y-0.5">
@@ -8566,29 +8389,27 @@ function SummaryBenchRow({
             <span
               className="inline-flex items-center font-mono text-[10px] uppercase tracking-[0.12em] border px-1.5 py-0.5 shrink-0"
               style={{
-                color: row.lowerIsBetter ? "var(--accent)" : "var(--fg-muted)",
-                borderColor: row.lowerIsBetter ? "var(--accent)" : "var(--border-soft)",
+                color: lead.lowerIsBetter ? "var(--accent)" : "var(--fg-muted)",
+                borderColor: lead.lowerIsBetter ? "var(--accent)" : "var(--border-soft)",
                 background: "var(--bg)",
               }}
               title={
-                row.lowerIsBetter
-                  ? "Lower raw score is better on this benchmark."
-                  : "Higher raw score is better on this benchmark."
+                lead.lowerIsBetter
+                  ? "Lower raw score is better on this metric."
+                  : "Higher raw score is better on this metric."
               }
             >
-              {row.lowerIsBetter ? "↓ Lower is better" : "↑ Higher is better"}
+              {lead.lowerIsBetter ? "↓ Lower is better" : "↑ Higher is better"}
             </span>
-            {isBranched && (
-              <span
-                className="font-mono"
-                style={{ fontSize: 10, color: "var(--fg-subtle)" }}
-                title={`Average across ${row.variants.length} reported variants.`}
-              >
-                · avg of {row.variants.length}
-              </span>
-            )}
+            <span
+              className="font-mono"
+              style={{ fontSize: 10, color: "var(--fg-subtle)" }}
+              title={`The score and rank shown are for ${lead.metricName}.`}
+            >
+              · {lead.metricName}
+            </span>
           </div>
-          {!isBranched && primaryEvalId && (
+          {!isBranched && row.evalSummaryId && (
             <div
               className="mt-0.5 font-mono truncate"
               style={{
@@ -8596,39 +8417,37 @@ function SummaryBenchRow({
                 color: "var(--fg-subtle)",
                 letterSpacing: "0.02em",
               }}
-              title={`Source: ${decodeURIComponent(primaryEvalId)}`}
+              title={`Source: ${decodeURIComponent(row.evalSummaryId)}`}
             >
-              on {decodeURIComponent(primaryEvalId)}
+              on {decodeURIComponent(row.evalSummaryId)}
             </div>
           )}
         </div>
         <div className="flex items-baseline justify-end gap-2.5 whitespace-nowrap">
-          {hasRank && (
+          {lead.rankPosition != null && lead.rankTotal != null && (
             <RankBadge
-              position={row.rankPosition!}
-              total={row.rankTotal!}
+              position={lead.rankPosition}
+              total={lead.rankTotal}
               size="md"
+              metricName={lead.metricName}
             />
           )}
           <span
             className="font-mono tabular-nums text-[15px]"
             style={{ color: "var(--fg)", fontWeight: 500 }}
-            title={isBranched ? "Average across reported variants" : "Raw score"}
+            title="Raw score"
           >
-            {parentScore}
+            {formatSummaryScore(lead.rawScore, lead.unit)}
           </span>
         </div>
       </li>
 
       {isBranched &&
-        row.variants.map((v, idx) => {
-          const vEvalId = v.variant.evaluation?.eval_summary_id ?? null
-          const vScoreText = formatSummaryScore(v.rawScore, v.unit)
-          const vHasRank = v.rankPosition != null && v.rankTotal != null && v.rankTotal > 0
-          const setupOrSlice = v.variant.setupLabel || v.variant.sliceLabel
+        row.readings.map((reading, idx) => {
+          const setupOrSlice = reading.variant.setupLabel || reading.variant.sliceLabel
           return (
             <li
-              key={`${row.benchKey}-variant-${idx}`}
+              key={`${row.key}-reading-${idx}`}
               className="grid items-baseline gap-3 py-1"
               style={{
                 gridTemplateColumns: "1fr auto",
@@ -8644,18 +8463,33 @@ function SummaryBenchRow({
                 >
                   └
                 </span>
-                <div className="min-w-0">
-                  {vEvalId && (
+                {/* An eval id is one long token; let it wrap rather than
+                    push the line past a phone-width page. */}
+                <div className="min-w-0" style={{ overflowWrap: "anywhere" }}>
+                  <span
+                    className="mr-2 font-mono"
+                    style={{ fontSize: 12, color: "var(--fg)" }}
+                    title={
+                      reading.lowerIsBetter
+                        ? "Lower raw score is better on this metric."
+                        : "Higher raw score is better on this metric."
+                    }
+                  >
+                    {reading.metricName}
+                    {" "}
+                    {reading.lowerIsBetter ? "↓" : "↑"}
+                  </span>
+                  {row.evalSummaryId && (
                     <span
-                      className="font-mono truncate"
+                      className="font-mono"
                       style={{
                         fontSize: 12,
                         color: "var(--fg-muted)",
                         letterSpacing: "0.02em",
                       }}
-                      title={`Source: ${decodeURIComponent(vEvalId)}`}
+                      title={`Source: ${decodeURIComponent(row.evalSummaryId)}`}
                     >
-                      on {decodeURIComponent(vEvalId)}
+                      on {decodeURIComponent(row.evalSummaryId)}
                     </span>
                   )}
                   {setupOrSlice && (
@@ -8669,18 +8503,19 @@ function SummaryBenchRow({
                 </div>
               </div>
               <div className="flex items-baseline justify-end gap-2.5 whitespace-nowrap">
-                {vHasRank && (
+                {reading.rankPosition != null && reading.rankTotal != null && (
                   <RankBadge
-                    position={v.rankPosition!}
-                    total={v.rankTotal!}
+                    position={reading.rankPosition}
+                    total={reading.rankTotal}
                     size="sm"
+                    metricName={reading.metricName}
                   />
                 )}
                 <span
                   className="font-mono tabular-nums"
                   style={{ fontSize: 13.5, color: "var(--fg)" }}
                 >
-                  {vScoreText}
+                  {formatSummaryScore(reading.rawScore, reading.unit)}
                 </span>
               </div>
             </li>
@@ -8694,10 +8529,13 @@ function RankBadge({
   position,
   total,
   size,
+  metricName,
 }: {
   position: number
   total: number
   size: "sm" | "md"
+  /** The metric the models are ranked on, when the row names one. */
+  metricName?: string | null
 }) {
   const tone = rankBadgeColor(position)
   const fontSize = size === "md" ? 12 : 11
@@ -8706,8 +8544,9 @@ function RankBadge({
     <span
       className="font-mono tabular-nums inline-flex items-baseline"
       style={{ fontSize, color: "var(--fg-muted)" }}
-      title={`Ranked ${position} of ${total} models reported on this benchmark.`}
+      title={`Ranked ${position} of ${total} models reported on this benchmark${metricName ? `, by ${metricName}` : ""}.`}
     >
+      <span style={{ color: "var(--fg-subtle)" }}>rank&nbsp;</span>
       <span
         className="inline-flex items-center justify-center"
         style={{
@@ -8722,17 +8561,9 @@ function RankBadge({
       >
         {position}
       </span>
-      <span style={{ color: "var(--fg-subtle)" }}>/{total}</span>
+      <span style={{ color: "var(--fg-subtle)" }}>&nbsp;of {total}</span>
     </span>
   )
-}
-
-function rankMedal(position: number | null, total: number | null): string | null {
-  if (position == null || total == null || total <= 0) return null
-  if (position === 1) return "🥇"
-  if (position === 2) return "🥈"
-  if (position === 3) return "🥉"
-  return null
 }
 
 // Gold / silver / bronze chip colors for rank 1 / 2 / 3. Returns null
@@ -8745,340 +8576,28 @@ function rankBadgeColor(position: number | null): { bg: string; fg: string } | n
   return null
 }
 
-function formatSummaryScore(raw: number, unit?: string, displayFallback?: string): string {
-  if (!Number.isFinite(raw)) return displayFallback ?? "—"
+function formatSummaryScore(raw: number, unit?: string): string {
   const u = (unit || "").toLowerCase()
+  // A reading with no unit of its own is printed as the number it is. Only a
+  // unit that says so makes it a percentage: an Elo, a perplexity or a signed
+  // bias score is not one.
+  if (!u) {
+    const abs = Math.abs(raw)
+    const decimals = abs >= 100 ? 1 : abs >= 10 ? 2 : abs >= 1 ? 3 : 4
+    const text = raw.toFixed(decimals)
+    return Number(text) === 0 ? "0" : text
+  }
   // Percent-style metrics always render as "<n>%" — never "<n> percent",
   // never "<n> proportion". Handles both 0–1 (proportion) and 0–100
   // (percent already) value ranges so the suffix stays consistent.
-  const isPercentish = !u || /percent|proportion|accuracy|score|pass@|exact|f1|%/.test(u)
+  const isPercentish = /percent|proportion|accuracy|score|pass@|exact|f1|%/.test(u)
   if (isPercentish) {
     const value = Math.abs(raw) <= 1 ? raw * 100 : raw
     const abs = Math.abs(value)
     const decimals = abs < 1 ? 2 : abs < 10 ? 2 : 1
     return `${value.toFixed(decimals)}%`
   }
-  return displayFallback ?? formatRawScoreValue(raw, unit)
-}
-
-function SummaryMetricsRow({
-  row,
-  router,
-  currentDetailHref,
-  modelIds,
-  peerRanks,
-}: {
-  row: {
-    group: BenchmarkGroup
-    rankPosition: number | null
-    rankTotal: number | null
-    rankRatio: number | null
-    rawScore: number
-    displayScore: string
-    unit?: string
-    lowerIsBetter: boolean
-    evalSummaryId: string | null
-  }
-  router: ReturnType<typeof useRouter>
-  currentDetailHref?: string
-  modelIds: string[]
-  peerRanks: PeerRanksMap
-}) {
-  const { group, rankPosition, rankTotal, lowerIsBetter, evalSummaryId } = row
-  const variants = group.variants ?? []
-  const isBranched = variants.length > 1
-  const interactive = Boolean(group.evalDetailHref)
-  const navigate = () => {
-    if (!group.evalDetailHref) return
-    const href = currentDetailHref
-      ? `${group.evalDetailHref}${
-          group.evalDetailHref.includes("?") ? "&" : "?"
-        }from=${encodeURIComponent(currentDetailHref)}`
-      : group.evalDetailHref
-    router.push(href)
-  }
-
-  const categoryLabel = formatTagLabel(group.category as unknown as string)
-  const parentMedal = rankMedal(rankPosition, rankTotal)
-  const hasParentRank = rankPosition != null && rankTotal != null && rankTotal > 0
-  const parentScore = formatSummaryScore(row.rawScore, row.unit, row.displayScore)
-
-  return (
-    <>
-      <li
-        className="grid items-baseline gap-4 py-2.5"
-        style={{
-          gridTemplateColumns: "1fr auto",
-          borderBottom: isBranched
-            ? "1px solid var(--border-soft)"
-            : "1px solid var(--border-soft)",
-          cursor: interactive ? "pointer" : "default",
-        }}
-        role={interactive ? "link" : undefined}
-        tabIndex={interactive ? 0 : -1}
-        onClick={interactive ? navigate : undefined}
-        onKeyDown={
-          interactive
-            ? (e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault()
-                  navigate()
-                }
-              }
-            : undefined
-        }
-      >
-        <div className="min-w-0">
-          <div className="flex items-baseline flex-wrap gap-x-2 gap-y-1">
-            <span
-              className="text-[14px] truncate"
-              style={{ color: "var(--fg)" }}
-              title={group.title}
-            >
-              {group.title}
-            </span>
-            {categoryLabel && (
-              <span
-                className="inline-flex items-center font-mono text-[9px] uppercase tracking-[0.12em] border px-1.5 py-0.5 shrink-0"
-                style={{
-                  color: "var(--fg-muted)",
-                  borderColor: "var(--border-soft)",
-                  background: "var(--bg)",
-                }}
-                title={`Category: ${categoryLabel}`}
-              >
-                {categoryLabel}
-              </span>
-            )}
-            {lowerIsBetter && (
-              <span
-                className="font-mono"
-                style={{ fontSize: 10, color: "var(--fg-subtle)" }}
-                title="Lower raw score is better on this benchmark."
-              >
-                ↓ lower is better
-              </span>
-            )}
-            {isBranched && (
-              <span
-                className="font-mono"
-                style={{ fontSize: 10, color: "var(--fg-subtle)" }}
-                title={`Average across ${variants.length} reported variants.`}
-              >
-                · avg of {variants.length}
-              </span>
-            )}
-          </div>
-          {!isBranched && evalSummaryId && (
-            <div
-              className="mt-0.5 font-mono truncate"
-              style={{
-                fontSize: 11,
-                color: "var(--fg-subtle)",
-                letterSpacing: "0.02em",
-              }}
-              title={`Source: ${decodeURIComponent(evalSummaryId)}`}
-            >
-              on {decodeURIComponent(evalSummaryId)}
-            </div>
-          )}
-        </div>
-        <div className="flex items-baseline justify-end gap-3 whitespace-nowrap">
-          {hasParentRank && (
-            <span
-              className="font-mono tabular-nums"
-              style={{ fontSize: 11, color: "var(--fg-muted)" }}
-              title={`Ranked ${rankPosition} of ${rankTotal} models reported on this benchmark.`}
-            >
-              <span style={{ color: "var(--fg)" }}>{rankPosition}</span>
-              <span style={{ color: "var(--fg-subtle)" }}> / {rankTotal}</span>
-            </span>
-          )}
-          {parentMedal && (
-            <span
-              className="text-[15px] leading-none"
-              aria-hidden
-              title={
-                hasParentRank
-                  ? `Ranked ${rankPosition} of ${rankTotal} models.`
-                  : undefined
-              }
-            >
-              {parentMedal}
-            </span>
-          )}
-          <span
-            className="font-mono tabular-nums text-[14px]"
-            style={{ color: "var(--fg)" }}
-            title={isBranched ? "Average across reported variants" : "Raw score"}
-          >
-            {parentScore}
-          </span>
-        </div>
-      </li>
-
-      {isBranched &&
-        variants.map((v, idx) => {
-          const vEvalId = v.evaluation?.eval_summary_id ?? null
-          const vRawScore = v.result?.score_details?.score
-          const vUnit = v.result?.metric_config?.unit
-          const vDisplay = v.displayScore || formatRawScoreValue(vRawScore ?? NaN, vUnit)
-          // Sidecar lookup per-variant — the in-record `v.rankPosition`
-          // is null for most benchmarks (only embedded ranks). Prefer the
-          // peer-ranks sidecar, fall back to the in-record rank.
-          let vRankPosition = v.rankPosition ?? null
-          let vRankTotal = v.rankTotal ?? null
-          if (vEvalId && vRankPosition == null) {
-            const evalRanks = peerRanks[vEvalId]
-            if (evalRanks) {
-              for (const mid of modelIds) {
-                const r = evalRanks[mid]
-                if (r != null) {
-                  vRankPosition = r.position
-                  vRankTotal = r.total
-                  break
-                }
-              }
-            }
-          }
-          const vMedal = rankMedal(vRankPosition, vRankTotal)
-          const vHasRank =
-            vRankPosition != null && vRankTotal != null && vRankTotal > 0
-          const vScoreText = formatSummaryScore(vRawScore ?? NaN, vUnit, vDisplay)
-          const setupOrSlice = v.setupLabel || v.sliceLabel
-          return (
-            <li
-              key={`${group.key}-variant-${idx}`}
-              className="grid items-baseline gap-4 py-2"
-              style={{
-                gridTemplateColumns: "1fr auto",
-                borderBottom: "1px solid var(--border-soft)",
-                paddingLeft: 20,
-              }}
-            >
-              <div className="min-w-0 flex items-baseline gap-2">
-                <span
-                  className="font-mono shrink-0"
-                  style={{ fontSize: 11, color: "var(--fg-subtle)" }}
-                  aria-hidden
-                >
-                  └
-                </span>
-                <div className="min-w-0">
-                  {vEvalId && (
-                    <span
-                      className="font-mono truncate"
-                      style={{
-                        fontSize: 11,
-                        color: "var(--fg-muted)",
-                        letterSpacing: "0.02em",
-                      }}
-                      title={`Source: ${decodeURIComponent(vEvalId)}`}
-                    >
-                      on {decodeURIComponent(vEvalId)}
-                    </span>
-                  )}
-                  {setupOrSlice && (
-                    <span
-                      className="ml-2 font-mono"
-                      style={{ fontSize: 10, color: "var(--fg-subtle)" }}
-                    >
-                      · {setupOrSlice}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-baseline justify-end gap-3 whitespace-nowrap">
-                {vHasRank && (
-                  <span
-                    className="font-mono tabular-nums"
-                    style={{ fontSize: 11, color: "var(--fg-muted)" }}
-                    title={`Ranked ${vRankPosition} of ${vRankTotal}.`}
-                  >
-                    <span style={{ color: "var(--fg)" }}>{vRankPosition}</span>
-                    <span style={{ color: "var(--fg-subtle)" }}>
-                      {" "}
-                      / {vRankTotal}
-                    </span>
-                  </span>
-                )}
-                {vMedal && (
-                  <span className="text-[14px] leading-none" aria-hidden>
-                    {vMedal}
-                  </span>
-                )}
-                <span
-                  className="font-mono tabular-nums"
-                  style={{ fontSize: 13, color: "var(--fg)" }}
-                >
-                  {vScoreText}
-                </span>
-              </div>
-            </li>
-          )
-        })}
-    </>
-  )
-}
-
-function SummaryMetricsFamilyBlock({
-  familyName,
-  rows,
-  router,
-  currentDetailHref,
-  modelIds,
-  peerRanks,
-}: {
-  familyName: string
-  rows: {
-    group: BenchmarkGroup
-    rankPosition: number | null
-    rankTotal: number | null
-    rankRatio: number | null
-    rawScore: number
-    displayScore: string
-    unit?: string
-    lowerIsBetter: boolean
-    evalSummaryId: string | null
-  }[]
-  router: ReturnType<typeof useRouter>
-  currentDetailHref?: string
-  modelIds: string[]
-  peerRanks: PeerRanksMap
-}) {
-  return (
-    <div>
-      <div
-        className="mb-3 flex items-baseline justify-between gap-3 pb-2"
-        style={{ borderBottom: "1px solid var(--border-soft)" }}
-      >
-        <h3
-          className="font-mono uppercase"
-          style={{ fontSize: 11, letterSpacing: "0.14em", color: "var(--fg)" }}
-        >
-          {familyName}
-        </h3>
-        <span
-          className="font-mono uppercase"
-          style={{ fontSize: 10, letterSpacing: "0.12em", color: "var(--fg-subtle)" }}
-        >
-          {rows.length} benchmark{rows.length === 1 ? "" : "s"}
-        </span>
-      </div>
-      <ul className="m-0 p-0 list-none">
-        {rows.map((row) => (
-          <SummaryMetricsRow
-            key={row.group.key}
-            row={row}
-            router={router}
-            currentDetailHref={currentDetailHref}
-            modelIds={modelIds}
-            peerRanks={peerRanks}
-          />
-        ))}
-      </ul>
-    </div>
-  )
+  return formatRawScoreValue(raw, unit)
 }
 
 /**
