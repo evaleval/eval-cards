@@ -15,8 +15,14 @@ const AudienceModeContext = createContext<AudienceModeContextValue | null>(null)
 
 const STORAGE_KEY = "eval-cards-audience-mode"
 
-export function AudienceModeProvider({ children }: { children: React.ReactNode }) {
-  const [mode, setModeState] = useState<AudienceMode>("research")
+export function AudienceModeProvider({
+  children,
+  initialMode = "research",
+}: {
+  children: React.ReactNode
+  initialMode?: AudienceMode
+}) {
+  const [mode, setModeState] = useState<AudienceMode>(initialMode)
 
   useEffect(() => {
     // A `?mode=` query param (used by external embeds / deep-links) takes

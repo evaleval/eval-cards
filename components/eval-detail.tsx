@@ -2217,6 +2217,8 @@ export function EvalDetail({
         comparability={summary.evalcards?.annotations?.benchmark_comparability}
         summary={summary.comparability_summary}
         modelResults={summary.model_results}
+        leaderboardMetrics={summary.leaderboard_metrics}
+        leaderboardRows={summary.leaderboard_rows}
       />
 
       {hasMultiMetricLeaderboard ? (
@@ -4319,7 +4321,10 @@ function MultiMetricLeaderboard({
 
                 return (
                 <Fragment key={row.model_info.id}>
-                <tr className={cn("align-top", isExpanded && "bg-[color:var(--bg-warm)]")}>
+                <tr
+                  id={row.model_route_id ? `row-${row.model_route_id}` : undefined}
+                  className={cn("align-top", isExpanded && "bg-[color:var(--bg-warm)]")}
+                >
                   <td className="num align-top">
                     <span
                       className="font-mono tabular-nums"
@@ -4484,6 +4489,18 @@ function MultiMetricLeaderboard({
                           benchmarkKey={summary.benchmark_id ?? summary.composite_benchmark_key}
                           evalName={summary.evaluation_name}
                           snapshotId={summary.snapshot_id}
+                          comparabilityByMetric={visibleMetrics
+                            .filter(
+                              (metric) =>
+                                isNumericScore(row.values[metric.column_key]) ||
+                                row.comparability_status_by_metric?.[metric.column_key] != null ||
+                                row.annotations_by_metric?.[metric.column_key] != null,
+                            )
+                            .map((metric) => ({
+                              label: getMetricChipLabel(metric),
+                              status: row.comparability_status_by_metric?.[metric.column_key],
+                              annotations: row.annotations_by_metric?.[metric.column_key],
+                            }))}
                         />
                         <div className="flex justify-end">
                           <FlagScoreButton

@@ -4,10 +4,21 @@ import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { AlertTriangle, ExternalLink, FlaskConical } from "lucide-react"
 import { Term } from "@/components/term"
 import { SignalTooltip } from "@/components/signals/signal-tooltip"
+import {
+  formatNotAssessableReason,
+  formatNotAssessableTooltip,
+  resolveNotAssessableKind,
+} from "@/components/signals/signal-utils"
 import type { ModelResultForBenchmark } from "@/lib/eval-processing"
 import type { GenerationConfig, ScoreDetails } from "@/lib/benchmark-schema"
-import type { EvalRowReproducibility } from "@/lib/backend-artifacts"
+import type { ComparabilityStatus, EvalRowReproducibility, RowAnnotations } from "@/lib/backend-artifacts"
 import { SETUP_ITEMS, setupItemState, type SetupItem, type SetupItemState } from "@/lib/setup-items"
+
+export interface RowMetricComparability {
+  label: string
+  status?: ComparabilityStatus | null
+  annotations?: RowAnnotations | null
+}
 
 interface ResearcherReproducibilityCardProps {
   modelResult: ModelResultForBenchmark
@@ -21,6 +32,9 @@ interface ResearcherReproducibilityCardProps {
   evalName?: string
   /** The snapshot the page's rows came from (`summary.snapshot_id`). */
   snapshotId?: string | null
+  /** Per-metric comparability verdicts for multi-metric rows. When omitted,
+   *  falls back to `modelResult.comparability_status` and its annotations. */
+  comparabilityByMetric?: readonly RowMetricComparability[]
 }
 
 const KNOWN_DECODING_KEYS = ["temperature", "top_p", "top_k", "max_tokens", "seed", "reasoning"] as const
@@ -223,6 +237,7 @@ export function ResearcherReproducibilityCard({
   benchmarkKey,
   evalName,
   snapshotId,
+  comparabilityByMetric,
 }: ResearcherReproducibilityCardProps) {
   const [enrichedGen, setEnrichedGen] = useState<GenerationConfig | null>(null)
   const [enrichedScore, setEnrichedScore] = useState<ScoreDetails | null>(null)
@@ -475,6 +490,27 @@ export function ResearcherReproducibilityCard({
       )
   }, [groups, evidence])
 
+  const comparabilityEntries = useMemo(() => {
+    const raw: readonly RowMetricComparability[] =
+      comparabilityByMetric && comparabilityByMetric.length > 0
+        ? comparabilityByMetric
+        : [
+            {
+              label: "Divergence check",
+              status: modelResult.comparability_status,
+              annotations: modelResult.result.evalcards?.annotations,
+            },
+          ]
+    return raw.map((entry) => ({
+      label: entry.label,
+      naKind: resolveNotAssessableKind(entry.annotations, entry.status),
+      hasVariant: entry.annotations?.variant_divergence?.has_variant_divergence === true,
+      hasCrossParty: entry.annotations?.cross_party_divergence?.has_cross_party_divergence === true,
+    }))
+  }, [comparabilityByMetric, modelResult])
+
+  const hasNotAssessableMetric = comparabilityEntries.some((entry) => entry.naKind !== null)
+
   return (
     <section
       style={{
@@ -616,6 +652,50 @@ export function ResearcherReproducibilityCard({
           <div className="grid gap-x-6 sm:grid-cols-2 lg:grid-cols-3">
             {otherReportedFields.map((f) => (
               <ParamRow key={f.label} label={f.label} termKey={f.termKey} value={f.value} hint={f.hint} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {hasNotAssessableMetric && (
+        <div className="mt-4">
+          <div
+            className="mb-2 font-mono uppercase"
+            style={{ fontSize: 10, letterSpacing: "0.14em", color: "var(--fg-subtle)" }}
+          >
+            Comparability
+          </div>
+          <div>
+            {comparabilityEntries.map((entry, idx) => (
+              <div
+                key={`${entry.label}-${idx}`}
+                className="flex items-baseline justify-between gap-3 border-b border-dashed border-border/50 py-1.5 text-sm last:border-0"
+              >
+                <span style={{ color: "var(--fg)" }}>{entry.label}</span>
+                {entry.naKind ? (
+                  <SignalTooltip content={formatNotAssessableTooltip(entry.naKind, "research")}>
+                    <span
+                      className="font-mono text-xs cursor-help shrink-0"
+                      style={{ color: "var(--fg-subtle)" }}
+                    >
+                      Not assessable ({formatNotAssessableReason(entry.naKind)})
+                    </span>
+                  </SignalTooltip>
+                ) : entry.hasVariant || entry.hasCrossParty ? (
+                  <span className="text-xs font-medium text-rose-700 dark:text-rose-300 shrink-0">
+                    {[
+                      entry.hasVariant ? "Variant divergence" : null,
+                      entry.hasCrossParty ? "Cross-party divergence" : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
+                ) : (
+                  <span className="text-xs shrink-0" style={{ color: "var(--fg-muted)" }}>
+                    Assessed · no divergence
+                  </span>
+                )}
+              </div>
             ))}
           </div>
         </div>
