@@ -1,6 +1,7 @@
 "use client"
 
 import { useAudienceMode } from "@/components/audience-mode-provider"
+import { SplitBreakdown } from "@/components/split-breakdown"
 import { AutoBenchmarkCardsInfo } from "@/components/auto-benchmarkcards-info"
 import { Fragment, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
@@ -2093,117 +2094,13 @@ export function EvalDetail({
                   </div>
                 )}
 
-                {summary.subtasks && summary.subtasks.length > 0 && (() => {
-                  // When every slice reports the same single metric (e.g. all
-                  // Global MMLU language splits share "score · proportion"),
-                  // hoist the metric label to the section header and render
-                  // each slice as a compact "name  value" row in a multi-
-                  // column grid. Otherwise fall back to per-row metric badges.
-                  const firstMetric = summary.subtasks[0]?.metrics?.[0]
-                  const uniformSingleMetric =
-                    !!firstMetric &&
-                    summary.subtasks.every(
-                      (s) =>
-                        s.metrics.length === 1 &&
-                        getCompactMetricLabel(s.metrics[0].display_name) ===
-                          getCompactMetricLabel(firstMetric.display_name) &&
-                        (s.metrics[0].unit ?? null) === (firstMetric.unit ?? null),
-                    )
-                  const headerSuffix = uniformSingleMetric
-                    ? ` · ${getCompactMetricLabel(firstMetric!.display_name)}${
-                        firstMetric!.unit ? ` (${firstMetric!.unit.toLowerCase()})` : ""
-                      }`
-                    : ""
-                  return (
-                    <div className="space-y-2">
-                      <div
-                        className="font-mono uppercase mb-1"
-                        style={{ fontSize: 10, letterSpacing: "0.14em", color: "var(--fg-subtle)" }}
-                      >
-                        Split breakdown · {summary.subtasks.length}
-                        {headerSuffix}
-                      </div>
-                      {uniformSingleMetric ? (
-                        <div
-                          className="grid"
-                          style={{
-                            gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-                            columnGap: 24,
-                          }}
-                        >
-                          {summary.subtasks.map((slice) => {
-                            const metric = slice.metrics[0]
-                            return (
-                              <div
-                                key={slice.subtask_key}
-                                className="flex items-baseline justify-between gap-3 py-1.5 min-w-0"
-                                style={{ borderBottom: "1px solid var(--border-soft)" }}
-                              >
-                                <span
-                                  className="text-[12.5px] truncate"
-                                  title={slice.canonical_display_name || slice.display_name || slice.subtask_name}
-                                >
-                                  {slice.display_name || slice.subtask_name}
-                                </span>
-                                <span
-                                  className="font-mono text-[12px] tabular-nums shrink-0"
-                                  style={{ color: "var(--fg)" }}
-                                >
-                                  {typeof metric.top_score === "number"
-                                    ? formatRawScore(metric.top_score, metric.unit)
-                                    : "—"}
-                                </span>
-                              </div>
-                            )
-                          })}
-                        </div>
-                      ) : (
-                        <ul
-                          className="flex flex-col"
-                          style={{ borderTop: "1px solid var(--border-soft)" }}
-                        >
-                          {summary.subtasks.map((slice) => (
-                            <li
-                              key={slice.subtask_key}
-                              className="grid gap-x-4 py-3"
-                              style={{
-                                gridTemplateColumns: "minmax(160px, 280px) 1fr",
-                                borderBottom: "1px solid var(--border-soft)",
-                              }}
-                            >
-                              <div className="min-w-0">
-                                <div className="font-semibold text-[13px] truncate">
-                                  {slice.display_name || slice.subtask_name}
-                                </div>
-                                {slice.canonical_display_name && slice.canonical_display_name !== (slice.display_name || slice.subtask_name) && (
-                                  <div
-                                    className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.08em] truncate"
-                                    style={{ color: "var(--fg-subtle)" }}
-                                    title={slice.canonical_display_name}
-                                  >
-                                    {slice.canonical_display_name}
-                                  </div>
-                                )}
-                              </div>
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                {slice.metrics.map((metric) => (
-                                  <span
-                                    key={metric.metric_summary_id}
-                                    className="ec-tag"
-                                    title={metric.canonical_display_name || metric.display_name}
-                                  >
-                                    {getCompactMetricLabel(metric.display_name)}
-                                    {typeof metric.top_score === "number" ? ` · ${formatRawScore(metric.top_score, metric.unit)}` : ""}
-                                  </span>
-                                ))}
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  )
-                })()}
+                {summary.subtasks && summary.subtasks.length > 0 && (
+                  <SplitBreakdown
+                    subtasks={summary.subtasks}
+                    metricLabel={getCompactMetricLabel}
+                    formatScore={formatRawScore}
+                  />
+                )}
               </section>
             ) : null}
           </div>
