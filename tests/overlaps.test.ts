@@ -12,6 +12,7 @@ import {
   buildOverlapRows,
   countMultiSourceRows,
   type BuildOverlapRowsInput,
+  type OverlapLeadReading,
   type OverlapSummaryCandidate,
   type OverlapSummaryJoinRow,
 } from "../lib/overlaps"
@@ -63,8 +64,8 @@ function metricEntry(overrides: Partial<ComparisonMetricEntry> = {}): Comparison
   return {
     metric_summary_id: "m%3Aaccuracy",
     metric_name: "accuracy",
-    metric_id: null,
-    metric_key: null,
+    metric_id: "accuracy",
+    metric_key: "accuracy",
     group: "capability",
     group_order: 0,
     lower_is_better: false,
@@ -133,11 +134,30 @@ function candidate(overrides: Partial<OverlapSummaryCandidate> = {}): OverlapSum
     unit: null,
     metricSummaryId: "m%3Aaccuracy",
     metricName: "accuracy",
+    metricKey: "accuracy",
+    lowerIsBetter: false,
+    split: null,
     temperature: null,
     maxTokens: null,
     annotations: null,
     ...overrides,
   }
+}
+
+/** eval_summary_id -> the lead reading's metric_summary_id, as the
+ *  builder's `leadReadings` (no split, unranked). */
+function leads(entries: Array<readonly [string, string]>): Map<string, OverlapLeadReading> {
+  return new Map(entries.map(([evalId, metricSummaryId]) => [evalId, { metricSummaryId, split: null, rank: null }]))
+}
+
+// Unless a test says otherwise the model's row for an eval leads with the
+// eval's first listed metric; nearly every fixture eval has just the one.
+function firstMetricLeads(index: ComparisonIndex | null | undefined) {
+  return leads(
+    Object.values(index?.evals ?? {}).flatMap((entry) =>
+      entry.metrics[0] ? [[entry.evaluation_id, entry.metrics[0].metric_summary_id] as const] : [],
+    ),
+  )
 }
 
 function build(overrides: Partial<BuildOverlapRowsInput> = {}) {
@@ -147,6 +167,7 @@ function build(overrides: Partial<BuildOverlapRowsInput> = {}) {
     currentModelRouteId: MODEL_ROUTE,
     currentModelIdentityKeys: IDENTITY,
     familyDisplayByKey: FAMILY_NAMES,
+    leadReadings: firstMetricLeads(overrides.comparisonIndex),
     ...overrides,
   })
 }
@@ -207,13 +228,59 @@ describe("buildOverlapRows: multi-source rows", () => {
     expect(rows[0].mean).toBeCloseTo(75, 10)
   })
 
-  it("rescales mixed proportion/percent appearances to the majority scale", () => {
+  it("never rescales a value by its magnitude: one unit's values stay as reported", () => {
     const rows = build({
       benchmarkIndex: [MMLU_INDEX],
       comparisonIndex: comparisonIndexOf(mmluEvals([ownRow(0.7)], [ownRow(80)])),
     })
-    expect(rows[0].appearances.map((a) => a.score)).toEqual([80, 70])
+    expect(rows[0].appearances.map((a) => a.score)).toEqual([80, 0.7])
+  })
+
+  it("scales a percent and a proportion of one metric by their units, not their magnitudes", () => {
+    // 0.5 percent and 0.8 proportion, no producer conversion: 0.5% and 80%.
+    const rows = build({
+      benchmarkIndex: [MMLU_INDEX],
+      comparisonIndex: comparisonIndexOf({
+        "fam-a%2Fmmlu": evalEntry("fam-a%2Fmmlu", [
+          metricEntry({ unit: "percent", scores: [ownRow(0.5, { scale_conversion: "no_bounds", score_canonical: 0.5 })] }),
+        ]),
+        "fam-b%2Fmmlu": evalEntry("fam-b%2Fmmlu", [
+          metricEntry({ unit: "proportion", scores: [ownRow(0.8, { scale_conversion: "no_bounds", score_canonical: 0.8 })] }),
+        ]),
+      }),
+    })
+    expect(rows).toHaveLength(1)
     expect(rows[0].isPercentScale).toBe(true)
+    expect(rows[0].appearances.map((a) => [a.familyKey, a.score, a.displayScore])).toEqual([
+      ["fam-b", 80, "80.0%"],
+      ["fam-a", 0.5, "0.5%"],
+    ])
+    expect(rows[0].mean).toBeCloseTo(40.25, 10)
+  })
+
+  it("keeps an aggregator score that matches an independent one on another split", () => {
+    // An independent source reports accuracy 0.8 on train; llm-stats
+    // reports accuracy 0.8 on test. Different populations: both stay.
+    const entry = indexEntry("mmlu", "MMLU", [
+      { family: "fam-a", evalIds: ["fam-a%2Fmmlu"] },
+      { family: "llm-stats", evalIds: ["llm-stats%2Fmmlu"] },
+    ])
+    const comparisonIndex = comparisonIndexOf({
+      "fam-a%2Fmmlu": evalEntry("fam-a%2Fmmlu", [metricEntry({ unit: "proportion", scores: [ownRow(0.8)] })]),
+      "llm-stats%2Fmmlu": evalEntry("llm-stats%2Fmmlu", [metricEntry({ unit: "proportion", scores: [ownRow(0.8)] })]),
+    })
+    const rows = build({
+      benchmarkIndex: [entry],
+      comparisonIndex,
+      leadReadings: new Map([
+        ["fam-a%2Fmmlu", { metricSummaryId: "m%3Aaccuracy", split: "train", rank: null }],
+        ["llm-stats%2Fmmlu", { metricSummaryId: "m%3Aaccuracy", split: "test", rank: null }],
+      ]),
+    })
+    expect(rows.flatMap((row) => row.appearances.map((a) => [a.familyKey, a.split, a.score])).sort()).toEqual([
+      ["fam-a", "train", 0.8],
+      ["llm-stats", "test", 0.8],
+    ])
   })
 
   it("drops the aggregator copy of an independent score, keeps independent ties", () => {
@@ -231,6 +298,78 @@ describe("buildOverlapRows: multi-source rows", () => {
     })
     expect(rows).toHaveLength(1)
     expect(rows[0].appearances.map((a) => a.familyKey).sort()).toEqual(["fam-a", "fam-b"])
+  })
+})
+
+describe("buildOverlapRows: which metric a source's score is read on", () => {
+  // agentharm/agentharm-copyright on warehouse snapshot 2026-11-20T19-17-21Z,
+  // Mistral Small: the pipeline leads the eval's row with the refusal rate.
+  // The scores metric is listed first and its name matches the pattern the
+  // builder once picked a metric by.
+  const COPYRIGHT = "agentharm%2Fagentharm-copyright"
+  const SCORES = "agentharm-copyright%3ACopyright_avg_scores"
+  const REFUSALS = "agentharm-copyright%3ACopyright_avg_refusals"
+  const copyrightEval = () =>
+    evalEntry(COPYRIGHT, [
+      metricEntry({ metric_summary_id: SCORES, metric_name: "Copyright_avg_scores", scores: [ownRow(0.6575)] }),
+      metricEntry({ metric_summary_id: REFUSALS, metric_name: "Copyright_avg_refusals", scores: [ownRow(0.25)] }),
+    ])
+  const copyrightIndex = [indexEntry("agentharm-copyright", "AgentHarm Copyright", [{ family: "fam-a", evalIds: [COPYRIGHT] }])]
+
+  it("shows the reading the model's row leads with, not the first score-like metric", () => {
+    const rows = build({
+      benchmarkIndex: copyrightIndex,
+      comparisonIndex: comparisonIndexOf({ [COPYRIGHT]: copyrightEval() }),
+      leadReadings: leads([[COPYRIGHT, REFUSALS]]),
+    })
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].appearances).toHaveLength(1)
+    expect(rows[0].appearances[0].metricSummaryId).toBe(REFUSALS)
+    expect(rows[0].appearances[0].metricName).toBe("Copyright_avg_refusals")
+    expect(rows[0].appearances[0].displayScore).toBe("25.0%")
+    expect(rows[0].mean).toBe(0.25)
+    expect(rows[0].min).toBe(0.25)
+    expect(rows[0].max).toBe(0.25)
+  })
+
+  it("reads each source on its own lead metric", () => {
+    const other = "fam-b%2Fagentharm-copyright"
+    const rows = build({
+      benchmarkIndex: [
+        indexEntry("agentharm-copyright", "AgentHarm Copyright", [
+          { family: "fam-a", evalIds: [COPYRIGHT] },
+          { family: "fam-b", evalIds: [other] },
+        ]),
+      ],
+      comparisonIndex: comparisonIndexOf({
+        [COPYRIGHT]: copyrightEval(),
+        [other]: evalEntry(other, [
+          metricEntry({ metric_summary_id: "c%3Astd", metric_name: "std", scores: [ownRow(0.05)] }),
+          metricEntry({ metric_summary_id: "c%3Arefusals", metric_name: "refusals", scores: [ownRow(0.35)] }),
+        ]),
+      }),
+      leadReadings: leads([
+        [COPYRIGHT, REFUSALS],
+        [other, "c%3Arefusals"],
+      ]),
+    })
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].appearances.map((a) => [a.familyKey, a.metricName, a.displayScore])).toEqual([
+      ["fam-b", "refusals", "35.0%"],
+      ["fam-a", "Copyright_avg_refusals", "25.0%"],
+    ])
+  })
+
+  it("leaves out an eval the model has no row on", () => {
+    const rows = build({
+      benchmarkIndex: copyrightIndex,
+      comparisonIndex: comparisonIndexOf({ [COPYRIGHT]: copyrightEval() }),
+      leadReadings: leads([]),
+    })
+
+    expect(rows).toEqual([])
   })
 })
 
@@ -291,13 +430,11 @@ describe("buildOverlapRows: producer canonical scale (spec F5)", () => {
     expect(rows[0].isPercentScale).toBe(true)
   })
 
-  it("falls back to the legacy vote when unanchored 'none' cells' units disagree", () => {
+  it("scales unanchored 'none' cells whose units disagree by their units", () => {
     // Real-snapshot regression (terminalbench-hard / DeepSeek-R1): an
-    // all-'none' group where one source's cell mislabels its unit as
-    // "percent" (value 0.0) next to a "proportion" sibling (0.11). A
-    // lone lying percent unit must NOT flip the whole group 100x —
-    // conflicting units mean no anchor, so the legacy vote applies and
-    // both fractions land on the percent axis as [11, 0], not [0.11, 0].
+    // all-'none' group, a "percent" cell (value 0.0) next to a
+    // "proportion" sibling (0.11). Conflicting units mean no producer
+    // anchor, so each lands on the percent axis from its own unit: [11, 0].
     const rows = build({
       benchmarkIndex: [MMLU_INDEX],
       comparisonIndex: comparisonIndexOf({
@@ -315,10 +452,9 @@ describe("buildOverlapRows: producer canonical scale (spec F5)", () => {
         ]),
       }),
     })
-    // Legacy keeps raw scores (both low ⇒ no cross-appearance rescale)
-    // and formats per cell: the proportion 0.11 displays as 11%, which
-    // is the truth — the buggy resolved group rendered it "0.1%".
-    expect(rows[0].appearances.map((a) => a.score)).toEqual([0.11, 0])
+    // Each value is scaled by its own unit: the proportion 0.11 is 11%,
+    // which is the truth — the buggy resolved group rendered it "0.1%".
+    expect(rows[0].appearances.map((a) => a.score)).toEqual([11, 0])
     expect(rows[0].appearances.map((a) => a.displayScore)).toEqual(["11.0%", "0.0%"])
   })
 
@@ -717,10 +853,10 @@ describe("buildOverlapRows: plain-quantity units", () => {
     expect(rows[0].appearances[0].displayScore).toBe("0.0012 usd")
   })
 
-  it("lets a unit-less sibling adopt the row's shared physical unit", () => {
-    // Live case: llm-stats stamps vending-bench-2 "usd", paperswithcode
-    // reports the same balance with no unit. One null must not drag the
-    // row onto the percent path ("16484.1%").
+  it("keeps a unit-less source apart from one in usd", () => {
+    // Live shape: llm-stats stamps vending-bench-2 "usd", paperswithcode
+    // reports a balance with no unit. No unit is not the same scale as usd,
+    // so the two are not averaged; the usd row keeps its unit.
     const idx = comparisonIndexOf({
       "fam-a%2Fmmlu": evalEntry("fam-a%2Fmmlu", [
         metricEntry({ unit: "usd", scores: [ownRow(16484, { scale_conversion: "no_bounds", score_canonical: 16484 })] }),
@@ -730,21 +866,22 @@ describe("buildOverlapRows: plain-quantity units", () => {
       ]),
     })
     const rows = build({ benchmarkIndex: [MMLU_INDEX], comparisonIndex: idx })
-    expect(rows).toHaveLength(1)
-    expect(rows[0].plainUnit).toBe("usd")
-    expect(rows[0].isPercentScale).toBe(false)
-    expect(rows[0].min).toBe(16484)
-    expect(rows[0].max).toBe(16484.21)
-    expect(rows[0].appearances.map((a) => a.displayScore)).toEqual(["16484 usd", "16484 usd"])
+    expect(rows).toHaveLength(2)
+    const usd = rows.find((row) => row.appearances[0].familyKey === "fam-a")!
+    expect(usd.plainUnit).toBe("usd")
+    expect(usd.isPercentScale).toBe(false)
+    expect(usd.mean).toBe(16484)
+    expect(usd.appearances.map((a) => a.displayScore)).toEqual(["16484 usd"])
+    expect(rows.find((row) => row.appearances[0].familyKey === "fam-b")!.mean).toBe(16484.21)
   })
 
-  it("gives no plain unit when siblings state different units", () => {
+  it("gives sources that state different units a row each, in its own unit", () => {
     const idx = comparisonIndexOf({
       "fam-a%2Fmmlu": evalEntry("fam-a%2Fmmlu", [metricEntry({ unit: "usd", scores: [ownRow(16484)] })]),
       "fam-b%2Fmmlu": evalEntry("fam-b%2Fmmlu", [metricEntry({ unit: "points", scores: [ownRow(16484.21)] })]),
     })
     const rows = build({ benchmarkIndex: [MMLU_INDEX], comparisonIndex: idx })
-    expect(rows[0].plainUnit).toBeNull()
+    expect(rows.map((row) => row.plainUnit).sort()).toEqual(["points", "usd"])
   })
 
   it("keeps the magnitude heuristic when the unit does not settle the scale", () => {

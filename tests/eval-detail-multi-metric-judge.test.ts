@@ -204,11 +204,11 @@ describe("EvalDetail multi-metric matrix — primary metric and judge cells", ()
     expect(html).toContain("higher is better")
   })
 
-  it("falls back to the first root metric when the page declares no primary", () => {
+  it("ranks on no metric when the page declares no primary", () => {
     const html = render(summaryWith({ primary_metric_id: undefined }))
 
-    expect(html).toContain("Attack Success Rate ▲")
-    expect(html).not.toContain("HarmBench Refusal Score ▼")
+    expect(html).not.toMatch(/Attack Success Rate [▲▼]/)
+    expect(html).not.toMatch(/HarmBench Refusal Score [▲▼]/)
   })
 
   it("labels a judged cell and keeps the losing judge's reading in its tooltip", () => {

@@ -7,7 +7,6 @@ import { describe, expect, it } from "vitest"
 import { isNotAssessable } from "../components/signals/signal-utils"
 import type { ComparabilityStatus, RowAnnotations } from "../lib/backend-artifacts"
 import {
-  compositeScoresByModel,
   groupByHeadlineModel,
   judgeCellSummary,
   judgeConditionSummary,
@@ -440,37 +439,12 @@ describe("Tier A — pipeline contracts (judge-condition view columns)", () => {
     expect(primaryMetricColumnKey(metrics, "harmbench-refusal-score")).toBe(
       "harmbench-refusal-score",
     )
-    // No declared primary, or one no column carries: the first root metric.
-    expect(primaryMetricColumnKey(metrics, undefined)).toBe("attack-success-rate")
-    expect(primaryMetricColumnKey(metrics, "not-a-metric")).toBe("attack-success-rate")
-    // A subtask column never becomes the ranking column.
-    expect(primaryMetricColumnKey(metrics, "score")).toBe("attack-success-rate")
+    // No declared primary, or one no root column carries: no column stands in.
+    expect(primaryMetricColumnKey(metrics, undefined)).toBeUndefined()
+    expect(primaryMetricColumnKey(metrics, "not-a-metric")).toBeUndefined()
+    expect(primaryMetricColumnKey(metrics, "score")).toBeUndefined()
     expect(primaryMetricColumnKey([], "score")).toBeUndefined()
     expect(primaryMetricColumnKey(undefined, undefined)).toBeUndefined()
-  })
-
-  it("builds composite matrix cells from headline rows only", () => {
-    const row = (name: string, score: number, headline: boolean) =>
-      ({
-        model_info: { id: "org/model-a", name, developer: "Org" },
-        score,
-        is_headline: headline,
-      }) as unknown as import("../lib/eval-processing").ModelResultForBenchmark
-
-    const models = compositeScoresByModel([
-      {
-        evaluation_name: "Sub A",
-        // The data query orders headline first, so a later judge arm is
-        // exactly what used to overwrite the model's summary reading.
-        model_results: [row("Model A", 0.8, true), row("Model A", 0.99, false)],
-      },
-      { evaluation_name: "Sub B", model_results: [row("Model A", 0.6, true)] },
-    ])
-
-    expect([...models.get("org/model-a")!.scores.entries()]).toEqual([
-      ["Sub A", 0.8],
-      ["Sub B", 0.6],
-    ])
   })
 
   it("groups a model's secondary readings under its headline row for sorting", () => {

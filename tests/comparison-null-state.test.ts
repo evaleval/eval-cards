@@ -175,7 +175,7 @@ describe("surfaces with no comparison data", () => {
     expect(empty).toContain("Single-source benchmark: 1 reporting org.")
     expect(empty).toContain("Only one source reports this benchmark.")
     const loaded = await render(full)
-    expect(loaded).toContain("2 independent sources report this benchmark")
+    expect(loaded).toContain("2 sources report this benchmark, but no model is reported by more than one.")
     expect(loaded).not.toContain("Only one source reports this benchmark.")
   })
 })

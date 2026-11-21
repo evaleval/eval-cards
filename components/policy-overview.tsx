@@ -4,7 +4,8 @@ import { useMemo, useState } from "react"
 import { BookOpen, ChevronDown, ChevronUp, ExternalLink, FileText, Globe, Layers, ScrollText, Tag, Users } from "lucide-react"
 import { SignalTooltip } from "@/components/signals/signal-tooltip"
 import { AutoBenchmarkCardsInfo } from "@/components/auto-benchmarkcards-info"
-import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
+import { primaryMetricColumnKey, type BenchmarkEvalSummary } from "@/lib/eval-processing"
+import { getMetricChipLabel } from "@/lib/metric-labels"
 import { getKnownIssues } from "@/lib/known-issues"
 import { KnownIssuesPanel } from "@/components/known-issues-panel"
 
@@ -81,20 +82,14 @@ export function PolicyOverview({ summary }: PolicyOverviewProps) {
   const overview = cardMatchesEval ? card?.benchmark_details?.overview?.trim() || "" : ""
   const goal = cardMatchesEval ? card?.purpose_and_intended_users?.goal?.trim() || "" : ""
 
-  // Detect "parent" benchmark pages — either an aggregated composite or a
-  // multi-metric matrix where each column is a slice. In both cases the
-  // per-evaluation `metric_config.evaluation_description` belongs to whichever
+  // Detect "parent" benchmark pages: a multi-metric matrix where each column
+  // is a slice. The per-evaluation `metric_config.evaluation_description` belongs to whichever
   // component was processed first (e.g. just the "airline" subset of Tau
   // Bench 2) and would mislead a policy reader. Synthesize parent framing
   // instead and surface the slices separately.
   // Note: at the data layer the backend still ships these as `subtasks` /
   // `metric.scope === "subtask"`; we read those fields directly but label
   // them "slice" in the UI.
-  const isAggregated = summary.is_aggregated === true
-  const aggregateNames = (summary.aggregate_sources ?? [])
-    .map((s) => s.composite_benchmark_name)
-    .filter((s): s is string => typeof s === "string" && s.length > 0)
-
   const splitLabels = useMemo(() => {
     const seen = new Set<string>()
     const labels: string[] = []
@@ -115,20 +110,15 @@ export function PolicyOverview({ summary }: PolicyOverviewProps) {
         add(metric.subtask_name || metric.display_name)
       }
     }
-    for (const name of aggregateNames) add(name)
     return labels
-  }, [summary.subtasks, summary.leaderboard_metrics, aggregateNames])
+  }, [summary.subtasks, summary.leaderboard_metrics])
 
   const isMatrix = (summary.leaderboard_metrics?.length ?? 0) > 1
-  const isParentPage = isAggregated || (isMatrix && splitLabels.length > 1)
+  const isParentPage = isMatrix && splitLabels.length > 1
   const useComponentDescription = !isParentPage
 
   const parentFallback = isParentPage && splitLabels.length > 1
-    ? `${summary.evaluation_name} reports results across ${splitLabels.length} ${
-        isAggregated ? "component benchmarks" : "splits"
-      }. Each is evaluated separately; the score shown is the ${
-        isAggregated ? "average" : "per-split result"
-      }.`
+    ? `${summary.evaluation_name} reports results across ${splitLabels.length} splits. Each is evaluated separately; the score shown is the per-split result.`
     : null
 
   const summaryText =
@@ -201,9 +191,15 @@ export function PolicyOverview({ summary }: PolicyOverviewProps) {
     ],
   )
 
-  const directionLabel = summary.metric_config.lower_is_better
-    ? "Lower scores are better"
-    : "Higher scores are better"
+  // `metric_config` is the `primary_metric_id` metric's. On a page with
+  // several root metrics its direction is stated as that metric's only.
+  const rootMetrics = (summary.leaderboard_metrics ?? []).filter((m) => m.scope !== "subtask")
+  const primaryColumn = primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id)
+  const primaryMetric = rootMetrics.length > 1 ? rootMetrics.find((m) => m.column_key === primaryColumn) : undefined
+  const primaryMetricName = primaryMetric ? getMetricChipLabel(primaryMetric) : null
+  const directionLabel = `${primaryMetricName ? `${primaryMetricName}: ` : ""}${
+    summary.metric_config.lower_is_better ? "Lower scores are better" : "Higher scores are better"
+  }`
 
   // Policy-note triple: What it measures · Main caveat · Intended for.
   // Filter the literal "Not specified" sentinel so the row collapses
@@ -307,9 +303,9 @@ export function PolicyOverview({ summary }: PolicyOverviewProps) {
         <dd style={{ color: "var(--fg)", lineHeight: 1.6, margin: 0 }}>
           <SignalTooltip
             content={
-              summary.metric_config.lower_is_better
-                ? "On this benchmark, a lower number means the model did better."
-                : "On this benchmark, a higher number means the model did better."
+              `${primaryMetricName ? `On ${primaryMetricName}` : "On this benchmark"}, a ${
+                summary.metric_config.lower_is_better ? "lower" : "higher"
+              } number means the model did better.`
             }
           >
             <span
@@ -344,9 +340,7 @@ export function PolicyOverview({ summary }: PolicyOverviewProps) {
               className="font-mono uppercase"
               style={{ fontSize: 10, letterSpacing: "0.14em" }}
             >
-              {isAggregated
-                ? `Component benchmarks · ${splitLabels.length}`
-                : `Splits · ${splitLabels.length}`}
+              {`Splits · ${splitLabels.length}`}
             </span>
             {splitsOpen ? (
               <ChevronUp className="h-3.5 w-3.5" />

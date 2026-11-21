@@ -143,7 +143,7 @@ interface Markers {
 async function pickWitnesses(): Promise<{ witnesses: Witnesses; markers: Markers }> {
   const { buildBenchmarkHistograms, comparisonRouteIdOf } = await import("@/components/benchmark-detail")
   const { buildOverlapRows } = await import("@/lib/overlaps")
-  const { identityKeysOf } = await import("./comparison-fixture")
+  const { identityKeysOf, leadReadingsOf } = await import("./comparison-fixture")
   const familyDisplayByKey = new Map(hierarchy.families.map((f) => [f.key, f.display_name]))
   const own = (summary: ModelEvaluationSummary) => Object.keys(full.by_model?.[comparisonRouteIdOf(summary)] ?? {})
   const find = (label: string, test: (summary: ModelEvaluationSummary) => boolean) => {
@@ -180,6 +180,7 @@ async function pickWitnesses(): Promise<{ witnesses: Witnesses; markers: Markers
         currentModelRouteId: comparisonRouteIdOf(summary),
         currentModelIdentityKeys: identityKeysOf(summary),
         familyDisplayByKey,
+        leadReadings: leadReadingsOf(summary),
       }).some((row) => row.appearances.length > 1),
     ),
     protocol: find("protocol submission chip", (summary) => own(summary).some(isProtocolRow(summary))),

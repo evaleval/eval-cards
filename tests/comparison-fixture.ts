@@ -3,8 +3,9 @@ import os from "node:os"
 import path from "node:path"
 
 import type { ComparisonIndex, EvalHierarchy } from "@/lib/backend-artifacts"
-import type { ModelSummaryCore } from "@/lib/benchmark-schema"
+import type { ModelEvaluationSummary, ModelSummaryCore } from "@/lib/benchmark-schema"
 import { parseJsonWithBounds } from "@/lib/json-bounds"
+import type { OverlapLeadReading } from "@/lib/overlaps"
 
 // A real subset of a warehouse snapshot: the three comparison tables, the
 // producer's comparison-index.json for the same evals and rows, the matching
@@ -63,4 +64,28 @@ export function identityKeysOf(summary: ModelSummaryCore): Set<string> {
       ...(s.raw_model_ids ?? []),
     ].filter(Boolean) as string[],
   )
+}
+
+/** The reading each of the model's eval rows leads with, as BenchmarkDetail
+ *  hands it to the overlaps builder: eval_summary_id -> the reading
+ *  view-data flags `is_lead_metric`. */
+export function leadReadingsOf(summary: ModelEvaluationSummary): Map<string, OverlapLeadReading> {
+  const leads = new Map<string, OverlapLeadReading>()
+  for (const evaluations of Object.values(summary.evaluations_by_tag)) {
+    for (const evaluation of evaluations) {
+      for (const result of evaluation.evaluation_results) {
+        if (evaluation.eval_summary_id && result.is_lead_metric && result.metric_summary_id) {
+          leads.set(evaluation.eval_summary_id, {
+            metricSummaryId: result.metric_summary_id,
+            split: result.split ?? null,
+            rank:
+              result.position != null && result.total != null
+                ? { position: result.position, total: result.total }
+                : null,
+          })
+        }
+      }
+    }
+  }
+  return leads
 }

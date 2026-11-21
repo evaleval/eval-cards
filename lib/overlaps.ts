@@ -7,6 +7,11 @@
 //   (b) the model's own summary benchmark groups for benchmarks that have no
 //       benchmark_index entry (single family globally), merged in as
 //       one-appearance rows when not already represented.
+// A benchmark gets one row per measurement: sources are combined only when
+// their readings are averageable (lib/headline-readings), and a source whose
+// reading is not gets a row of its own. A source that reports a benchmark
+// only through its parts stands in one row of its own, with the parts'
+// mean when they are averageable and no number otherwise.
 // Rows aggregate per canonical with mean, SD, and 95% CI from Student's-t
 // (df=N-1). N=2 widths are very wide on purpose: with two samples we
 // genuinely don't know the spread, and surfacing that beats fake precision.
@@ -20,26 +25,44 @@ import type {
   RowAnnotations,
   ScaleConversion,
 } from "./backend-artifacts"
-import {
-  isPercentUnit,
-  isPhysicalQuantityUnit,
-  isPlainQuantityUnit,
-  mergeRegistryBounds,
-  resolveCanonicalScaleGroup,
-  type CanonicalScaleCell,
-} from "./score-scale"
+import { isPercentUnit, isPhysicalQuantityUnit, isPlainQuantityUnit } from "./score-scale"
+import { averageable, averageReadings, onOneScale, type AverageableReading } from "./headline-readings"
 
 export type OverlapSourceKind = "comparison-index" | "summary"
 
-export interface OverlapAppearance {
-  familyKey: string
-  familyName: string
+/** One part of a benchmark a source reports only through its parts. */
+export interface OverlapPart {
   evalSummaryId: string
-  metricSummaryId: string
+  name: string
   metricName: string
   score: number
   displayScore: string
   unit: string | null
+  /** The model's rank on the part's own lead reading. */
+  rank: { position: number; total: number } | null
+}
+
+export interface OverlapAppearance {
+  familyKey: string
+  familyName: string
+  /** Empty on an appearance made of parts; see `parts`. */
+  evalSummaryId: string
+  metricSummaryId: string
+  metricName: string
+  /** The reading's metric id and direction; null on parts that are not one metric. */
+  metricKey: string | null
+  lowerIsBetter: boolean
+  split: string | null
+  /** NaN when the appearance is made of parts that are not averageable. */
+  score: number
+  displayScore: string
+  unit: string | null
+  /** Set when the source reports the benchmark only through its parts:
+   *  `score` is their mean when they are averageable. */
+  parts?: OverlapPart[]
+  /** The benchmark's parts the source also reports beside its own eval:
+   *  listed under the appearance, never in its number. */
+  ownEvalParts?: OverlapPart[]
   temperature?: number | null
   maxTokens?: number | null
   /** The study this appearance was reported under, the run's own protocol
@@ -65,6 +88,8 @@ export interface OverlapAppearance {
 }
 
 export interface OverlapRow {
+  /** Unique per row; a benchmark with several measurements has several rows. */
+  rowKey: string
   canonicalKey: string
   canonicalDisplayName: string
   appearances: OverlapAppearance[]
@@ -96,18 +121,26 @@ export interface OverlapSummaryJoinRow {
 
 /** A benchmark group from the model's own summary payload — the merge input
  *  for benchmarks without a benchmark_index entry. Carries the group's
- *  primary-variant display fields plus every variant eval_summary_id so the
- *  merge can skip anything already represented. */
+ *  number (its own eval's lead reading, or its parts) plus every variant
+ *  eval_summary_id so the merge can skip anything already represented. */
 export interface OverlapSummaryCandidate {
   groupKey: string
   displayName: string
   evalSummaryIds: string[]
   familyKey: string
   familyName: string
+  /** NaN for parts that are not averageable. */
   score: number
   unit: string | null
   metricSummaryId: string
   metricName: string
+  metricKey: string | null
+  lowerIsBetter: boolean
+  split: string | null
+  /** Set when the group has no eval of its own; `score` is their mean. */
+  parts?: Array<Omit<OverlapPart, "displayScore">>
+  /** The group's parts beside its own eval, listed under its reading. */
+  ownEvalParts?: Array<Omit<OverlapPart, "displayScore">>
   temperature: number | null
   maxTokens: number | null
   collectionId?: string | null
@@ -122,16 +155,19 @@ export interface BuildOverlapRowsInput {
   currentModelRouteId: string
   currentModelIdentityKeys: Set<string>
   familyDisplayByKey: Map<string, string>
+  /** eval_summary_id -> the reading the model's row for that eval leads
+   *  with (`EvaluationResult.is_lead_metric`). An eval the model has no row
+   *  on has no entry and contributes no appearance. */
+  leadReadings: Map<string, OverlapLeadReading>
   summaryCandidates?: OverlapSummaryCandidate[]
   summaryJoinRows?: OverlapSummaryJoinRow[]
 }
 
-const STDERR_SUFFIX_PATTERN = /_(stderr|std_err|standard_error)$/i
-
-function isStderrMetricId(id: string | null | undefined): boolean {
-  if (!id) return false
-  const local = id.split("%3A").pop() ?? id
-  return STDERR_SUFFIX_PATTERN.test(local)
+/** The model's lead reading on one eval, as the overlaps builder needs it. */
+export interface OverlapLeadReading {
+  metricSummaryId: string
+  split: string | null
+  rank: { position: number; total: number } | null
 }
 
 const tCrit95: Record<number, number> = {
@@ -186,6 +222,122 @@ function formatScalePercent(score: number, isPercentScale: boolean): string {
   return isPercentScale ? `${score.toFixed(1)}%` : `${(score * 100).toFixed(1)}%`
 }
 
+function readingOf(c: OverlapAppearance): AverageableReading {
+  return {
+    metricKey: c.metricKey,
+    lowerIsBetter: c.lowerIsBetter,
+    split: c.split,
+    unit: c.unit,
+    score: c.score,
+    scoreCanonical: c.scoreCanonical,
+    scaleConversion: c.scaleConversion,
+    canonicalMinScore: c.canonicalMinScore,
+    canonicalMaxScore: c.canonicalMaxScore,
+  }
+}
+
+/** The names of the metrics a set of parts is reported on, in order. */
+function partsMetricName(parts: Array<{ metricName: string }>): string {
+  return Array.from(new Set(parts.map((part) => part.metricName).filter(Boolean))).join(", ")
+}
+
+/**
+ * One row from appearances that are one measurement: mean, SD, 95% CI and
+ * range on one scale. A lone appearance made of parts carries its own
+ * number (their mean, or NaN when they have none).
+ */
+function overlapRowFrom(
+  rowKey: string,
+  canonicalKey: string,
+  canonicalDisplayName: string,
+  collected: OverlapAppearance[],
+): OverlapRow {
+  // One scale for the row's values, the same conversion every model-page
+  // average uses (`onOneScale`): the producer's canonical scale, else the
+  // shared unit as reported, else percent scaled from each unit. No value
+  // is rescaled by its magnitude. Null for an appearance of parts with no
+  // number, which keeps its NaN.
+  const scale = onOneScale(collected.map(readingOf))
+  const sameUnit = new Set(collected.map((c) => (c.unit ?? "").trim().toLowerCase())).size === 1
+  let scaled: OverlapAppearance[]
+  let useHigh: boolean
+  let plainUnit: string | null = null
+  if (scale && (scale.canonical || !sameUnit)) {
+    useHigh = scale.unit === "percent"
+    scaled = collected.map((c, i) => ({
+      ...c,
+      score: scale.values[i],
+      displayScore: formatScalePercent(scale.values[i], useHigh),
+    }))
+  } else {
+    // One unit, values as reported. Plain quantities (Elo, latency, cost…)
+    // display in their unit; anything else is a percent or a proportion,
+    // which only the display decides (a stated percent unit, else most
+    // values above 1.5).
+    const unit = collected[0]?.unit ?? null
+    plainUnit =
+      unit != null && collected.every((c) => plainUnitFor(c.score, unit) !== null) ? unit : null
+    if (plainUnit) {
+      const shownUnit = plainUnit
+      useHigh = false
+      scaled = collected.map((c) => ({ ...c, displayScore: formatPlainUnitScore(c.score, shownUnit) }))
+    } else {
+      const highCount = collected.filter((c) => Math.abs(c.score) > 1.5).length
+      useHigh = isPercentUnit(unit) || highCount >= collected.length - highCount
+      scaled = [...collected]
+    }
+  }
+  const scores = scaled.map((s) => s.score)
+  const mean = scores.reduce((a, b) => a + b, 0) / scores.length
+  const variance = scores.length > 1
+    ? scores.reduce((a, b) => a + (b - mean) ** 2, 0) / (scores.length - 1)
+    : 0
+  const stddev = Math.sqrt(variance)
+  const ci95 = scores.length >= 2
+    ? {
+        low: mean - tFor(scores.length - 1) * (stddev / Math.sqrt(scores.length)),
+        high: mean + tFor(scores.length - 1) * (stddev / Math.sqrt(scores.length)),
+      }
+    : null
+  return {
+    rowKey,
+    canonicalKey,
+    canonicalDisplayName,
+    appearances: scaled.sort((a, b) => b.score - a.score),
+    mean,
+    stddev,
+    min: Math.min(...scores),
+    max: Math.max(...scores),
+    ci95,
+    isPercentScale: useHigh,
+    plainUnit,
+  }
+}
+
+/** The fields an appearance made of parts takes from them. */
+function partsAppearanceFields(
+  parts: Array<Omit<OverlapPart, "displayScore">>,
+  readings: AverageableReading[],
+): Pick<OverlapAppearance, "metricKey" | "lowerIsBetter" | "split" | "score" | "unit" | "displayScore" | "parts" | "metricName"> {
+  const average = averageReadings(readings)
+  const score = average?.mean ?? Number.NaN
+  const unit = average?.unit ?? null
+  return {
+    metricKey: average ? (readings[0].metricKey ?? null) : null,
+    lowerIsBetter: average ? Boolean(readings[0].lowerIsBetter) : false,
+    split: null,
+    score,
+    unit,
+    displayScore: average ? formatHeuristicPercent(score, unit) : "",
+    metricName: partsMetricName(parts),
+    parts: withDisplay(parts),
+  }
+}
+
+function withDisplay(parts: Array<Omit<OverlapPart, "displayScore">>): OverlapPart[] {
+  return parts.map((part) => ({ ...part, displayScore: formatHeuristicPercent(part.score, part.unit) }))
+}
+
 export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
   const {
     benchmarkIndex,
@@ -193,6 +345,7 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
     currentModelRouteId,
     currentModelIdentityKeys,
     familyDisplayByKey,
+    leadReadings,
     summaryCandidates = [],
     summaryJoinRows = [],
   } = input
@@ -264,47 +417,55 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
       const bestPerFamily = new Map<string, OverlapAppearance>()
       for (const appearance of entry.appearances ?? []) {
         const familyKey = appearance.family_key
+        if (bestPerFamily.has(familyKey)) continue
         const familyName = familyDisplayByKey.get(familyKey) ?? familyKey
+        // The model's lead reading on each of the appearance's evals.
+        const found: Array<{ evalId: string; appearance: OverlapAppearance; benchmarkId: string | null; parentId: string | null; displayName: string; rank: OverlapLeadReading["rank"] }> = []
         for (const evalId of appearance.constituent_evaluation_ids ?? []) {
           const evalEntry = comparisonIndex.evals[evalId]
           if (!evalEntry) continue
-          const targetMetric =
-            evalEntry.metrics.find(
-              (m) =>
-                !isStderrMetricId(m.metric_summary_id) &&
-                /accuracy|score|exact|pass|win|mean/i.test(m.metric_name ?? ""),
-            ) ??
-            evalEntry.metrics.find((m) => !isStderrMetricId(m.metric_summary_id)) ??
-            evalEntry.metrics[0]
+          const lead = leadReadings.get(evalId)
+          if (!lead) continue
+          const targetMetric = evalEntry.metrics.find(
+            (m) => m.metric_summary_id === lead.metricSummaryId,
+          )
           if (!targetMetric) continue
           const ownScoreRow = findOwnScoreRow(targetMetric)
           const cellInfo = lookupModelScore(evalId, ownScoreRow, targetMetric)
           if (cellInfo == null || !Number.isFinite(cellInfo.score)) continue
           const score = cellInfo.score
           const unit = targetMetric.unit ?? null
-          if (!bestPerFamily.has(familyKey)) {
-            // Generation params prefer the score cell; absent fields (old
-            // snapshots) fall back to the unique-row summary join. A null on
-            // the cell is authoritative ("not reported"), not absence.
-            const fallback = uniqueJoinRow(evalId)
-            const temperature =
-              ownScoreRow && ownScoreRow.temperature !== undefined
-                ? ownScoreRow.temperature
-                : fallback
-                  ? fallback.temperature
-                  : null
-            const maxTokens =
-              ownScoreRow && ownScoreRow.max_tokens !== undefined
-                ? ownScoreRow.max_tokens
-                : fallback
-                  ? fallback.maxTokens
-                  : null
-            bestPerFamily.set(familyKey, {
+          // Generation params prefer the score cell; absent fields (old
+          // snapshots) fall back to the unique-row summary join. A null on
+          // the cell is authoritative ("not reported"), not absence.
+          const fallback = uniqueJoinRow(evalId)
+          const temperature =
+            ownScoreRow && ownScoreRow.temperature !== undefined
+              ? ownScoreRow.temperature
+              : fallback
+                ? fallback.temperature
+                : null
+          const maxTokens =
+            ownScoreRow && ownScoreRow.max_tokens !== undefined
+              ? ownScoreRow.max_tokens
+              : fallback
+                ? fallback.maxTokens
+                : null
+          found.push({
+            evalId,
+            benchmarkId: evalEntry.benchmark_id,
+            parentId: evalEntry.parent_benchmark_id,
+            displayName: evalEntry.display_name ?? evalId,
+            rank: lead.rank,
+            appearance: {
               familyKey,
               familyName,
               evalSummaryId: evalId,
               metricSummaryId: targetMetric.metric_summary_id,
               metricName: targetMetric.metric_name ?? "",
+              metricKey: targetMetric.metric_key ?? null,
+              lowerIsBetter: Boolean(targetMetric.lower_is_better),
+              split: lead.split,
               score,
               displayScore: formatHeuristicPercent(score, unit),
               unit,
@@ -319,8 +480,50 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
               scaleConversion: cellInfo.scaleConversion,
               canonicalMinScore: targetMetric.canonical_min_score,
               canonicalMaxScore: targetMetric.canonical_max_score,
-            })
-          }
+            },
+          })
+        }
+        if (found.length === 0) continue
+        // The benchmark's own eval when the source reports it; else the
+        // parts of the benchmark it reports; else the one eval it lists.
+        const own = found.find((f) => f.benchmarkId === entry.key)
+        const parts = found.filter((f) => f.parentId === entry.key)
+        const partOf = (m: (typeof found)[number]) => ({
+          evalSummaryId: m.evalId,
+          name: m.displayName,
+          metricName: m.appearance.metricName,
+          score: m.appearance.score,
+          unit: m.appearance.unit,
+          rank: m.rank,
+        })
+        if (own) {
+          bestPerFamily.set(
+            familyKey,
+            parts.length > 0 ? { ...own.appearance, ownEvalParts: withDisplay(parts.map(partOf)) } : own.appearance,
+          )
+        } else if (parts.length === 0 && found.length === 1) {
+          bestPerFamily.set(familyKey, found[0].appearance)
+        } else {
+          const members = parts.length > 0 ? parts : found
+          const first = members[0].appearance
+          const shared = <K extends "temperature" | "maxTokens">(key: K) =>
+            members.every((m) => m.appearance[key] === first[key]) ? first[key] : null
+          bestPerFamily.set(familyKey, {
+            ...first,
+            temperature: shared("temperature"),
+            maxTokens: shared("maxTokens"),
+            annotations: null,
+            evalSummaryId: "",
+            metricSummaryId: "",
+            scoreCanonical: undefined,
+            scaleConversion: undefined,
+            canonicalMinScore: undefined,
+            canonicalMaxScore: undefined,
+            ...partsAppearanceFields(
+              members.map(partOf),
+              members.map((m) => readingOf(m.appearance)),
+            ),
+          })
         }
       }
       // Two-stage dedup:
@@ -331,16 +534,18 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
       //      observation, not two independent reports.
       //   2. Aggregator-only score dedup — llm-stats republishes
       //      canonical sources' numbers, so when its score byte-equals
-      //      an independent evaluator's we drop the llm-stats copy. Two
-      //      independent evaluators that happen to arrive at the same
-      //      number are KEPT — confirming signal, not duplicate data.
+      //      an independent evaluator's on the same metric, split and
+      //      unit we drop the llm-stats copy. Two independent evaluators that happen to
+      //      arrive at the same number are KEPT — confirming signal, not
+      //      duplicate data.
       const allRaw = Array.from(bestPerFamily.values())
       const isAggregator = (familyKey: string) => familyKey === "llm-stats"
       const seenEvalIds = new Set<string>()
       const distinctByEvalId: OverlapAppearance[] = []
       for (const c of allRaw) {
-        if (seenEvalIds.has(c.evalSummaryId)) continue
-        seenEvalIds.add(c.evalSummaryId)
+        const id = c.parts ? `parts:${c.parts.map((p) => p.evalSummaryId).join(",")}` : c.evalSummaryId
+        if (seenEvalIds.has(id)) continue
+        seenEvalIds.add(id)
         distinctByEvalId.push(c)
       }
       // Process non-aggregators first so their scores populate the
@@ -351,137 +556,43 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
         const bAgg = isAggregator(b.familyKey) ? 1 : 0
         return aAgg - bAgg
       })
-      const seenScores = new Set<number>()
+      const seenScores = new Set<string>()
       const collected: OverlapAppearance[] = []
       for (const c of distinctByEvalId) {
-        if (isAggregator(c.familyKey) && seenScores.has(c.score)) {
+        // The same measurement: one metric, split, unit and value.
+        const scoreKey = JSON.stringify([c.metricKey, c.split, (c.unit ?? "").trim().toLowerCase(), c.score])
+        if (!c.parts && isAggregator(c.familyKey) && seenScores.has(scoreKey)) {
           droppedAggregatorEvalIds.add(c.evalSummaryId)
           continue
         }
-        seenScores.add(c.score)
+        if (!c.parts) seenScores.add(scoreKey)
         collected.push(c)
       }
       if (collected.length < 1) continue
 
-      // Producer-canonical path (spec F5): when every appearance's score
-      // cell carries usable canonical-scale fields, the canonical values
-      // already sit on one consistent registry scale — use them and skip
-      // the majority-vote guess below. Any old-snapshot cell (or a
-      // bounds-less metric) in the group falls back wholesale to the
-      // heuristic so a group is never half-converted; flagged cells
-      // (score_canonical null) among canonical siblings keep the legacy
-      // per-row guess, mapped onto the group's display scale.
-      const scaleCellOf = (c: OverlapAppearance): CanonicalScaleCell => ({
-        score: c.score,
-        scoreCanonical: c.scoreCanonical,
-        scaleConversion: c.scaleConversion,
-        unit: c.unit,
-      })
-      // Registry bounds shared by the appearances' metric entries (spec:
-      // producer-stamped `canonical_min_score` / `canonical_max_score`) —
-      // they let anchor-neutral groups (all-curated) and unit-conflicted
-      // groups resolve exactly; conflicting bounds merge to undefined.
-      const scaleGroup = resolveCanonicalScaleGroup(
-        collected.map(scaleCellOf),
-        mergeRegistryBounds(
-          collected.map((c) => ({ min: c.canonicalMinScore, max: c.canonicalMaxScore })),
-        ),
-      )
-      // Plain-quantity rows (all appearances agree on an Elo/points/latency
-      // style unit): scores are already commensurable raw quantities — no
-      // percent-vs-fraction harmonisation applies, and neither does percent
-      // display.
-      // A producer-resolved scale group outranks the unit: e.g. WildBench's
-      // raw 1-10 "points" carry a curated conversion onto [0,1] registry
-      // bounds, so they ARE percent-displayable despite the plain unit.
-      // Only groups the producer can't settle fall to plain-unit display.
-      // An appearance with no unit at all adopts its siblings' unit: it is
-      // the same benchmark reported by a source that didn't stamp one
-      // (paperswithcode's vending-bench-2 balance beside llm-stats' "usd"),
-      // and a null must not drag the row onto the percent path. Siblings
-      // that DISAGREE on a non-null unit still get no plain unit.
-      const statedUnits = new Set(
-        collected
-          .map((c) => (c.unit ?? "").trim().toLowerCase())
-          .filter((u) => u !== ""),
-      )
-      const sharedUnit =
-        statedUnits.size === 1
-          ? (collected.find((c) => (c.unit ?? "").trim() !== "")?.unit ?? null)
-          : null
-      const plainUnit =
-        !scaleGroup &&
-        sharedUnit != null &&
-        collected.every((c) => plainUnitFor(c.score, sharedUnit) !== null)
-          ? sharedUnit
-          : null
-
-      let scaled: OverlapAppearance[]
-      let useHigh: boolean
-      if (scaleGroup) {
-        // Same display convention (and tie rule) as the legacy vote, but
-        // counted from the producer's per-cell source scales instead of
-        // score magnitudes: percent display when percent-scale sources
-        // are at least as common as fraction-scale ones.
-        useHigh = scaleGroup.percentSourceCount >= scaleGroup.fractionSourceCount
-        scaled = collected.map((c) => {
-          const score = scaleGroup.toDisplay(scaleCellOf(c), useHigh)
-          return { ...c, score, displayScore: formatScalePercent(score, useHigh) }
-        })
-      } else if (plainUnit) {
-        useHigh = false
-        // Re-label every appearance in the shared unit so a unit-less
-        // sibling reads "16484 usd", not the per-row percent guess.
-        scaled = collected.map((c) => ({
-          ...c,
-          displayScore: formatPlainUnitScore(c.score, plainUnit),
-        }))
-      } else {
-        // Legacy heuristic (old snapshots): cross-appearance scale
-        // harmonisation only makes sense for ≥2 appearances. A lone
-        // appearance keeps its score as-is and lets the metric unit settle
-        // the scale: |score| ≤ 1.5 with a percent unit genuinely means a
-        // low percent, not a proportion.
-        const single = collected.length === 1 ? collected[0] : null
-        const highCount = collected.filter((c) => Math.abs(c.score) > 1.5).length
-        const lowCount = collected.length - highCount
-        useHigh = single
-          ? isPercentUnit(single.unit) || Math.abs(single.score) > 1.5
-          : highCount >= lowCount
-        scaled = single
-          ? [...collected]
-          : collected.map((c) => {
-              const isHigh = Math.abs(c.score) > 1.5
-              const score = useHigh
-                ? isHigh ? c.score : c.score * 100
-                : isHigh ? c.score / 100 : c.score
-              return { ...c, score }
-            })
+      // One row per measurement: a source joins the first row its reading
+      // is averageable with; parts always stand alone.
+      const measurements: OverlapAppearance[][] = []
+      for (const c of collected) {
+        const home = c.parts
+          ? undefined
+          : measurements.find(
+              (m) => !m[0].parts && averageable([...m, c].map(readingOf)),
+            )
+        if (home) home.push(c)
+        else measurements.push([c])
       }
-      const scores = scaled.map((s) => s.score)
-      const mean = scores.reduce((a, b) => a + b, 0) / scores.length
-      const variance = scores.length > 1
-        ? scores.reduce((a, b) => a + (b - mean) ** 2, 0) / (scores.length - 1)
-        : 0
-      const stddev = Math.sqrt(variance)
-      const ci95 = scores.length >= 2
-        ? {
-            low: mean - tFor(scores.length - 1) * (stddev / Math.sqrt(scores.length)),
-            high: mean + tFor(scores.length - 1) * (stddev / Math.sqrt(scores.length)),
-          }
-        : null
-      out.push({
-        canonicalKey: entry.key,
-        canonicalDisplayName: entry.display_name,
-        appearances: scaled.sort((a, b) => b.score - a.score),
-        mean,
-        stddev,
-        min: Math.min(...scores),
-        max: Math.max(...scores),
-        ci95,
-        isPercentScale: useHigh,
-        plainUnit,
-      })
+      for (const m of measurements) {
+        const named = measurements.length > 1
+        out.push(
+          overlapRowFrom(
+            named ? `${entry.key}::${m[0].familyKey}` : entry.key,
+            entry.key,
+            named ? `${entry.display_name} · ${m[0].metricName}` : entry.display_name,
+            m,
+          ),
+        )
+      }
     }
   }
 
@@ -493,25 +604,32 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
   for (const row of out) {
     for (const a of row.appearances) {
       if (a.evalSummaryId) representedEvalIds.add(a.evalSummaryId)
+      for (const part of [...(a.parts ?? []), ...(a.ownEvalParts ?? [])]) representedEvalIds.add(part.evalSummaryId)
     }
   }
   for (const c of summaryCandidates) {
-    if (!Number.isFinite(c.score)) continue
+    if (!c.parts && !Number.isFinite(c.score)) continue
     const ids = c.evalSummaryIds.filter(Boolean)
     if (ids.some((id) => representedEvalIds.has(id))) continue
     for (const id of ids) representedEvalIds.add(id)
-    out.push({
-      canonicalKey: c.groupKey,
-      canonicalDisplayName: c.displayName,
-      appearances: [
+    const partsFields = c.parts
+      ? { evalSummaryId: "", parts: withDisplay(c.parts) }
+      : {
+          evalSummaryId: ids[0] ?? "",
+          ...(c.ownEvalParts?.length ? { ownEvalParts: withDisplay(c.ownEvalParts) } : {}),
+        }
+    out.push(
+      overlapRowFrom(c.groupKey, c.groupKey, c.displayName, [
         {
           familyKey: c.familyKey,
           familyName: c.familyName,
-          evalSummaryId: ids[0] ?? "",
           metricSummaryId: c.metricSummaryId,
           metricName: c.metricName,
+          metricKey: c.metricKey,
+          lowerIsBetter: c.lowerIsBetter,
+          split: c.split,
           score: c.score,
-          displayScore: formatHeuristicPercent(c.score, c.unit),
+          displayScore: Number.isFinite(c.score) ? formatHeuristicPercent(c.score, c.unit) : "",
           unit: c.unit,
           temperature: c.temperature,
           maxTokens: c.maxTokens,
@@ -520,16 +638,10 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
           studyFamilyKey: c.studyFamilyKey ?? null,
           annotations: c.annotations,
           sourceKind: "summary",
+          ...partsFields,
         },
-      ],
-      mean: c.score,
-      stddev: 0,
-      min: c.score,
-      max: c.score,
-      ci95: null,
-      isPercentScale: isPercentUnit(c.unit) || Math.abs(c.score) > 1.5,
-      plainUnit: plainUnitFor(c.score, c.unit),
-    })
+      ]),
+    )
   }
 
   // A single-appearance row whose eval already backs a multi-source row is
@@ -558,14 +670,18 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
   // variant. Single-appearance rows are exempt from the score
   // signature (two unrelated benchmarks from the same family can land
   // on the same number); they collapse only when they point at the
-  // very same eval.
-  const dedupSig = (row: OverlapRow) =>
-    row.appearances.length >= 2
-      ? row.appearances
-          .map((a) => `${a.familyKey}::${a.score.toFixed(8)}`)
-          .sort()
-          .join("|")
-      : `single::${row.appearances[0]?.evalSummaryId || row.canonicalKey}`
+  // very same eval, or the very same parts.
+  const dedupSig = (row: OverlapRow) => {
+    if (row.appearances.length >= 2) {
+      return row.appearances
+        .map((a) => `${a.familyKey}::${a.score.toFixed(8)}`)
+        .sort()
+        .join("|")
+    }
+    const only = row.appearances[0]
+    if (only?.parts) return `parts::${only.parts.map((p) => p.evalSummaryId).join(",")}`
+    return `single::${only?.evalSummaryId || row.rowKey}`
+  }
   const bestBySig = new Map<string, OverlapRow>()
   for (const row of rows) {
     const sig = dedupSig(row)

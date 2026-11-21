@@ -5,6 +5,7 @@ import path from "node:path"
 import { getConnection, serialized } from "@/lib/duckdb"
 import { fetchCollectionContext, fetchCollections, fetchHeadline } from "@/lib/sidecars"
 import { harmonizeUnboundedScales, PUBLISHED_TOTAL_MAX } from "@/lib/merged-adapter"
+import { readingUnit } from "@/lib/headline-readings"
 import {
   buildCollectionAttachment,
   buildScaffoldContext,
@@ -43,6 +44,7 @@ import type {
   EvalRowReproducibility,
   ReproducibilityEvidence,
   RowAnnotations,
+  ScaleConversion,
   VariantDivergence,
 } from "@/lib/backend-artifacts"
 import type {
@@ -62,6 +64,7 @@ import {
   isAssistedResult,
   isHeadlineResult,
   parseJudgeCondition,
+  primaryMetricColumnKey,
 } from "@/lib/eval-processing"
 
 type Row = Record<string, any>
@@ -109,7 +112,7 @@ const EVAL_LIST_COLUMNS = `
   latest_source_name, third_party_ratio,
   missing_generation_config_count, best_model, worst_model,
   avg_score, avg_score_norm, has_card, CAST(to_json(benchmark_card) AS VARCHAR) AS benchmark_card,
-  is_aggregated, CAST(to_json(aggregate_sources) AS VARCHAR) AS aggregate_sources, CAST(to_json(tags) AS VARCHAR) AS tags,
+  CAST(to_json(tags) AS VARCHAR) AS tags,
   metrics_count, metric_names, CAST(to_json(instance_data) AS VARCHAR) AS instance_data, top_score,
   subtasks_count, is_summary_score,
   CAST(to_json(root_metrics) AS VARCHAR) AS root_metrics,
@@ -165,7 +168,8 @@ const MODEL_CELL_JOIN_COLUMNS = `
   CAST(to_json(e.derived_tags) AS VARCHAR) AS eval_derived_tags,
   CAST(to_json(e.metric_config) AS VARCHAR) AS eval_metric_config,
   CAST(to_json(e.source_data) AS VARCHAR) AS eval_source_data,
-  e.is_summary_score AS eval_is_summary_score
+  e.is_summary_score AS eval_is_summary_score,
+  e.primary_metric_id AS eval_primary_metric_id
 `
 
 function benchmarkCardSourcePathColumn(columns: Set<string>) {
@@ -561,7 +565,10 @@ function metricConfigFromRow(row: Row): MetricConfig {
     score_type: scoreType,
     min_score: optionalNumber(config.min_score ?? row.min_score),
     max_score: optionalNumber(config.max_score ?? row.max_score),
-    unit: optionalString(row.metric_unit ?? config.unit),
+    unit: readingUnit(optionalString(row.metric_unit), optionalString(config.unit), {
+      metricKey: optionalString(row.metric_id),
+      primaryMetricId: optionalString(row.eval_primary_metric_id),
+    }),
   }
 }
 
@@ -720,6 +727,13 @@ function resultFromCell(row: Row): EvaluationResult {
     // undefined → treated as unverified by the UI.
     is_verified_evaluator:
       row.is_verified_evaluator == null ? undefined : Boolean(row.is_verified_evaluator),
+    // Model-page rows only; the eval-page projections carry none of these.
+    is_lead_metric: row.is_lead_metric == null ? undefined : Boolean(row.is_lead_metric),
+    position: optionalNumber(row.position),
+    total: optionalNumber(row.total),
+    split: optionalString(row.split),
+    score_canonical: optionalNumber(row.score_canonical),
+    scale_conversion: optionalString(row.scale_conversion) as ScaleConversion | undefined,
   }
 }
 
@@ -962,6 +976,12 @@ interface EvalResultsViewCapabilities {
   comparabilityStatus: boolean
   scorePublished: boolean
   divergenceFlags: boolean
+  /** `position` and `total`: a row's rank on its own metric. */
+  rank: boolean
+  leadMetric: boolean
+  split: boolean
+  /** `score_canonical` and `scale_conversion`: the producer's scale fields. */
+  canonicalScale: boolean
 }
 
 /**
@@ -1004,8 +1024,36 @@ async function evalResultsViewCapabilities(): Promise<EvalResultsViewCapabilitie
     scorePublished: names.has("score_published"),
     divergenceFlags:
       names.has("has_variant_divergence") && names.has("has_cross_party_divergence"),
+    rank: names.has("position") && names.has("total"),
+    leadMetric: names.has("is_lead_metric"),
+    split: names.has("split"),
+    canonicalScale: names.has("score_canonical") && names.has("scale_conversion"),
   }
 }
+
+/**
+ * The lead-metric rule for a snapshot predating `is_lead_metric`: which one
+ * of a model's readings on an eval a model-page row leads with.
+ *
+ * Per (model, eval): the reading on `evals_view.primary_metric_id` when the
+ * model has one, else the reading on the metric that ranks the most models
+ * (`total`), ties by `metric_id` ascending. It knows nothing of the
+ * registry's preferred metric or of diagnostic demotion, so in general it
+ * can lead with a cost over an accuracy. It agrees with the pipeline's own
+ * metric order on all 121,130 model x eval cells of snapshot
+ * 2026-11-20T19-17-21Z (measured), the snapshot the site pins, and on no
+ * other snapshot is it known to. It goes away once the pinned snapshot
+ * carries `is_lead_metric`.
+ *
+ * It ranks the rows of `cells`, the model's headline rows with a score, so
+ * a reading the page does not show can never be the lead.
+ */
+const LEGACY_LEAD_METRIC_EXPRESSION = `row_number() OVER (
+         PARTITION BY cells.model_key, cells.evaluation_id
+         ORDER BY (cells.metric_id = cells.eval_primary_metric_id) DESC NULLS LAST,
+                  cells.total DESC NULLS LAST,
+                  cells.metric_id ASC
+       ) = 1`
 
 async function evalResultsViewHasCollectionColumns(): Promise<boolean> {
   return (await evalResultsViewCapabilities()).collections
@@ -1130,13 +1178,24 @@ async function getModelEvaluationRows(modelKey: string): Promise<Row[]> {
   // only — a losing judge or protocol arm belongs on the benchmark page.
   // The collection columns ride along so a headline row can still say the
   // setting it was measured under; they do not widen what is selected.
-  return readRows<Row>(
-    `SELECT ${modelCellJoinColumns(hasParentDisplayName)},${collectionRowColumns(caps)},${issue47Columns(caps)}
+  const cells = `SELECT ${modelCellJoinColumns(hasParentDisplayName)},${collectionRowColumns(caps)},${issue47Columns(caps)},
+       ${caps.rank ? "r.position, r.total" : "CAST(NULL AS INTEGER) AS position, CAST(NULL AS INTEGER) AS total"},
+       ${caps.split ? "r.split" : "CAST(NULL AS VARCHAR) AS split"},
+       ${caps.canonicalScale ? "r.score_canonical, r.scale_conversion" : "CAST(NULL AS DOUBLE) AS score_canonical, CAST(NULL AS VARCHAR) AS scale_conversion"},
+       r.percentile${caps.leadMetric ? ",\n       r.is_lead_metric" : ""}
      FROM eval_results_view r
      LEFT JOIN evals_view e ON r.evaluation_id = e.evaluation_id
      WHERE r.model_key = ?
-       AND r.score IS NOT NULL${headlinePredicate(caps)}
-     ORDER BY r.percentile DESC NULLS LAST`,
+       AND r.score IS NOT NULL${headlinePredicate(caps)}`
+  // Every row says whether its eval's row leads with it: the pipeline's
+  // column, or the derived rule on a snapshot without it.
+  return readRows<Row>(
+    caps.leadMetric
+      ? `${cells}
+     ORDER BY r.percentile DESC NULLS LAST`
+      : `SELECT cells.*, ${LEGACY_LEAD_METRIC_EXPRESSION} AS is_lead_metric
+     FROM (${cells}) cells
+     ORDER BY cells.percentile DESC NULLS LAST`,
     [modelKey],
     { contextLabel: `model_key=${modelKey}` }
   )
@@ -1181,7 +1240,6 @@ export async function getEvalListData(): Promise<{
     derived_tags: coerceTags(row.derived_tags),
     metric_config: parseMaybeJson(row.metric_config),
     benchmark_card: parseMaybeJson(row.benchmark_card),
-    aggregate_sources: parseMaybeJson(row.aggregate_sources),
     tags: parseMaybeJson(row.tags),
     instance_data: parseMaybeJson(row.instance_data),
     root_metrics: parseMaybeJson(row.root_metrics),
@@ -1457,7 +1515,6 @@ export async function getEvalSummaryById(evalId: string): Promise<BenchmarkEvalS
     // benchmark_card arrives JSON-encoded (the parquet schema nests a
     // JSON-typed field — see CELL_JOIN_COLUMNS / EVAL_LIST_COLUMNS).
     benchmark_card: parseMaybeJson(evalRow.benchmark_card),
-    aggregate_sources: parseMaybeJson(evalRow.aggregate_sources),
     tags: parseMaybeJson(evalRow.tags),
     instance_data: parseMaybeJson(evalRow.instance_data),
     root_metrics: parseMaybeJson(evalRow.root_metrics),
@@ -1556,23 +1613,16 @@ export async function getEvalSummaryById(evalId: string): Promise<BenchmarkEvalS
     }
   }
 
-  // Fallback for single-metric leaderboards with no precomputed matrix
-  // entry (e.g. big-bench-hard): the matrix block above only populates
+  // Fallback for leaderboards with no precomputed matrix entry (e.g.
+  // big-bench-hard): the matrix block above only populates
   // `leaderboard_rows` when a matrix exists, but consumers like the
   // embed leaderboard read exclusively from that field. Synthesize one
-  // row per `model_results` entry using the primary metric's column_key
-  // as the values key, so the data is present regardless of whether
-  // build-time precomputation ran for this eval.
+  // row per `model_results` entry. `model_results` holds the
+  // `primary_metric_id` readings, so they go under that metric's column
+  // and no other.
   const hasRows = (summary.leaderboard_rows?.length ?? 0) > 0
-  if (!hasRows && (summary.model_results?.length ?? 0) > 0) {
-    const primaryMetric = (summary.leaderboard_metrics ?? []).find(
-      (m): m is typeof m & { column_key: string } =>
-        typeof (m as { column_key?: unknown }).column_key === "string"
-        && (m as { scope?: string }).scope !== "subtask",
-    )
-    const columnKey = primaryMetric?.column_key
-      ?? (summary.leaderboard_metrics ?? [])[0]?.column_key
-      ?? "score"
+  const columnKey = primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id)
+  if (!hasRows && columnKey && (summary.model_results?.length ?? 0) > 0) {
     const lowerIsBetter = Boolean(summary.metric_config?.lower_is_better)
     summary.leaderboard_rows = summary.model_results
       // Headline rows only. Everything downstream of this field ranks or
@@ -1845,12 +1895,13 @@ export async function getMergedBenchmarkSummary(
   const selectedMetricId =
     metricId && metrics.some((m) => m.metric_id === metricId) ? metricId : preferredMetricId
   const selectedMetric = metrics.find((m) => m.metric_id === selectedMetricId)
-  const selectedLowerIsBetter =
-    selectedMetric?.lower_is_better != null
-      ? Boolean(selectedMetric.lower_is_better)
-      : selectedMetricId === preferredMetricId
-        ? Boolean(row.lower_is_better)
-        : false
+  // null = the pipeline states no direction for this metric (its sources
+  // disagree). It is carried through as null, never read as "higher".
+  const statedDirection =
+    selectedMetric?.lower_is_better ??
+    (selectedMetricId === preferredMetricId ? row.lower_is_better : null)
+  const selectedLowerIsBetter: boolean | null =
+    statedDirection == null ? null : Boolean(statedDirection)
 
   const selectedSliceId =
     grain === "slice"
@@ -1923,7 +1974,7 @@ export async function getMergedBenchmarkSummary(
   let bestResult = (parseMaybeJson(row.best_result) ?? null) as MergedBestResult | null
   // The producer picked its best result across the mismatched scales, so
   // once rows move, the best is whatever now leads the pool the page shows.
-  if (harmonized.toPercent != null) {
+  if (harmonized.toPercent != null && selectedLowerIsBetter != null) {
     const top = observations.find(
       (obs) =>
         isHeadlineResult(obs) &&
@@ -1981,7 +2032,7 @@ export async function getMergedBenchmarkSummary(
     preferred_metric_id: preferredMetricId,
     preferred_metric_display_name: asString(row.preferred_metric_display_name, preferredMetricId),
     preferred_from_registry: Boolean(row.preferred_from_registry),
-    lower_is_better: Boolean(row.lower_is_better),
+    lower_is_better: row.lower_is_better == null ? null : Boolean(row.lower_is_better),
     sources_count: asNumber(row.sources_count),
     all_sources_count: asNumber(row.all_sources_count),
     results_count: asNumber(row.results_count),

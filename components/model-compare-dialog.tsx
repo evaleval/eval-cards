@@ -7,6 +7,7 @@ import {
   ExternalLink,
 } from "lucide-react"
 import type { BenchmarkEvaluationCardData } from "@/components/benchmark-evaluation-card"
+import { formatReading } from "@/lib/headline-readings"
 import { routeIdToPath } from "@/lib/utils"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -68,18 +69,6 @@ function formatParamsBillions(value: number | null | undefined, modelName?: stri
   if (resolvedValue == null || Number.isNaN(resolvedValue)) return "Not reported"
   if (resolvedValue >= 100) return `${Math.round(resolvedValue)}B`
   return `${resolvedValue.toFixed(1)}B`
-}
-
-function formatBenchmarkScore(score: number, unit?: string) {
-  if (unit === "accuracy" || unit === "pass@1" || (!unit && score >= 0 && score <= 1)) {
-    return `${(score * 100).toFixed(1)}`
-  }
-
-  if (unit === "points") {
-    return score.toFixed(1)
-  }
-
-  return score.toFixed(2)
 }
 
 function formatSummaryScore(value: number | null | undefined) {
@@ -152,6 +141,8 @@ export function ModelCompareDialog({
   onOpenChange,
 }: ModelCompareDialogProps) {
   const [sharedOnly, setSharedOnly] = useState(false)
+  // One row per (benchmark, metric): two models' top scores on one benchmark
+  // can be different metrics, which are different measurements.
   const benchmarkRows = useMemo(() => {
     const rows = new Map<
       string,
@@ -161,6 +152,7 @@ export function ModelCompareDialog({
         section: string
         values: Record<string, { score: number; unit?: string }>
         order: number
+        key: string
       }
     >()
 
@@ -168,9 +160,11 @@ export function ModelCompareDialog({
 
     for (const model of models) {
       for (const score of model.top_scores) {
-        const existing = rows.get(score.benchmark)
+        const key = JSON.stringify([score.benchmark, score.metric])
+        const existing = rows.get(key)
         if (!existing) {
-          rows.set(score.benchmark, {
+          rows.set(key, {
+            key,
             benchmark: score.benchmark,
             metric: score.metric,
             section: getBenchmarkSection(score.benchmark),
@@ -309,29 +303,23 @@ export function ModelCompareDialog({
                             </td>
                           </tr>
                           {group.rows.map((row) => {
-                            const rowValues = Object.values(row.values).map((value) => value.score)
-                            const maxScore = rowValues.length > 0 ? Math.max(...rowValues) : null
-
+                            // No best is marked: `top_scores` carries no
+                            // direction for its metric, and the highest value
+                            // is the worst on a lower-is-better metric.
                             return (
-                              <tr key={row.benchmark}>
+                              <tr key={row.key}>
                                 <td className="whitespace-normal">
                                   <div className="text-[13px] font-medium">{row.benchmark}</div>
                                   <div className="mt-0.5 font-mono text-[10.5px] text-[color:var(--fg-subtle)]">{row.metric}</div>
                                 </td>
                                 {models.map((model) => {
                                   const value = row.values[model.id]
-                                  const isBest = value && maxScore != null && value.score === maxScore
 
                                   return (
-                                    <td
-                                      key={`${row.benchmark}-${model.id}`}
-                                      style={{
-                                        background: isBest ? "var(--bg-warm)" : undefined,
-                                      }}
-                                    >
+                                    <td key={`${row.key}-${model.id}`}>
                                       {value ? (
-                                        <div className="font-mono text-[15px] font-semibold tabular-nums" style={{ color: isBest ? "var(--accent)" : "var(--fg)" }}>
-                                          {formatBenchmarkScore(value.score, value.unit)}
+                                        <div className="font-mono text-[15px] font-semibold tabular-nums" style={{ color: "var(--fg)" }}>
+                                          {formatReading(value.score, value.unit)}
                                         </div>
                                       ) : (
                                         <div className="font-mono text-[12px] text-[color:var(--fg-subtle)]">––</div>

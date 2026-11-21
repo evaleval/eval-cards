@@ -72,7 +72,7 @@ export const PUBLISHED_TOTAL_MAX: Readonly<Record<string, number>> = {
  */
 export function harmonizeUnboundedScales(
   rows: readonly MergedObservationRow[],
-  lowerIsBetter: boolean,
+  lowerIsBetter: boolean | null,
   totalMax?: number,
 ): { rows: MergedObservationRow[]; toPercent: boolean | null } {
   const unchanged = { rows: [...rows], toPercent: null }
@@ -439,7 +439,9 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
   // Best model comes from the visible pool itself. The producer's raw
   // best_result may describe an assisted or unconvertible observation;
   // the merged query returns rows best-first in the metric's direction.
-  const bestModel = rows.length > 0
+  // No stated direction (the sources disagree) means no "best": the row
+  // order is then only numeric, not a ranking.
+  const bestModel = rows.length > 0 && merged.selected_lower_is_better != null
     ? { name: rows[0].model_info.name, score: rows[0].score_canonical as number }
     : null
 
@@ -457,6 +459,8 @@ export function mergedSummaryToEvalSummary(merged: MergedBenchmarkSummary): Benc
     benchmark_family_name: merged.family_display_name ?? undefined,
     derived_tags: [],
     metric_config: metricConfig,
+    // The one metric this merged page shows: the producer's selected metric.
+    primary_metric_id: columnKey,
     model_results,
     // Distinct models among the rows actually SHOWN (flagged rows are
     // excluded from the pool) — the producer's rollup counts models whose

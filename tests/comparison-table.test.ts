@@ -7,7 +7,13 @@ import type { BenchmarkEvalSummary, ModelEvaluationSummary } from "@/lib/eval-pr
 import { sliceIndexForEvals, sliceIndexForModel } from "@/lib/comparison-slice"
 import { parseJsonWithBounds, stringifyJsonWithBounds } from "@/lib/json-bounds"
 
-import { fixtureIndex, fixtureRawHierarchy, identityKeysOf, useSnapshot } from "./comparison-fixture"
+import {
+  fixtureIndex,
+  fixtureRawHierarchy,
+  identityKeysOf,
+  leadReadingsOf,
+  useSnapshot,
+} from "./comparison-fixture"
 
 // The comparison tables against the producer's comparison-index.json, on a
 // real exported subset. Every consumer that reads the index must produce the
@@ -165,6 +171,7 @@ describe("model slices", () => {
           currentModelRouteId: routeId,
           currentModelIdentityKeys: keys,
           familyDisplayByKey,
+          leadReadings: leadReadingsOf(summary),
         })
       const overlapsFromFull = overlaps(full)
       expect(overlaps(slice)).toStrictEqual(overlapsFromFull)

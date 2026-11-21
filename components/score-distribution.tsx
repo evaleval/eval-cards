@@ -13,7 +13,8 @@ interface ScoreSeries {
   caption?: string
   values: number[]
   unit?: string
-  lowerIsBetter?: boolean
+  /** Null or absent: the metric reports no direction. */
+  lowerIsBetter?: boolean | null
   /**
    * Per-model rows for the optional frontier-plot view. When provided
    * (and at least one row carries a parseable releaseDate), the panel
@@ -32,7 +33,7 @@ interface ScoreDistributionProps {
   values?: number[]
   label?: string
   unit?: string
-  lowerIsBetter?: boolean
+  lowerIsBetter?: boolean | null
   /** Multi-series — when provided, a dropdown picker swaps between them. */
   series?: ScoreSeries[]
   /** Initial selected key when multi-series. Defaults to first. */
@@ -185,10 +186,12 @@ export function ScoreDistribution({
   // Frontier-plot data: parse release dates, sort by time, then walk the
   // sequence emitting an event whenever a model improves on the best
   // score seen so far. Honours lowerIsBetter so e.g. "Mean Response
-  // Time · ms" shows the frontier descending instead of climbing.
+  // Time · ms" shows the frontier descending instead of climbing. A metric
+  // that reports no direction has no "best so far", so no frontier.
   const frontier = useMemo(() => {
     if (!active?.points || active.points.length === 0) return null
-    const lowerIsBetter = active.lowerIsBetter ?? false
+    const lowerIsBetter = active.lowerIsBetter
+    if (lowerIsBetter == null) return null
     const parsed = active.points
       .map((p) => {
         const t = parseReleaseDate(p.releaseDate)
@@ -211,7 +214,7 @@ export function ScoreDistribution({
       }
     }
     if (events.length < 2) return null
-    return { events, samples: parsed }
+    return { events, samples: parsed, lowerIsBetter }
   }, [active])
 
   const canShowFrontier = frontier != null
@@ -347,7 +350,12 @@ export function ScoreDistribution({
     { key: "max", label: "max", value: formatValue(stats.max, active.unit) },
   ]
 
-  const directionHint = active.lowerIsBetter ? "lower is better ←" : "higher is better →"
+  const directionHint =
+    active.lowerIsBetter == null
+      ? "direction not reported"
+      : active.lowerIsBetter
+        ? "lower is better ←"
+        : "higher is better →"
   const showPicker = seriesList.length > 1
 
   return (
@@ -485,7 +493,7 @@ export function ScoreDistribution({
           events={frontier.events}
           samples={frontier.samples}
           unit={active.unit}
-          lowerIsBetter={active.lowerIsBetter ?? false}
+          lowerIsBetter={frontier.lowerIsBetter}
           label={active.label}
         />
       ) : (

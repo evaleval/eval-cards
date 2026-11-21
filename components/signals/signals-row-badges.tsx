@@ -3,14 +3,12 @@
 import type { ComparabilityStatus, RowAnnotations } from "@/lib/backend-artifacts"
 import { cn } from "@/lib/utils"
 import { CrossPartyDivergenceBadge } from "./cross-party-divergence-badge"
-import { isNotAssessable } from "./signal-utils"
 import { VariantDivergenceBadge } from "./variant-divergence-badge"
 
 /**
- * Renders the row-level divergence badges (variant + cross-party, or "not
- * assessable" when the row's comparability was never assessed).
+ * Renders the row-level positive divergence badges (variant + cross-party).
  *
- * Two signals are intentionally NOT rendered here:
+ * Three signals are intentionally NOT rendered inside table cells:
  * - Provenance: every leaderboard that carries this strip already has an
  *   EVALUATOR column (first/third-party pill), and showing the same fact
  *   twice in two styles confused readers.
@@ -19,30 +17,31 @@ import { VariantDivergenceBadge } from "./variant-divergence-badge"
  *   the divergence badges. It stays in the eval page's signals strip, the
  *   merged view's R flag square and, in research view, the per-result
  *   reproducibility card.
+ * - Not assessable (`no_bounds` / `mixed_scale`): fires on every row of an
+ *   unbounded metric column (such as BBQ bias scores), adding heavy visual
+ *   clutter. It lives in the clickable Comparability (X) signal tile, the
+ *   ComparabilityPanel, and the expanded row detail card.
  */
 export function SignalsRowBadges({
   annotations,
-  comparabilityStatus,
+  comparabilityStatus: _comparabilityStatus,
   className,
   hideOnMobile = true,
 }: {
   annotations?: RowAnnotations | null
-  /** The row's comparability verdict, when the caller has it
-   *  outside the annotation block (eval_results_view ships it flat). */
+  /** Accepted for backwards compatibility; not-assessable verdicts are
+   *  surfaced in the Comparability signal dialog, panel, and row drawer
+   *  rather than as per-cell pills. */
   comparabilityStatus?: ComparabilityStatus | null
   className?: string
   hideOnMobile?: boolean
 }) {
-  // Strict `=== true` — the flags are nullable and a NULL is
-  // "not assessable", which the variant badge renders in its own right.
+  // Strict `=== true` — the flags are nullable and a NULL means
+  // "not assessable", which never counts as a positive divergence flag.
   const hasVariant = annotations?.variant_divergence?.has_variant_divergence === true
   const hasCrossParty = annotations?.cross_party_divergence?.has_cross_party_divergence === true
-  // A row whose comparability group was never assessed carries the verdict
-  // on the row itself, so it earns a chip even when the producer attached
-  // no annotation struct to it.
-  const notAssessable = isNotAssessable(annotations, comparabilityStatus)
 
-  if (!hasVariant && !hasCrossParty && !notAssessable) {
+  if (!hasVariant && !hasCrossParty) {
     return null
   }
 
@@ -54,11 +53,7 @@ export function SignalsRowBadges({
         className
       )}
     >
-      <VariantDivergenceBadge
-        divergence={annotations?.variant_divergence}
-        annotations={annotations}
-        comparabilityStatus={comparabilityStatus}
-      />
+      <VariantDivergenceBadge divergence={annotations?.variant_divergence} />
       <CrossPartyDivergenceBadge divergence={annotations?.cross_party_divergence} />
     </div>
   )

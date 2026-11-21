@@ -21,8 +21,10 @@ import {
   isHeadlineResult,
   scoreStandings,
   type ModelResultForBenchmark,
+  primaryMetricColumnKey,
 } from "@/lib/eval-processing"
 import { SCALE_HARMONIZED_MARK } from "@/lib/merged-adapter"
+import { formatReading } from "@/lib/headline-readings"
 import { getMetricChipLabel } from "@/lib/metric-labels"
 import { routeIdFromSegments } from "@/lib/utils"
 
@@ -78,7 +80,8 @@ export default function EmbedEvalLeaderboard() {
   const sliceAxis = useMemo(() => {
     if (!summary) return null
     const metrics = (summary.leaderboard_metrics ?? []) as LbMetric[]
-    const primary = metrics.find((m) => m.scope !== "subtask")
+    const primaryColumn = primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id)
+    const primary = metrics.find((m) => m.column_key === primaryColumn)
     if (!primary?.column_key) return null
     const seen = new Map<string, string>()
     for (const m of metrics) {
@@ -99,8 +102,8 @@ export default function EmbedEvalLeaderboard() {
     return ALL_SLICE_KEY
   })
   // Sort key — URL param seeds the initial value; column-header clicks
-  // override it without touching the URL. Null means "fall back to the
-  // first non-subtask metric in the data".
+  // override it without touching the URL. Null means the eval's
+  // `primary_metric_id` column (or the active slice of it).
   const [sortOverride, setSortOverride] = useState<string | null>(
     sortMetricKey && sortMetricKey.trim() ? sortMetricKey.trim() : null,
   )
@@ -195,15 +198,20 @@ export default function EmbedEvalLeaderboard() {
     if (metricsWithData.length === 0) return null
     const isMulti = metricsWithData.length > 1
 
-    // Sort key: explicit override wins, else first non-subtask metric.
+    // Sort key: explicit override wins, else the primary metric's column
+    // (its active slice when a slice is picked).
+    const defaultKey =
+      sliceAxis && activeSlice !== ALL_SLICE_KEY
+        ? `${sliceAxis.primaryColumn}::${activeSlice}`
+        : primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id)
     const sortMetric =
       (sortOverride && metricsWithData.find((m) => m.column_key === sortOverride)) ||
-      metricsWithData.find((m) => m.scope !== "subtask") ||
-      metricsWithData[0]
+      metricsWithData.find((m) => m.column_key === defaultKey)
     const sortKey = sortMetric?.column_key ?? sortMetric?.metric_summary_id ?? ""
-    const defaultSortLower = Boolean(
-      sortMetric?.lower_is_better ?? summary.metric_config.lower_is_better,
-    )
+    // The sorted metric's own direction; a metric reporting none sorts
+    // high-to-low and says its direction is not reported.
+    const sortDirection = sortMetric?.lower_is_better ?? null
+    const defaultSortLower = sortDirection === true
     const sortLower =
       sortDirOverride === "asc"
         ? true
@@ -319,6 +327,7 @@ export default function EmbedEvalLeaderboard() {
       rows: tableRows,
       sortKey,
       sortLower,
+      sortDirection,
       isMulti,
       protocol: protocolMode,
     }
@@ -351,32 +360,27 @@ export default function EmbedEvalLeaderboard() {
   const visible = view.rows.slice(0, limit)
   const hiddenCount = view.rows.length - visible.length
 
-  const formatScore = (v: number, unit?: string | null): string => {
-    const u = (unit || summary.metric_config.unit || "").toLowerCase()
-    const isPercentish = !u || /percent|proportion|accuracy|score|pass@|exact|f1|%/.test(u)
-    if (isPercentish) {
-      const value = Math.abs(v) <= 1 ? v * 100 : v
-      const abs = Math.abs(value)
-      const decimals = abs < 1 ? 2 : abs < 10 ? 2 : 1
-      return `${value.toFixed(decimals)}%`
-    }
-    return v.toFixed(3).replace(/0+$/g, "").replace(/\.$/, "")
-  }
-
   const sortMetric = view.metrics.find(
     (m) => (m.column_key ?? m.metric_summary_id) === view.sortKey,
   )
+  const directionLabel = (lower: boolean | null | undefined) =>
+    lower == null ? "direction not reported" : lower ? "lower is better" : "higher is better"
+  const directionText = directionLabel(view.sortDirection)
   const headerKicker = view.isMulti ? (
-    <>
-      Leaderboard · {view.metrics.length} metrics ·{" "}
-      {view.sortLower ? "lower is better" : "higher is better"} (sorted by{" "}
-      {sortMetric ? getMetricChipLabel(sortMetric) : view.sortKey})
-    </>
+    sortMetric ? (
+      <>
+        Leaderboard · {view.metrics.length} metrics · {getMetricChipLabel(sortMetric)}:{" "}
+        {directionText} (sorted by it)
+      </>
+    ) : (
+      <>Leaderboard · {view.metrics.length} metrics</>
+    )
   ) : (
     <>
       Leaderboard ·{" "}
       {view.metrics[0] ? getMetricChipLabel(view.metrics[0]) : "Score"}
-      {view.sortLower ? " · lower is better" : " · higher is better"}
+      {" · "}
+      {directionLabel(view.metrics[0]?.lower_is_better)}
     </>
   )
 
@@ -642,7 +646,7 @@ export default function EmbedEvalLeaderboard() {
                           {SCALE_HARMONIZED_MARK}
                         </span>
                       )}
-                      {val == null ? "—" : formatScore(val, m.unit)}
+                      {val == null ? "—" : formatReading(val, m.unit)}
                     </td>
                   )
                 })}

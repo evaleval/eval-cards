@@ -6,10 +6,11 @@ import { AudienceModeProvider } from "@/components/audience-mode-provider"
 import { SignalsRowBadges } from "@/components/signals/signals-row-badges"
 import type { ComparabilityStatus, RowAnnotations } from "@/lib/backend-artifacts"
 
-// Multi-metric matrix cells get their verdict from the prebaked matrix, not
-// from an annotation struct — the builder carries `comparability_status` per
-// column precisely so a cell can say "not assessable" rather than showing
-// the silence that reads as "checked, nothing found".
+// Table cells stay clean for `no_bounds` and `mixed_scale` verdicts —
+// repeating a "Not assessable" pill on every cell of an unbounded metric
+// column clutters the leaderboard and drowns genuine divergence flags.
+// Those verdicts are surfaced in the clickable Comparability (X) signal
+// dialog, ComparabilityPanel, and the expanded row detail card.
 
 function renderCell(
   annotations: RowAnnotations | null,
@@ -37,25 +38,41 @@ const CLEAN_ANNOTATIONS = {
 } as unknown as RowAnnotations
 
 describe("matrix cell comparability badges", () => {
-  it("renders 'not assessable' for a mixed_scale or no_bounds cell with no annotation struct", () => {
-    expect(renderCell(null, "mixed_scale")).toContain("Not assessable")
-    expect(renderCell(null, "no_bounds")).toContain("Not assessable")
+  it("stays quiet for mixed_scale and no_bounds cells instead of repeating a per-cell pill", () => {
+    expect(renderCell(null, "mixed_scale")).toBe("")
+    expect(renderCell(null, "no_bounds")).toBe("")
+    expect(renderCell(CLEAN_ANNOTATIONS, "mixed_scale")).toBe("")
+    expect(renderCell(CLEAN_ANNOTATIONS, "no_bounds")).toBe("")
   })
 
   it("stays silent for an assessed cell and for a cell with no verdict at all", () => {
-    // `ok` with NULL flags is the common case — the group simply had
-    // nothing to compare against. It is not "not assessable".
     expect(renderCell(null, "ok")).toBe("")
     expect(renderCell(CLEAN_ANNOTATIONS, "ok")).toBe("")
-    // A matrix baked before the status column existed: no verdict, no chip.
     expect(renderCell(null, null)).toBe("")
     expect(renderCell(null, undefined)).toBe("")
   })
 
-  it("lets the cell's own status override a clean annotation block", () => {
-    expect(renderCell(CLEAN_ANNOTATIONS, "mixed_scale")).toContain("Not assessable")
-    // One chip per row, not two: the cross-party badge stays silent.
-    expect((renderCell(CLEAN_ANNOTATIONS, "mixed_scale").match(/Not assessable/g) ?? []).length).toBe(1)
+  it("still renders positive variant and cross-party divergence badges", () => {
+    const html = renderCell(
+      {
+        ...CLEAN_ANNOTATIONS,
+        variant_divergence: {
+          has_variant_divergence: true,
+          divergence_magnitude: 0.14,
+          threshold_used: 0.05,
+          differing_setup_fields: [],
+        },
+        cross_party_divergence: {
+          has_cross_party_divergence: true,
+          divergence_magnitude: 0.11,
+          organization_count: 2,
+        },
+      } as unknown as RowAnnotations,
+      "ok",
+    )
+    expect(html).toContain("Variant divergence")
+    expect(html).toContain("Cross-party divergence")
+    expect(html).not.toContain("Not assessable")
   })
 })
 

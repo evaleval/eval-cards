@@ -1,6 +1,7 @@
 "use client"
 
 import { useAudienceMode } from "@/components/audience-mode-provider"
+import { SplitBreakdown } from "@/components/split-breakdown"
 import { AutoBenchmarkCardsInfo } from "@/components/auto-benchmarkcards-info"
 import { Fragment, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
@@ -1147,6 +1148,8 @@ export function EvalDetail({
       filteredResults,
       (result) => result.score,
       (result) =>
+        // No stated direction (sources disagree): nothing takes a standing.
+        lb.metric_config.lower_is_better != null &&
         isHeadlineResult(result) &&
         (includeAssistedInRanking || !isAssistedResult(result.protocol_condition)),
     )
@@ -1179,7 +1182,7 @@ export function EvalDetail({
             : `Judge model id: ${judge.judges[0]}`,
       }
     })
-  }, [filteredResults, includeAssistedInRanking, judgeDisplayName])
+  }, [filteredResults, includeAssistedInRanking, judgeDisplayName, lb.metric_config.lower_is_better])
 
   // Plotbox input: assisted runs stay out of the distribution stats and
   // the frontier cumulative-best regardless of the ranking toggle — a
@@ -1661,19 +1664,36 @@ export function EvalDetail({
   }
 
   const avgScoreLabel = formatRawScore(lb.avg_score, lb.metric_config.unit)
-  const scoreDirectionLabel = lb.metric_config.lower_is_better ? "Lower scores rank higher" : "Higher scores rank higher"
+  // `metric_config` describes the `primary_metric_id` metric only. On a page
+  // with several root metrics its direction and scale are named as that
+  // metric's, never stated for the page.
+  const primaryLeaderboardMetric = hasMultiMetricLeaderboard
+    ? (lb.leaderboard_metrics ?? []).find(
+        (m) => m.column_key === primaryMetricColumnKey(lb.leaderboard_metrics, lb.primary_metric_id),
+      )
+    : undefined
+  const primaryMetricPrefix = primaryLeaderboardMetric
+    ? `${getMetricChipLabel(primaryLeaderboardMetric)}: `
+    : ""
+  const scoreDirectionLabel = `${primaryMetricPrefix}${
+    lb.metric_config.lower_is_better == null
+      ? "Sources disagree on direction"
+      : lb.metric_config.lower_is_better
+        ? "Lower scores rank higher"
+        : "Higher scores rank higher"
+  }`
+  const scaleLabel = (cfg: { min_score?: number | null; max_score?: number | null }) =>
+    cfg.min_score == null && cfg.max_score == null
+      ? "not reported"
+      : `${cfg.min_score ?? "not reported"} – ${cfg.max_score ?? "not reported"}`
   const leaderboardTitle = isResearchView ? "Leaderboard" : "Reporting Comparison"
   const sourceDatasetLabel = summary.source_data?.hf_repo ?? summary.source_data?.dataset_name ?? "Summary source"
   const instanceDataLabel = summary.instance_data?.available
     ? `${summary.instance_data.url_count.toLocaleString()} linked URL${summary.instance_data.url_count === 1 ? "" : "s"}`
     : "Not linked"
   const leaderboardDescription = isResearchView
-    ? lb.is_aggregated
-      ? "Models ranked by average raw score across the composite's component benchmarks."
-      : "Models ranked by raw score for this benchmark."
-    : lb.is_aggregated
-      ? "Averaged model results across the composite's component benchmarks, with drill-down to each component score."
-      : "Model results with benchmark context, upstream dataset detail, and optional instance-data links."
+    ? "Models ranked by raw score for this benchmark."
+    : "Model results with benchmark context, upstream dataset detail, and optional instance-data links."
   const reportingCompleteness = summary.evalcards?.annotations?.reporting_completeness
   const documentationPopulatedCount = reportingCompleteness
     ? getCompletenessPopulatedCount(reportingCompleteness)
@@ -1845,7 +1865,14 @@ export function EvalDetail({
           )}
           <span>{lb.metric_config.score_type}</span>
           <span style={{ color: "var(--fg-subtle)" }}>·</span>
-          <span>{lb.metric_config.lower_is_better ? "Lower is better ↓" : "Higher is better ↑"}</span>
+          <span>
+            {primaryMetricPrefix}
+            {lb.metric_config.lower_is_better == null
+              ? "Sources disagree on direction"
+              : lb.metric_config.lower_is_better
+                ? "Lower is better ↓"
+                : "Higher is better ↑"}
+          </span>
           {lb.derived_tags && lb.derived_tags.length > 0 && (
             <>
               <span style={{ color: "var(--fg-subtle)" }}>·</span>
@@ -2000,11 +2027,7 @@ export function EvalDetail({
               </div>
               <dl className="ec-datalist">
                 <dt>Composite</dt>
-                <dd>
-                  {summary.is_aggregated
-                    ? summary.aggregate_sources?.map((source) => source.composite_benchmark_name).join(", ") || "Multiple composites"
-                    : summary.composite_benchmark_name}
-                </dd>
+                <dd>{summary.composite_benchmark_name}</dd>
                 <dt>{isResearchView ? "Benchmark ID" : "What this covers"}</dt>
                 <dd className="break-words">
                   {isResearchView
@@ -2014,7 +2037,7 @@ export function EvalDetail({
                 <dt>{isResearchView ? "Score scale" : "How to read scores"}</dt>
                 <dd>
                   {isResearchView
-                    ? `${summary.metric_config.min_score ?? 0} – ${summary.metric_config.max_score ?? 1}`
+                    ? `${primaryMetricPrefix}${scaleLabel(summary.metric_config)}`
                     : scoreDirectionLabel}
                 </dd>
                 <dt>Models</dt>
@@ -2093,117 +2116,13 @@ export function EvalDetail({
                   </div>
                 )}
 
-                {summary.subtasks && summary.subtasks.length > 0 && (() => {
-                  // When every slice reports the same single metric (e.g. all
-                  // Global MMLU language splits share "score · proportion"),
-                  // hoist the metric label to the section header and render
-                  // each slice as a compact "name  value" row in a multi-
-                  // column grid. Otherwise fall back to per-row metric badges.
-                  const firstMetric = summary.subtasks[0]?.metrics?.[0]
-                  const uniformSingleMetric =
-                    !!firstMetric &&
-                    summary.subtasks.every(
-                      (s) =>
-                        s.metrics.length === 1 &&
-                        getCompactMetricLabel(s.metrics[0].display_name) ===
-                          getCompactMetricLabel(firstMetric.display_name) &&
-                        (s.metrics[0].unit ?? null) === (firstMetric.unit ?? null),
-                    )
-                  const headerSuffix = uniformSingleMetric
-                    ? ` · ${getCompactMetricLabel(firstMetric!.display_name)}${
-                        firstMetric!.unit ? ` (${firstMetric!.unit.toLowerCase()})` : ""
-                      }`
-                    : ""
-                  return (
-                    <div className="space-y-2">
-                      <div
-                        className="font-mono uppercase mb-1"
-                        style={{ fontSize: 10, letterSpacing: "0.14em", color: "var(--fg-subtle)" }}
-                      >
-                        Split breakdown · {summary.subtasks.length}
-                        {headerSuffix}
-                      </div>
-                      {uniformSingleMetric ? (
-                        <div
-                          className="grid"
-                          style={{
-                            gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-                            columnGap: 24,
-                          }}
-                        >
-                          {summary.subtasks.map((slice) => {
-                            const metric = slice.metrics[0]
-                            return (
-                              <div
-                                key={slice.subtask_key}
-                                className="flex items-baseline justify-between gap-3 py-1.5 min-w-0"
-                                style={{ borderBottom: "1px solid var(--border-soft)" }}
-                              >
-                                <span
-                                  className="text-[12.5px] truncate"
-                                  title={slice.canonical_display_name || slice.display_name || slice.subtask_name}
-                                >
-                                  {slice.display_name || slice.subtask_name}
-                                </span>
-                                <span
-                                  className="font-mono text-[12px] tabular-nums shrink-0"
-                                  style={{ color: "var(--fg)" }}
-                                >
-                                  {typeof metric.top_score === "number"
-                                    ? formatRawScore(metric.top_score, metric.unit)
-                                    : "—"}
-                                </span>
-                              </div>
-                            )
-                          })}
-                        </div>
-                      ) : (
-                        <ul
-                          className="flex flex-col"
-                          style={{ borderTop: "1px solid var(--border-soft)" }}
-                        >
-                          {summary.subtasks.map((slice) => (
-                            <li
-                              key={slice.subtask_key}
-                              className="grid gap-x-4 py-3"
-                              style={{
-                                gridTemplateColumns: "minmax(160px, 280px) 1fr",
-                                borderBottom: "1px solid var(--border-soft)",
-                              }}
-                            >
-                              <div className="min-w-0">
-                                <div className="font-semibold text-[13px] truncate">
-                                  {slice.display_name || slice.subtask_name}
-                                </div>
-                                {slice.canonical_display_name && slice.canonical_display_name !== (slice.display_name || slice.subtask_name) && (
-                                  <div
-                                    className="mt-0.5 font-mono text-[10px] uppercase tracking-[0.08em] truncate"
-                                    style={{ color: "var(--fg-subtle)" }}
-                                    title={slice.canonical_display_name}
-                                  >
-                                    {slice.canonical_display_name}
-                                  </div>
-                                )}
-                              </div>
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                {slice.metrics.map((metric) => (
-                                  <span
-                                    key={metric.metric_summary_id}
-                                    className="ec-tag"
-                                    title={metric.canonical_display_name || metric.display_name}
-                                  >
-                                    {getCompactMetricLabel(metric.display_name)}
-                                    {typeof metric.top_score === "number" ? ` · ${formatRawScore(metric.top_score, metric.unit)}` : ""}
-                                  </span>
-                                ))}
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  )
-                })()}
+                {summary.subtasks && summary.subtasks.length > 0 && (
+                  <SplitBreakdown
+                    subtasks={summary.subtasks}
+                    metricLabel={getCompactMetricLabel}
+                    formatScore={formatRawScore}
+                  />
+                )}
               </section>
             ) : null}
           </div>
@@ -2217,6 +2136,8 @@ export function EvalDetail({
         comparability={summary.evalcards?.annotations?.benchmark_comparability}
         summary={summary.comparability_summary}
         modelResults={summary.model_results}
+        leaderboardMetrics={summary.leaderboard_metrics}
+        leaderboardRows={summary.leaderboard_rows}
       />
 
       {hasMultiMetricLeaderboard ? (
@@ -2253,10 +2174,14 @@ export function EvalDetail({
                   ? `${lb.models_count} models`
                   : `${rankedRowCount} of ${lb.models_count}`}
               {" · "}
-              {lb.metric_config.lower_is_better ? "lower is better ↓" : "higher is better ↑"}
+              {lb.metric_config.lower_is_better == null
+                ? "sources disagree on direction"
+                : lb.metric_config.lower_is_better
+                  ? "lower is better ↓"
+                  : "higher is better ↑"}
               {isResearchView && (
                 <>
-                  {" · "}scale {lb.metric_config.min_score ?? 0}–{lb.metric_config.max_score ?? 1}
+                  {" · "}scale {scaleLabel(lb.metric_config)}
                 </>
               )}
             </span>
@@ -3598,7 +3523,7 @@ function MultiMetricLeaderboard({
   // is what the hero, the metric spec block and every other surface here
   // summarise. Sorting on whichever measure comes first instead would open a
   // page like OpenEval HarmBench on an attack-success-rate ranking under a
-  // refusal-score heading. Falls back to the first root metric.
+  // refusal-score heading.
   const primaryMetricKey = useMemo(
     () => primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id),
     [summary.leaderboard_metrics, summary.primary_metric_id],
@@ -4319,7 +4244,10 @@ function MultiMetricLeaderboard({
 
                 return (
                 <Fragment key={row.model_info.id}>
-                <tr className={cn("align-top", isExpanded && "bg-[color:var(--bg-warm)]")}>
+                <tr
+                  id={row.model_route_id ? `row-${row.model_route_id}` : undefined}
+                  className={cn("align-top", isExpanded && "bg-[color:var(--bg-warm)]")}
+                >
                   <td className="num align-top">
                     <span
                       className="font-mono tabular-nums"
@@ -4484,6 +4412,18 @@ function MultiMetricLeaderboard({
                           benchmarkKey={summary.benchmark_id ?? summary.composite_benchmark_key}
                           evalName={summary.evaluation_name}
                           snapshotId={summary.snapshot_id}
+                          comparabilityByMetric={visibleMetrics
+                            .filter(
+                              (metric) =>
+                                isNumericScore(row.values[metric.column_key]) ||
+                                row.comparability_status_by_metric?.[metric.column_key] != null ||
+                                row.annotations_by_metric?.[metric.column_key] != null,
+                            )
+                            .map((metric) => ({
+                              label: getMetricChipLabel(metric),
+                              status: row.comparability_status_by_metric?.[metric.column_key],
+                              annotations: row.annotations_by_metric?.[metric.column_key],
+                            }))}
                         />
                         <div className="flex justify-end">
                           <FlagScoreButton

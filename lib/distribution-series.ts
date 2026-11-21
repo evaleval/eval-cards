@@ -1,5 +1,5 @@
 import { getMetricChipLabel } from "@/lib/metric-labels"
-import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
+import { primaryMetricColumnKey, type BenchmarkEvalSummary } from "@/lib/eval-processing"
 
 /**
  * Series-building logic for the score-distribution embed
@@ -19,7 +19,8 @@ export type DistributionSeries = {
   label: string
   values: number[]
   unit?: string
-  lowerIsBetter: boolean
+  /** The metric's own direction; null when it reports none. */
+  lowerIsBetter: boolean | null
   points: DistributionPoint[]
 }
 
@@ -27,13 +28,13 @@ export type DistributionSliceAxis = {
   primaryColumn: string
   primaryLabel: string
   unit?: string
-  lowerIsBetter: boolean
+  lowerIsBetter: boolean | null
   slices: Array<{ key: string; label: string }>
 }
 
 /**
  * A slice axis exists only when the eval carries MORE THAN ONE distinct
- * subtask slice sharing a root primary metric (e.g. Global MMLU's per-language
+ * subtask slice sharing its `primary_metric_id` root metric (e.g. Global MMLU's per-language
  * splits). A lone self-slice (one subtask key that just echoes the eval) does
  * NOT qualify — it falls through to the non-slice path where it is dropped as a
  * redundant twin of the root metric.
@@ -42,8 +43,9 @@ export function buildDistributionSliceAxis(
   summary: BenchmarkEvalSummary,
 ): DistributionSliceAxis | null {
   const metrics = summary.leaderboard_metrics ?? []
-  const primary = metrics.find((m) => m.scope !== "subtask")
-  if (!primary?.column_key) return null
+  const primaryColumn = primaryMetricColumnKey(metrics, summary.primary_metric_id)
+  const primary = metrics.find((m) => m.column_key === primaryColumn)
+  if (!primary) return null
   const seen = new Map<string, string>()
   for (const m of metrics) {
     if (m.scope === "subtask" && m.subtask_key && !seen.has(m.subtask_key)) {
@@ -54,8 +56,8 @@ export function buildDistributionSliceAxis(
   return {
     primaryColumn: primary.column_key,
     primaryLabel: getMetricChipLabel(primary),
-    unit: primary.unit ?? summary.metric_config.unit,
-    lowerIsBetter: Boolean(primary.lower_is_better ?? summary.metric_config.lower_is_better),
+    unit: primary.unit ?? undefined,
+    lowerIsBetter: primary.lower_is_better ?? null,
     slices: Array.from(seen, ([key, label]) => ({ key, label })),
   }
 }
@@ -131,7 +133,14 @@ export function buildDistributionSeries(
   const allMetrics = summary.leaderboard_metrics ?? []
   const rootMetrics = allMetrics.filter((m) => m.scope !== "subtask")
   const metrics = rootMetrics.length > 0 ? rootMetrics : allMetrics
-  const built = metrics
+  // Primary metric first, so a consumer opening on the first series opens
+  // on `primary_metric_id`, as the eval page does.
+  const primaryColumn = primaryMetricColumnKey(allMetrics, summary.primary_metric_id)
+  const ordered = [
+    ...metrics.filter((m) => m.column_key === primaryColumn),
+    ...metrics.filter((m) => m.column_key !== primaryColumn),
+  ]
+  const built = ordered
     .map((metric) => {
       const columnKey = metric.column_key ?? metric.metric_summary_id
       if (!columnKey) return null
@@ -141,8 +150,8 @@ export function buildDistributionSeries(
         key: columnKey,
         label: getMetricChipLabel(metric),
         values: points.map((p) => p.score),
-        unit: metric.unit ?? summary.metric_config.unit,
-        lowerIsBetter: Boolean(metric.lower_is_better ?? summary.metric_config.lower_is_better),
+        unit: metric.unit ?? undefined,
+        lowerIsBetter: metric.lower_is_better ?? null,
         points,
       }
     })

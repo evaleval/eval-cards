@@ -7,12 +7,18 @@ import { useAudienceMode } from "@/components/audience-mode-provider"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { SignalTooltip } from "@/components/signals/signal-tooltip"
 import type { BenchmarkComparability, ComparabilitySummary, DifferingSetupField } from "@/lib/backend-artifacts"
-import type { ModelResultForBenchmark } from "@/lib/eval-processing"
+import type {
+  BenchmarkLeaderboardMetric,
+  BenchmarkLeaderboardRow,
+  ModelResultForBenchmark,
+} from "@/lib/eval-processing"
 import {
   formatFieldLabel,
+  formatNotAssessableReason,
   formatSignalNumber,
   formatSignalValue,
-  isNotAssessable,
+  summarizeNotAssessable,
+  type MetricComparabilityStatus,
 } from "./signal-utils"
 
 interface FlaggedRow {
@@ -58,28 +64,46 @@ function deriveFlaggedRows(modelResults: readonly ModelResultForBenchmark[]): Fl
   return flagged
 }
 
-/** Rows the producer could not assess: the comparability group mixed
- *  scales or had no declared bounds, so its divergence flags are NULL.
- *  Counted per model so the panel can say "not assessable" instead of
- *  letting the absence of a badge read as "checked, nothing found". */
-function countNotAssessable(modelResults: readonly ModelResultForBenchmark[]): number {
-  const seen = new Set<string>()
-  for (const r of modelResults) {
-    if (!isNotAssessable(r.result?.evalcards?.annotations, r.comparability_status)) continue
-    const key = r.model_route_id ?? r.model_info?.name ?? r.model_info?.id ?? ""
-    seen.add(key)
+function joinList(items: string[], maxVisible = 4): string {
+  const visible = items.slice(0, maxVisible)
+  const overflow = items.length - visible.length
+  if (overflow > 0) {
+    return `${visible.join(", ")} and ${overflow} more`
   }
-  return seen.size
+  if (visible.length <= 1) return visible[0] ?? ""
+  return `${visible.slice(0, -1).join(", ")} and ${visible[visible.length - 1]}`
+}
+
+function reasonClauseForMetrics(metrics: readonly MetricComparabilityStatus[], isResearchView: boolean): string {
+  const allNoBounds = metrics.every((m) => m.noBoundsCount === m.notAssessableCount)
+  const allMixed = metrics.every((m) => m.mixedScaleCount === m.notAssessableCount)
+  if (allNoBounds) {
+    return isResearchView
+      ? "declare no scale bounds, so divergence was not assessed"
+      : "have no declared scale range, so scores could not be cross-checked"
+  }
+  if (allMixed) {
+    return isResearchView
+      ? "sit on mixed scales, so divergence was not assessed"
+      : "sit on mixed scales, so scores could not be cross-checked"
+  }
+  return isResearchView
+    ? "sit on mixed or undeclared scales, so divergence was not assessed"
+    : "could not be placed on a common scale, so scores could not be cross-checked"
 }
 
 export function ComparabilityPanel({
   comparability,
   summary,
   modelResults,
+  leaderboardMetrics,
+  leaderboardRows,
 }: {
   comparability?: BenchmarkComparability | null
   summary?: ComparabilitySummary
   modelResults?: readonly ModelResultForBenchmark[]
+  leaderboardMetrics?: readonly BenchmarkLeaderboardMetric[]
+  leaderboardRows?: readonly BenchmarkLeaderboardRow[]
 }) {
   const { mode } = useAudienceMode()
   const isResearchView = mode === "research"
@@ -100,16 +124,21 @@ export function ComparabilityPanel({
     () => deriveFlaggedRows(modelResults ?? []),
     [modelResults],
   )
-  const notAssessableCount = useMemo(
-    () => countNotAssessable(modelResults ?? []),
-    [modelResults],
+  const notAssessable = useMemo(
+    () =>
+      summarizeNotAssessable({
+        leaderboardMetrics,
+        leaderboardRows,
+        modelResults,
+      }),
+    [leaderboardMetrics, leaderboardRows, modelResults],
   )
 
   // Hide the panel entirely when we have nothing concrete to show: no
   // per-group detail, no summary concern, and no cross-party gap to call
   // out. We also hide when the only signal is a roll-up count that we
   // can't connect to specific models — vague counts confuse readers.
-  if (noGroupDetail && !showNoCrossPartyNote && !hasSummaryConcern && notAssessableCount === 0) {
+  if (noGroupDetail && !showNoCrossPartyNote && !hasSummaryConcern && !notAssessable.hasAnyNotAssessable) {
     return null
   }
   if (
@@ -117,7 +146,7 @@ export function ComparabilityPanel({
     hasSummaryConcern &&
     flaggedRows.length === 0 &&
     !showNoCrossPartyNote &&
-    notAssessableCount === 0
+    !notAssessable.hasAnyNotAssessable
   ) {
     return null
   }
@@ -164,7 +193,7 @@ export function ComparabilityPanel({
         </div>
       )}
 
-      {notAssessableCount > 0 && (
+      {notAssessable.hasAnyNotAssessable && (
         <div
           className="mt-3 px-3 py-2 text-[13px]"
           style={{
@@ -174,9 +203,107 @@ export function ComparabilityPanel({
             lineHeight: 1.6,
           }}
         >
-          {isResearchView
-            ? `${notAssessableCount} model${notAssessableCount === 1 ? "" : "s"} not assessable: the reported numbers sit on mixed or undeclared scales, so divergence was never checked.`
-            : `${notAssessableCount} model${notAssessableCount === 1 ? "" : "s"} could not be checked here, because the numbers reported for them are not on a common scale.`}
+          {notAssessable.isMultiMetric ? (
+            <div className="space-y-1">
+              {notAssessable.fullyUnassessableMetrics.length > 0 && (
+                <div>
+                  <span className="font-semibold" style={{ color: "var(--fg)" }}>
+                    {joinList(notAssessable.fullyUnassessableMetrics.map((m) => m.label))}
+                  </span>{" "}
+                  {notAssessable.fullyUnassessableMetrics.length === 1
+                    ? reasonClauseForMetrics(notAssessable.fullyUnassessableMetrics, isResearchView)
+                        .replace(/^declare /, "declares ")
+                        .replace(/^have /, "has ")
+                        .replace(/^sit /, "sits ")
+                    : reasonClauseForMetrics(notAssessable.fullyUnassessableMetrics, isResearchView)}
+                  .
+                </div>
+              )}
+              {notAssessable.partiallyUnassessableMetrics.map((m) => {
+                const modelsPreview = m.affectedModels.slice(0, 4)
+                const overflow = m.affectedModels.length - modelsPreview.length
+                const reason =
+                  m.mixedScaleCount === m.notAssessableCount
+                    ? formatNotAssessableReason("mixed_scale")
+                    : m.noBoundsCount === m.notAssessableCount
+                      ? formatNotAssessableReason("no_bounds")
+                      : "mixed or undeclared scales"
+                return (
+                  <div key={m.columnKey}>
+                    On <span className="font-semibold" style={{ color: "var(--fg)" }}>{m.label}</span>,{" "}
+                    {m.notAssessableCount} model{m.notAssessableCount === 1 ? "" : "s"}{" "}
+                    {isResearchView ? "not assessable" : "could not be cross-checked"} ({reason}):{" "}
+                    {modelsPreview.map((entry, idx) => (
+                      <span key={entry.modelRouteId ?? entry.modelName}>
+                        {idx > 0 ? ", " : ""}
+                        {entry.modelRouteId ? (
+                          <a
+                            href={`#row-${entry.modelRouteId}`}
+                            className="font-medium underline-offset-4 hover:underline"
+                            style={{ color: "var(--fg)" }}
+                          >
+                            {entry.modelName}
+                          </a>
+                        ) : (
+                          <span className="font-medium" style={{ color: "var(--fg)" }}>
+                            {entry.modelName}
+                          </span>
+                        )}
+                      </span>
+                    ))}
+                    {overflow > 0 ? ` and ${overflow} more` : ""}.
+                  </div>
+                )
+              })}
+            </div>
+          ) : (() => {
+            const only = notAssessable.metrics[0]
+            if (only?.allNotAssessable) {
+              const allNoBounds = only.noBoundsCount === only.notAssessableCount
+              return isResearchView
+                ? allNoBounds
+                  ? `This metric declares no scale bounds, so divergence was not assessed (${only.totalModels} model${only.totalModels === 1 ? "" : "s"}).`
+                  : `${only.totalModels} model${only.totalModels === 1 ? "" : "s"} not assessable: the reported numbers sit on mixed or undeclared scales, so divergence was never checked.`
+                : allNoBounds
+                  ? `This metric has no declared scale range, so scores could not be cross-checked (${only.totalModels} model${only.totalModels === 1 ? "" : "s"}).`
+                  : `${only.totalModels} model${only.totalModels === 1 ? "" : "s"} could not be checked here, because the numbers reported for them are not on a common scale.`
+            }
+            const count = notAssessable.affectedModelCount
+            const modelsPreview = (only?.affectedModels ?? []).slice(0, 4)
+            const overflow = (only?.affectedModels.length ?? 0) - modelsPreview.length
+            return (
+              <div>
+                {isResearchView
+                  ? `${count} model${count === 1 ? "" : "s"} not assessable (mixed or undeclared scales)`
+                  : `${count} model${count === 1 ? "" : "s"} could not be cross-checked (not on a common scale)`}
+                {modelsPreview.length > 0 && (
+                  <>
+                    :{" "}
+                    {modelsPreview.map((entry, idx) => (
+                      <span key={entry.modelRouteId ?? entry.modelName}>
+                        {idx > 0 ? ", " : ""}
+                        {entry.modelRouteId ? (
+                          <a
+                            href={`#row-${entry.modelRouteId}`}
+                            className="font-medium underline-offset-4 hover:underline"
+                            style={{ color: "var(--fg)" }}
+                          >
+                            {entry.modelName}
+                          </a>
+                        ) : (
+                          <span className="font-medium" style={{ color: "var(--fg)" }}>
+                            {entry.modelName}
+                          </span>
+                        )}
+                      </span>
+                    ))}
+                    {overflow > 0 ? ` and ${overflow} more` : ""}
+                  </>
+                )}
+                .
+              </div>
+            )
+          })()}
         </div>
       )}
 
