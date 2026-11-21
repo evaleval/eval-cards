@@ -11,6 +11,7 @@ import type {
 } from "@/lib/backend-artifacts"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
 import { SETUP_ITEMS, setupItemState } from "@/lib/setup-items"
+import { averageable, onOneScale, type AverageableReading } from "@/lib/headline-readings"
 import type { ModelResultForBenchmark } from "@/lib/eval-processing"
 import { isHeadlineResult } from "@/lib/eval-processing"
 
@@ -27,9 +28,6 @@ function headlineResults(summary: BenchmarkEvalSummary): ModelResultForBenchmark
 }
 import {
   heuristicToScale,
-  mergeRegistryBounds,
-  resolveCanonicalScaleGroup,
-  type CanonicalScaleCell,
 } from "@/lib/score-scale"
 import { computeSaturationMetrics, type SaturationCategory } from "@/lib/saturation"
 import {
@@ -60,7 +58,7 @@ const SIGNAL_NAMES: Record<SignalId, string> = {
 const SIGNAL_ASKS: Record<SignalId, string> = {
   reproducibility: "Could someone re-run this benchmark with what's documented?",
   completeness: "How much of the benchmark card is filled in?",
-  provenance: "Who reported these scores and how many parties have replicated?",
+  provenance: "Who reported these scores, and how many models does more than one source report, on any metric?",
   comparability: "Where multiple sources report the same benchmark, do their numbers agree?",
   saturation: "Can the top models still be reliably distinguished by their scores?",
 }
@@ -603,19 +601,6 @@ function deriveProvenance(
 // Comparability — cross-suite first, within-page fallback
 // ──────────────────────────────────────────────────────────────────────────
 
-function computeThreshold(metricConfig: BenchmarkEvalSummary["metric_config"]): number {
-  if (!metricConfig) return 0.05
-  const unit = (metricConfig as { unit?: string; metric_unit?: string }).unit
-    ?? (metricConfig as { metric_unit?: string }).metric_unit
-  const scoreType = (metricConfig as { score_type?: string }).score_type
-  if (unit === "proportion" || scoreType === "continuous_normalized") return 0.05
-  if (unit === "percent") return 5.0
-  const min = metricConfig.min_score
-  const max = metricConfig.max_score
-  if (typeof min === "number" && typeof max === "number" && max > min) return 0.05 * (max - min)
-  return 0.05
-}
-
 interface CrossSuiteAppearance {
   evalSummaryId: string
   familyKey: string
@@ -627,21 +612,31 @@ interface CrossSuiteAppearance {
 interface CrossSuiteModelRow {
   modelRouteId: string
   modelDisplay: string
+  /** Each source's reading, on the scale the spread is taken on. */
   scoresByEval: Map<string, number>
   spread: number | null
+  /** The agreement threshold on that scale; null when not compared. */
+  threshold: number | null
 }
 
 interface CrossSuiteAggregate {
   canonicalKey: string
   canonicalDisplayName: string
   appearances: CrossSuiteAppearance[]
+  /** Sources that report this page's metric; the others are not compared. */
+  comparedEvalIds: Set<string>
+  /** Per model, the sources that report it on any metric (provenance counts
+   *  reports, it combines no numbers). */
+  reportingSourcesByModel: Map<string, Set<string>>
   modelRows: CrossSuiteModelRow[]
-  /** Rows where the model was reported in ≥2 sibling evals — eligible
-   *  for an apples-to-apples comparison. */
+  /** Models whose readings in ≥2 sources are `averageable` — eligible for
+   *  an apples-to-apples comparison. */
   comparedCount: number
   agreementCount: number
   divergentCount: number
-  threshold: number
+  /** Models read by ≥2 sources whose readings are not one measurement
+   *  (different split, direction or scale). Never counted as divergent. */
+  notComparableCount: number
   thresholdLabel: string
 }
 
@@ -718,16 +713,28 @@ export function crossSuiteSiblingEvalIds(
   return [...ids]
 }
 
-function pickRepresentativeMetric(metrics: ComparisonMetricEntry[]): ComparisonMetricEntry | null {
-  if (metrics.length === 0) return null
-  const isStderr = (id: string) => /(^|_)stderr(_|$)|standard.error/i.test(id)
-  const main =
-    metrics.find(
-      (m) =>
-        !isStderr(m.metric_summary_id) &&
-        /accuracy|score|exact|pass|win|mean/i.test(m.metric_name ?? ""),
-    ) ?? metrics.find((m) => !isStderr(m.metric_summary_id)) ?? metrics[0]
-  return main ?? null
+/** The threshold, on the scale `unit` names, for the page's metric. Null
+ *  when the readings sit on a scale the page's metric config does not
+ *  describe, so no agreement can be judged. */
+function thresholdOnScale(
+  unit: string | null,
+  metricConfig: BenchmarkEvalSummary["metric_config"],
+): number | null {
+  const u = (unit ?? "").trim().toLowerCase()
+  if (u === "percent") return 5
+  if (u === "proportion") return 0.05
+  const own = (metricConfig?.unit ?? "").trim().toLowerCase()
+  if (u !== own) return null
+  // Any other scale has a threshold only when the metric states its bounds.
+  const min = metricConfig?.min_score
+  const max = metricConfig?.max_score
+  return typeof min === "number" && typeof max === "number" && max > min ? 0.05 * (max - min) : null
+}
+
+function thresholdLabelOf(threshold: number, unit: string | null): string {
+  return (unit ?? "").trim().toLowerCase() === "percent"
+    ? `${formatNumber(threshold)} pts`
+    : `±${formatNumber(threshold)}`
 }
 
 export function buildCrossSuiteAggregate(
@@ -763,131 +770,93 @@ export function buildCrossSuiteAggregate(
   }
   if (appearances.length < 2) return null
 
-  // For each appearance, pick a representative metric and pull its
-  // per-model leaderboard. Different suites may use slightly different
-  // metric names; we pick the most "headline" metric per suite.
+  // Each source's reading of THIS page's metric (`primary_metric_id`). A
+  // source that does not report that metric measured something else: it
+  // is listed, never compared.
+  const pageMetricId = summary.primary_metric_id
   const metricByEval = new Map<string, ComparisonMetricEntry>()
   for (const app of appearances) {
-    const evalEntry = comparisonIndex.evals[app.evalSummaryId]
-    if (!evalEntry) continue
-    const metric = pickRepresentativeMetric(evalEntry.metrics)
+    const metric = pageMetricId
+      ? comparisonIndex.evals[app.evalSummaryId]?.metrics.find((m) => m.metric_id === pageMetricId)
+      : undefined
     if (metric) metricByEval.set(app.evalSummaryId, metric)
   }
-  if (metricByEval.size < 2) return null
-
-  // Decide a normalization scale for cross-suite comparison: if the
-  // representative metrics span a 0-1 scale and a 0-100 scale, rescale
-  // the smaller into 0-100 so divergence is computed on a common axis.
-  // Preferred path (spec F5): when every cell across the sibling metrics
-  // carries producer canonical-scale fields, those settle the common axis
-  // exactly. Otherwise (old snapshots, mixed groups, bounds-less metrics)
-  // keep the legacy magnitude heuristic, mirroring the model-detail
-  // overlap fallback.
-  const sampleScores: number[] = []
-  const scaleCells: CanonicalScaleCell[] = []
-  for (const [evalId, metric] of metricByEval) {
-    void evalId
-    for (const row of metric.scores ?? []) {
-      if (typeof row.score === "number" && Number.isFinite(row.score)) {
-        sampleScores.push(row.score)
-        scaleCells.push({
-          score: row.score,
-          scoreCanonical: row.score_canonical,
-          scaleConversion: row.scale_conversion,
-          unit: metric.unit ?? null,
-        })
+  const comparedEvalIds = new Set(metricByEval.keys())
+  const reportingSourcesByModel = new Map<string, Set<string>>()
+  for (const app of appearances) {
+    for (const metric of comparisonIndex.evals[app.evalSummaryId]?.metrics ?? []) {
+      for (const row of metric.scores ?? []) {
+        if (typeof row.score !== "number" || !Number.isFinite(row.score)) continue
+        const set = reportingSourcesByModel.get(row.model_route_id) ?? new Set<string>()
+        set.add(app.evalSummaryId)
+        reportingSourcesByModel.set(row.model_route_id, set)
       }
     }
   }
-  const scaleGroup = resolveCanonicalScaleGroup(
-    scaleCells,
-    // Registry bounds shared by the sibling metric entries — resolve
-    // anchor-neutral / unit-conflicted groups exactly (conflicting bounds
-    // merge to undefined and keep the fallback).
-    mergeRegistryBounds(
-      Array.from(metricByEval.values(), (m) => ({
-        min: m.canonical_min_score,
-        max: m.canonical_max_score,
-      })),
-    ),
-  )
-  // Same display convention as the legacy guess (any percent-scale source
-  // pulls the whole table onto the 0-100 axis), read off the producer
-  // fields when available.
-  const looksPercent = scaleGroup
-    ? scaleGroup.percentSourceCount > 0
-    : sampleScores.some((s) => Math.abs(s) > 1.5)
-  const rescale = (raw: number): number => {
-    const isHigh = Math.abs(raw) > 1.5
-    if (looksPercent) return isHigh ? raw : raw * 100
-    return isHigh ? raw / 100 : raw
-  }
 
-  // Collect per-model scores keyed by model_route_id. A model's row is
-  // "compared" when it has scores in ≥2 sibling evals.
-  const rowsByModel = new Map<
+  const readingOf = (
+    metric: ComparisonMetricEntry,
+    row: ComparisonMetricEntry["scores"][number],
+  ): AverageableReading => ({
+    metricKey: metric.metric_id,
+    lowerIsBetter: metric.lower_is_better,
+    split: row.split,
+    unit: metric.unit,
+    score: row.score,
+    scoreCanonical: row.score_canonical,
+    scaleConversion: row.scale_conversion,
+    canonicalMinScore: metric.canonical_min_score,
+    canonicalMaxScore: metric.canonical_max_score,
+  })
+
+  // One reading per (model, source): the first, as the comparison index
+  // already de-dupes within a metric.
+  const readingsByModel = new Map<
     string,
-    { modelDisplay: string; scoresByEval: Map<string, number> }
+    { modelDisplay: string; byEval: Map<string, AverageableReading> }
   >()
   for (const [evalSummaryId, metric] of metricByEval) {
     for (const row of metric.scores ?? []) {
       if (typeof row.score !== "number" || !Number.isFinite(row.score)) continue
-      const display = row.model_family_name ?? row.model_route_id
-      const slot = rowsByModel.get(row.model_route_id) ?? {
-        modelDisplay: display,
-        scoresByEval: new Map<string, number>(),
+      const slot = readingsByModel.get(row.model_route_id) ?? {
+        modelDisplay: row.model_family_name ?? row.model_route_id,
+        byEval: new Map<string, AverageableReading>(),
       }
-      // Take the first score per (model, eval) — the comparison-index
-      // already de-dupes within a metric. On the canonical path, flagged
-      // rows (score_canonical null) fall back to the legacy per-row guess
-      // inside toDisplay — they stay included, matching legacy behavior.
-      if (!slot.scoresByEval.has(evalSummaryId)) {
-        const value = scaleGroup
-          ? scaleGroup.toDisplay(
-              {
-                score: row.score,
-                scoreCanonical: row.score_canonical,
-                scaleConversion: row.scale_conversion,
-                unit: metric.unit ?? null,
-              },
-              looksPercent,
-            )
-          : rescale(row.score)
-        slot.scoresByEval.set(evalSummaryId, value)
-      }
-      rowsByModel.set(row.model_route_id, slot)
+      if (!slot.byEval.has(evalSummaryId)) slot.byEval.set(evalSummaryId, readingOf(metric, row))
+      readingsByModel.set(row.model_route_id, slot)
     }
   }
 
-  const baseThreshold = computeThreshold(summary.metric_config)
-  // When we rescaled into a 0-100 axis, scale the threshold accordingly
-  // so the comparison stays meaningful.
-  const threshold = looksPercent && baseThreshold < 1 ? baseThreshold * 100 : baseThreshold
-  const thresholdLabel = looksPercent ? `${formatNumber(threshold)} pts` : `±${formatNumber(threshold)}`
+  // One display scale for the table when every reading shares one; else
+  // each model's readings go on their own.
+  const allReadings = [...readingsByModel.values()].flatMap((slot) => [...slot.byEval.values()])
+  const tableScale = averageable(allReadings) ? onOneScale(allReadings) : null
+  const tableIndex = new Map(allReadings.map((reading, i) => [reading, i]))
 
   let comparedCount = 0
   let divergentCount = 0
+  let notComparableCount = 0
+  const thresholdLabels = new Set<string>()
   const modelRows: CrossSuiteModelRow[] = []
-  for (const [routeId, slot] of rowsByModel) {
-    const scores = Array.from(slot.scoresByEval.values())
-    if (scores.length < 2) {
-      modelRows.push({
-        modelRouteId: routeId,
-        modelDisplay: slot.modelDisplay,
-        scoresByEval: slot.scoresByEval,
-        spread: null,
-      })
+  for (const [routeId, slot] of readingsByModel) {
+    const evalIds = [...slot.byEval.keys()]
+    const readings = [...slot.byEval.values()]
+    const scaled = tableScale
+      ? { values: readings.map((r) => tableScale.values[tableIndex.get(r)!]), unit: tableScale.unit }
+      : onOneScale(readings)
+    const threshold = scaled ? thresholdOnScale(scaled.unit, summary.metric_config) : null
+    const scoresByEval = new Map<string, number>()
+    if (scaled) evalIds.forEach((id, i) => scoresByEval.set(id, scaled.values[i]))
+    if (readings.length < 2 || !scaled || threshold == null) {
+      if (readings.length >= 2) notComparableCount += 1
+      modelRows.push({ modelRouteId: routeId, modelDisplay: slot.modelDisplay, scoresByEval, spread: null, threshold: null })
       continue
     }
-    const spread = Math.max(...scores) - Math.min(...scores)
+    const spread = Math.max(...scaled.values) - Math.min(...scaled.values)
     comparedCount += 1
     if (spread > threshold) divergentCount += 1
-    modelRows.push({
-      modelRouteId: routeId,
-      modelDisplay: slot.modelDisplay,
-      scoresByEval: slot.scoresByEval,
-      spread,
-    })
+    thresholdLabels.add(thresholdLabelOf(threshold, scaled.unit))
+    modelRows.push({ modelRouteId: routeId, modelDisplay: slot.modelDisplay, scoresByEval, spread, threshold })
   }
   // Sort models with the largest spread to the top (but compared rows
   // before un-compared so the first model in the list is informative).
@@ -898,18 +867,18 @@ export function buildCrossSuiteAggregate(
     return (b.spread ?? 0) - (a.spread ?? 0)
   })
 
-  const agreementCount = comparedCount - divergentCount
-
   return {
     canonicalKey: entry.key,
     canonicalDisplayName: entry.display_name,
     appearances,
+    comparedEvalIds,
+    reportingSourcesByModel,
     modelRows,
     comparedCount,
-    agreementCount,
+    agreementCount: comparedCount - divergentCount,
     divergentCount,
-    threshold,
-    thresholdLabel,
+    notComparableCount,
+    thresholdLabel: [...thresholdLabels].join(" / "),
   }
 }
 
@@ -919,10 +888,9 @@ function deriveCrossSuiteProvenance(cross: CrossSuiteAggregate): DerivedSignal {
   // in at least two sibling appearances of the same canonical benchmark.
   let multiSourceModels = 0
   let totalModels = 0
-  for (const row of cross.modelRows) {
-    if (row.scoresByEval.size === 0) continue
+  for (const sources of cross.reportingSourcesByModel.values()) {
     totalModels += 1
-    if (row.scoresByEval.size >= 2) multiSourceModels += 1
+    if (sources.size >= 2) multiSourceModels += 1
   }
 
   if (totalModels === 0) {
@@ -933,7 +901,7 @@ function deriveCrossSuiteProvenance(cross: CrossSuiteAggregate): DerivedSignal {
       detail: "",
       breakdown: {
         formula:
-          "Provenance = (models reported by ≥2 independent sources) / (models reported by any source).",
+          "Provenance = (models reported by more than one source, on any metric) / (models reported by any source). It counts coverage, not replication of a number.",
         inputs: [
           { label: "Sources reporting this benchmark", value: sourceCount.toString() },
           { label: "Models with any report", value: "0" },
@@ -946,10 +914,10 @@ function deriveCrossSuiteProvenance(cross: CrossSuiteAggregate): DerivedSignal {
   const score = multiSourceModels / totalModels
   const headline =
     multiSourceModels === 0
-      ? `${sourceCount} independent sources report this benchmark, but no model has been reported by more than one.`
+      ? `${sourceCount} sources report this benchmark, but no model is reported by more than one.`
       : multiSourceModels === totalModels
-      ? `Every reported model has been reported by ≥2 independent sources (${sourceCount} sources total).`
-      : `${multiSourceModels} of ${totalModels} reported models have been reported by ≥2 independent sources.`
+      ? `Every reported model is reported by more than one source, on any metric (${sourceCount} sources total).`
+      : `${multiSourceModels} of ${totalModels} reported models are reported by more than one source, on any metric.`
   const detail = `${sourceCount} source${sourceCount === 1 ? "" : "s"} · ${multiSourceModels}/${totalModels} multi-source models`
 
   return {
@@ -959,11 +927,11 @@ function deriveCrossSuiteProvenance(cross: CrossSuiteAggregate): DerivedSignal {
     detail,
     breakdown: {
       formula:
-        "Provenance = (models reported by ≥2 independent sources) / (models reported by any source).",
+        "Provenance = (models reported by more than one source, on any metric) / (models reported by any source). It counts coverage, not replication of a number.",
       inputs: [
         { label: "Sources reporting this benchmark", value: sourceCount.toString() },
         { label: "Models reported in any source", value: totalModels.toString() },
-        { label: "Reported by ≥2 sources", value: multiSourceModels.toString() },
+        { label: "Reported by more than one source (any metric)", value: multiSourceModels.toString() },
         { label: "Reported by 1 source only", value: (totalModels - multiSourceModels).toString() },
       ],
       custom: <CrossSuiteBreakdown aggregate={cross} />,
@@ -1033,7 +1001,19 @@ export function deriveComparability(
   // Cross-suite is the meaningful comparison: the hierarchy keeps each
   // source on its own eval page, so within-page never has multiple
   // sources to compare against each other.
-  if (cross && cross.appearances.length >= 2 && cross.comparedCount > 0) {
+  const metricName = summary.metric_config?.evaluation_description || summary.primary_metric_id || "this metric"
+  const notCompared = cross
+    ? cross.appearances.length - cross.comparedEvalIds.size
+    : 0
+  const notComparedLines = (c: CrossSuiteAggregate): BreakdownLine[] => [
+    ...(notCompared > 0
+      ? [{ label: `Sources not reporting ${metricName} (not compared)`, value: notCompared.toString() }]
+      : []),
+    ...(c.notComparableCount > 0
+      ? [{ label: "Models whose readings are not one measurement (not compared)", value: c.notComparableCount.toString() }]
+      : []),
+  ]
+  if (cross && cross.comparedEvalIds.size >= 2 && cross.comparedCount > 0) {
     const agreementRate = cross.agreementCount / cross.comparedCount
     const headline =
       cross.divergentCount === 0
@@ -1041,17 +1021,21 @@ export function deriveComparability(
         : cross.agreementCount === 0
         ? `Every model reported in multiple suites diverges by more than the ${cross.thresholdLabel} threshold.`
         : `${cross.agreementCount} of ${cross.comparedCount} models agree across suites within ${cross.thresholdLabel}.`
-    const detail = `${cross.appearances.length} sources · ${cross.comparedCount} model${cross.comparedCount === 1 ? "" : "s"} compared · threshold ${cross.thresholdLabel}`
+    const detail = `${cross.comparedEvalIds.size} sources report ${metricName} · ${cross.comparedCount} model${cross.comparedCount === 1 ? "" : "s"} compared · threshold ${cross.thresholdLabel}`
 
     const appearanceRows: BreakdownRow[] = cross.appearances.map((a) => ({
       label: a.familyName,
       status: a.isCurrentEval ? "info" : "info",
-      detail: a.isCurrentEval ? "Current eval" : "Sibling source",
+      detail: `${a.isCurrentEval ? "Current eval" : "Sibling source"}${
+        cross.comparedEvalIds.has(a.evalSummaryId) ? "" : ` · does not report ${metricName}, not compared`
+      }`,
       href: a.isCurrentEval ? undefined : `/evals/${a.evalSummaryId.replace(/%2F/g, "/")}`,
     }))
 
     const inputs: BreakdownLine[] = [
       { label: "Sources reporting this benchmark", value: cross.appearances.length.toString() },
+      { label: `Sources reporting ${metricName}`, value: cross.comparedEvalIds.size.toString() },
+      ...notComparedLines(cross),
       { label: "Models compared", value: cross.comparedCount.toString() },
       { label: "Agree within threshold", value: cross.agreementCount.toString() },
       { label: "Diverge", value: cross.divergentCount.toString() },
@@ -1076,10 +1060,31 @@ export function deriveComparability(
     }
   }
 
+  if (cross && cross.appearances.length >= 2 && cross.comparedEvalIds.size < 2) {
+    const inputs: BreakdownLine[] = [
+      { label: "Sources reporting this benchmark", value: cross.appearances.length.toString() },
+      { label: `Sources reporting ${metricName}`, value: cross.comparedEvalIds.size.toString() },
+    ]
+    return {
+      statValue: "—",
+      statUnit: "",
+      headline: `No other source reports ${metricName}.`,
+      detail: `${cross.appearances.length} sources report ${cross.canonicalDisplayName}, on different metrics; different measurements are not compared.`,
+      breakdown: {
+        formula:
+          "Comparability compares the same metric across sources. Sources that report a different metric are listed, never compared.",
+        inputs,
+        custom: <CrossSuiteBreakdown aggregate={cross} />,
+      },
+    }
+  }
+
   if (cross && cross.appearances.length >= 2) {
     const inputs: BreakdownLine[] = [
       { label: "Sources reporting this benchmark", value: cross.appearances.length.toString() },
-      { label: "Shared models", value: "0" },
+      { label: `Sources reporting ${metricName}`, value: cross.comparedEvalIds.size.toString() },
+      ...notComparedLines(cross),
+      { label: "Models compared", value: "0" },
     ]
     if (na.hasAnyNotAssessable) {
       inputs.push({ label: "Not assessable on this page", value: formatNotAssessableInputSummary(na) })
@@ -1088,11 +1093,17 @@ export function deriveComparability(
     return {
       statValue: "—",
       statUnit: "",
-      headline: "Sources don't share any models.",
-      detail: `${cross.appearances.length} sources report ${cross.canonicalDisplayName}, but no model overlaps between them.`,
+      headline:
+        cross.notComparableCount > 0
+          ? "No model's readings across sources are one measurement."
+          : "Sources don't share any models.",
+      detail:
+        cross.notComparableCount > 0
+          ? `${cross.notComparableCount} model${cross.notComparableCount === 1 ? " is" : "s are"} read by ≥2 sources on a different split, direction or scale; not compared.`
+          : `${cross.comparedEvalIds.size} sources report ${metricName}, but no model overlaps between them.`,
       breakdown: {
         formula:
-          "Comparability requires the same model to be reported in ≥2 sources. None overlap on this benchmark.",
+          "Comparability requires the same model to be read on the same measurement in ≥2 sources. None is on this benchmark.",
         inputs,
         custom: <CrossSuiteBreakdown aggregate={cross} />,
       },
@@ -1283,6 +1294,7 @@ function deriveWithinPageComparability(
 function CrossSuiteBreakdown({ aggregate }: { aggregate: CrossSuiteAggregate }) {
   const ordered = aggregate.modelRows.filter((r) => r.spread != null).slice(0, 8)
   const remaining = aggregate.modelRows.filter((r) => r.spread != null).length - ordered.length
+  const comparedApps = aggregate.appearances.filter((a) => aggregate.comparedEvalIds.has(a.evalSummaryId))
 
   return (
     <div className="mt-4 space-y-4">
@@ -1337,7 +1349,7 @@ function CrossSuiteBreakdown({ aggregate }: { aggregate: CrossSuiteAggregate }) 
                   <th className="text-left font-mono uppercase pb-1.5" style={{ fontSize: 10, letterSpacing: "0.12em" }}>
                     Model
                   </th>
-                  {aggregate.appearances.map((a) => (
+                  {comparedApps.map((a) => (
                     <th
                       key={a.evalSummaryId}
                       className="text-right font-mono uppercase pb-1.5 pl-3"
@@ -1354,13 +1366,13 @@ function CrossSuiteBreakdown({ aggregate }: { aggregate: CrossSuiteAggregate }) 
               </thead>
               <tbody>
                 {ordered.map((row) => {
-                  const isDivergent = (row.spread ?? 0) > aggregate.threshold
+                  const isDivergent = row.threshold != null && (row.spread ?? 0) > row.threshold
                   return (
                     <tr key={row.modelRouteId} style={{ borderTop: "1px solid var(--border-soft)" }}>
                       <td className="py-1.5 pr-3 font-medium" style={{ color: "var(--fg)" }}>
                         {row.modelDisplay}
                       </td>
-                      {aggregate.appearances.map((a) => {
+                      {comparedApps.map((a) => {
                         const score = row.scoresByEval.get(a.evalSummaryId)
                         return (
                           <td

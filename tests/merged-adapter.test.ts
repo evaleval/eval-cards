@@ -429,6 +429,18 @@ describe("mergedSummaryToEvalSummary — EvalDetail surface", () => {
     expect(adapted.best_model).toEqual({ name: "Model A", score: 0.85 })
   })
 
+  it("carries a missing direction through as null, never as higher-is-better", () => {
+    const payload = {
+      ...mergedPayload([row({ score_canonical: 0.1 }), row({ score_canonical: 0.9 })]),
+      lower_is_better: null,
+      selected_lower_is_better: null,
+    }
+    const summary = mergedSummaryToEvalSummary(payload)
+    expect(summary.metric_config.lower_is_better).toBeNull()
+    expect(summary.leaderboard_metrics?.[0]?.lower_is_better).toBeNull()
+    expect(summary.best_model ?? null).toBeNull()
+  })
+
   it("infers 0–1 bounds when every pooled score fits the unit scale", () => {
     const adapted = mergedSummaryToEvalSummary(
       mergedPayload([

@@ -64,6 +64,7 @@ import {
   isAssistedResult,
   isHeadlineResult,
   parseJudgeCondition,
+  primaryMetricColumnKey,
 } from "@/lib/eval-processing"
 
 type Row = Record<string, any>
@@ -111,7 +112,7 @@ const EVAL_LIST_COLUMNS = `
   latest_source_name, third_party_ratio,
   missing_generation_config_count, best_model, worst_model,
   avg_score, avg_score_norm, has_card, CAST(to_json(benchmark_card) AS VARCHAR) AS benchmark_card,
-  is_aggregated, CAST(to_json(aggregate_sources) AS VARCHAR) AS aggregate_sources, CAST(to_json(tags) AS VARCHAR) AS tags,
+  CAST(to_json(tags) AS VARCHAR) AS tags,
   metrics_count, metric_names, CAST(to_json(instance_data) AS VARCHAR) AS instance_data, top_score,
   subtasks_count, is_summary_score,
   CAST(to_json(root_metrics) AS VARCHAR) AS root_metrics,
@@ -1239,7 +1240,6 @@ export async function getEvalListData(): Promise<{
     derived_tags: coerceTags(row.derived_tags),
     metric_config: parseMaybeJson(row.metric_config),
     benchmark_card: parseMaybeJson(row.benchmark_card),
-    aggregate_sources: parseMaybeJson(row.aggregate_sources),
     tags: parseMaybeJson(row.tags),
     instance_data: parseMaybeJson(row.instance_data),
     root_metrics: parseMaybeJson(row.root_metrics),
@@ -1515,7 +1515,6 @@ export async function getEvalSummaryById(evalId: string): Promise<BenchmarkEvalS
     // benchmark_card arrives JSON-encoded (the parquet schema nests a
     // JSON-typed field — see CELL_JOIN_COLUMNS / EVAL_LIST_COLUMNS).
     benchmark_card: parseMaybeJson(evalRow.benchmark_card),
-    aggregate_sources: parseMaybeJson(evalRow.aggregate_sources),
     tags: parseMaybeJson(evalRow.tags),
     instance_data: parseMaybeJson(evalRow.instance_data),
     root_metrics: parseMaybeJson(evalRow.root_metrics),
@@ -1614,23 +1613,16 @@ export async function getEvalSummaryById(evalId: string): Promise<BenchmarkEvalS
     }
   }
 
-  // Fallback for single-metric leaderboards with no precomputed matrix
-  // entry (e.g. big-bench-hard): the matrix block above only populates
+  // Fallback for leaderboards with no precomputed matrix entry (e.g.
+  // big-bench-hard): the matrix block above only populates
   // `leaderboard_rows` when a matrix exists, but consumers like the
   // embed leaderboard read exclusively from that field. Synthesize one
-  // row per `model_results` entry using the primary metric's column_key
-  // as the values key, so the data is present regardless of whether
-  // build-time precomputation ran for this eval.
+  // row per `model_results` entry. `model_results` holds the
+  // `primary_metric_id` readings, so they go under that metric's column
+  // and no other.
   const hasRows = (summary.leaderboard_rows?.length ?? 0) > 0
-  if (!hasRows && (summary.model_results?.length ?? 0) > 0) {
-    const primaryMetric = (summary.leaderboard_metrics ?? []).find(
-      (m): m is typeof m & { column_key: string } =>
-        typeof (m as { column_key?: unknown }).column_key === "string"
-        && (m as { scope?: string }).scope !== "subtask",
-    )
-    const columnKey = primaryMetric?.column_key
-      ?? (summary.leaderboard_metrics ?? [])[0]?.column_key
-      ?? "score"
+  const columnKey = primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id)
+  if (!hasRows && columnKey && (summary.model_results?.length ?? 0) > 0) {
     const lowerIsBetter = Boolean(summary.metric_config?.lower_is_better)
     summary.leaderboard_rows = summary.model_results
       // Headline rows only. Everything downstream of this field ranks or
@@ -1903,12 +1895,13 @@ export async function getMergedBenchmarkSummary(
   const selectedMetricId =
     metricId && metrics.some((m) => m.metric_id === metricId) ? metricId : preferredMetricId
   const selectedMetric = metrics.find((m) => m.metric_id === selectedMetricId)
-  const selectedLowerIsBetter =
-    selectedMetric?.lower_is_better != null
-      ? Boolean(selectedMetric.lower_is_better)
-      : selectedMetricId === preferredMetricId
-        ? Boolean(row.lower_is_better)
-        : false
+  // null = the pipeline states no direction for this metric (its sources
+  // disagree). It is carried through as null, never read as "higher".
+  const statedDirection =
+    selectedMetric?.lower_is_better ??
+    (selectedMetricId === preferredMetricId ? row.lower_is_better : null)
+  const selectedLowerIsBetter: boolean | null =
+    statedDirection == null ? null : Boolean(statedDirection)
 
   const selectedSliceId =
     grain === "slice"
@@ -1981,7 +1974,7 @@ export async function getMergedBenchmarkSummary(
   let bestResult = (parseMaybeJson(row.best_result) ?? null) as MergedBestResult | null
   // The producer picked its best result across the mismatched scales, so
   // once rows move, the best is whatever now leads the pool the page shows.
-  if (harmonized.toPercent != null) {
+  if (harmonized.toPercent != null && selectedLowerIsBetter != null) {
     const top = observations.find(
       (obs) =>
         isHeadlineResult(obs) &&
@@ -2039,7 +2032,7 @@ export async function getMergedBenchmarkSummary(
     preferred_metric_id: preferredMetricId,
     preferred_metric_display_name: asString(row.preferred_metric_display_name, preferredMetricId),
     preferred_from_registry: Boolean(row.preferred_from_registry),
-    lower_is_better: Boolean(row.lower_is_better),
+    lower_is_better: row.lower_is_better == null ? null : Boolean(row.lower_is_better),
     sources_count: asNumber(row.sources_count),
     all_sources_count: asNumber(row.all_sources_count),
     results_count: asNumber(row.results_count),

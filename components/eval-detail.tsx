@@ -1148,6 +1148,8 @@ export function EvalDetail({
       filteredResults,
       (result) => result.score,
       (result) =>
+        // No stated direction (sources disagree): nothing takes a standing.
+        lb.metric_config.lower_is_better != null &&
         isHeadlineResult(result) &&
         (includeAssistedInRanking || !isAssistedResult(result.protocol_condition)),
     )
@@ -1180,7 +1182,7 @@ export function EvalDetail({
             : `Judge model id: ${judge.judges[0]}`,
       }
     })
-  }, [filteredResults, includeAssistedInRanking, judgeDisplayName])
+  }, [filteredResults, includeAssistedInRanking, judgeDisplayName, lb.metric_config.lower_is_better])
 
   // Plotbox input: assisted runs stay out of the distribution stats and
   // the frontier cumulative-best regardless of the ranking toggle — a
@@ -1662,19 +1664,36 @@ export function EvalDetail({
   }
 
   const avgScoreLabel = formatRawScore(lb.avg_score, lb.metric_config.unit)
-  const scoreDirectionLabel = lb.metric_config.lower_is_better ? "Lower scores rank higher" : "Higher scores rank higher"
+  // `metric_config` describes the `primary_metric_id` metric only. On a page
+  // with several root metrics its direction and scale are named as that
+  // metric's, never stated for the page.
+  const primaryLeaderboardMetric = hasMultiMetricLeaderboard
+    ? (lb.leaderboard_metrics ?? []).find(
+        (m) => m.column_key === primaryMetricColumnKey(lb.leaderboard_metrics, lb.primary_metric_id),
+      )
+    : undefined
+  const primaryMetricPrefix = primaryLeaderboardMetric
+    ? `${getMetricChipLabel(primaryLeaderboardMetric)}: `
+    : ""
+  const scoreDirectionLabel = `${primaryMetricPrefix}${
+    lb.metric_config.lower_is_better == null
+      ? "Sources disagree on direction"
+      : lb.metric_config.lower_is_better
+        ? "Lower scores rank higher"
+        : "Higher scores rank higher"
+  }`
+  const scaleLabel = (cfg: { min_score?: number | null; max_score?: number | null }) =>
+    cfg.min_score == null && cfg.max_score == null
+      ? "not reported"
+      : `${cfg.min_score ?? "not reported"} – ${cfg.max_score ?? "not reported"}`
   const leaderboardTitle = isResearchView ? "Leaderboard" : "Reporting Comparison"
   const sourceDatasetLabel = summary.source_data?.hf_repo ?? summary.source_data?.dataset_name ?? "Summary source"
   const instanceDataLabel = summary.instance_data?.available
     ? `${summary.instance_data.url_count.toLocaleString()} linked URL${summary.instance_data.url_count === 1 ? "" : "s"}`
     : "Not linked"
   const leaderboardDescription = isResearchView
-    ? lb.is_aggregated
-      ? "Models ranked by average raw score across the composite's component benchmarks."
-      : "Models ranked by raw score for this benchmark."
-    : lb.is_aggregated
-      ? "Averaged model results across the composite's component benchmarks, with drill-down to each component score."
-      : "Model results with benchmark context, upstream dataset detail, and optional instance-data links."
+    ? "Models ranked by raw score for this benchmark."
+    : "Model results with benchmark context, upstream dataset detail, and optional instance-data links."
   const reportingCompleteness = summary.evalcards?.annotations?.reporting_completeness
   const documentationPopulatedCount = reportingCompleteness
     ? getCompletenessPopulatedCount(reportingCompleteness)
@@ -1846,7 +1865,14 @@ export function EvalDetail({
           )}
           <span>{lb.metric_config.score_type}</span>
           <span style={{ color: "var(--fg-subtle)" }}>·</span>
-          <span>{lb.metric_config.lower_is_better ? "Lower is better ↓" : "Higher is better ↑"}</span>
+          <span>
+            {primaryMetricPrefix}
+            {lb.metric_config.lower_is_better == null
+              ? "Sources disagree on direction"
+              : lb.metric_config.lower_is_better
+                ? "Lower is better ↓"
+                : "Higher is better ↑"}
+          </span>
           {lb.derived_tags && lb.derived_tags.length > 0 && (
             <>
               <span style={{ color: "var(--fg-subtle)" }}>·</span>
@@ -2001,11 +2027,7 @@ export function EvalDetail({
               </div>
               <dl className="ec-datalist">
                 <dt>Composite</dt>
-                <dd>
-                  {summary.is_aggregated
-                    ? summary.aggregate_sources?.map((source) => source.composite_benchmark_name).join(", ") || "Multiple composites"
-                    : summary.composite_benchmark_name}
-                </dd>
+                <dd>{summary.composite_benchmark_name}</dd>
                 <dt>{isResearchView ? "Benchmark ID" : "What this covers"}</dt>
                 <dd className="break-words">
                   {isResearchView
@@ -2015,7 +2037,7 @@ export function EvalDetail({
                 <dt>{isResearchView ? "Score scale" : "How to read scores"}</dt>
                 <dd>
                   {isResearchView
-                    ? `${summary.metric_config.min_score ?? 0} – ${summary.metric_config.max_score ?? 1}`
+                    ? `${primaryMetricPrefix}${scaleLabel(summary.metric_config)}`
                     : scoreDirectionLabel}
                 </dd>
                 <dt>Models</dt>
@@ -2152,10 +2174,14 @@ export function EvalDetail({
                   ? `${lb.models_count} models`
                   : `${rankedRowCount} of ${lb.models_count}`}
               {" · "}
-              {lb.metric_config.lower_is_better ? "lower is better ↓" : "higher is better ↑"}
+              {lb.metric_config.lower_is_better == null
+                ? "sources disagree on direction"
+                : lb.metric_config.lower_is_better
+                  ? "lower is better ↓"
+                  : "higher is better ↑"}
               {isResearchView && (
                 <>
-                  {" · "}scale {lb.metric_config.min_score ?? 0}–{lb.metric_config.max_score ?? 1}
+                  {" · "}scale {scaleLabel(lb.metric_config)}
                 </>
               )}
             </span>
@@ -3497,7 +3523,7 @@ function MultiMetricLeaderboard({
   // is what the hero, the metric spec block and every other surface here
   // summarise. Sorting on whichever measure comes first instead would open a
   // page like OpenEval HarmBench on an attack-success-rate ranking under a
-  // refusal-score heading. Falls back to the first root metric.
+  // refusal-score heading.
   const primaryMetricKey = useMemo(
     () => primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id),
     [summary.leaderboard_metrics, summary.primary_metric_id],

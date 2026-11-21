@@ -126,6 +126,27 @@ export function onOneScale(
   }
 }
 
+function trimmed(value: number, digits: number): string {
+  return value.toFixed(digits).replace(/\.?0+$/, "")
+}
+
+/**
+ * One reading as text, on the unit it states: percent as reported with
+ * "%", proportion ×100 with "%" (the one conversion `averageable` allows),
+ * any other unit as reported followed by that unit, and no unit as
+ * reported. Never rescaled by its magnitude or by a guess at what a unit
+ * name means.
+ */
+export function formatReading(score: number, unit: string | null | undefined): string {
+  const percent = percentUnit(unit)
+  if (percent != null) {
+    const value = scaleOnto(score, percent, true)
+    return `${trimmed(value, Math.abs(value) < 10 ? 2 : 1)}%`
+  }
+  const u = (unit ?? "").trim()
+  return u ? `${trimmed(score, 3)} ${u}` : trimmed(score, 3)
+}
+
 /** The mean of averageable readings on the scale `onOneScale` puts them on;
  *  null when they are not averageable. */
 export function averageReadings(

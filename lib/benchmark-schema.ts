@@ -151,7 +151,7 @@ export interface EvaluationResult {
 
 export interface MetricConfig {
   evaluation_description: string
-  lower_is_better: boolean
+  lower_is_better: boolean | null
   score_type: 'continuous' | 'discrete' | 'binary'
   min_score?: number
   max_score?: number

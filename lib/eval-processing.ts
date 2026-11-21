@@ -213,22 +213,20 @@ export function judgeCellSummary(
 }
 
 /**
- * The matrix column the page ranks on: the eval's `primary_metric_id`, which
- * is the metric every other surface on the page summarises. A payload that
- * declares no primary metric, or names one no column carries, falls back to
- * the first root metric and then to the first column.
+ * The matrix column of the eval's `primary_metric_id`, the metric every other
+ * surface on the page summarises. Undefined when the payload declares no
+ * primary metric or no root column carries it: no other column stands in.
  */
 export function primaryMetricColumnKey(
   metrics: Array<{ column_key: string; metric_id?: string; scope?: string }> | undefined,
   primaryMetricId: string | null | undefined,
 ): string | undefined {
-  const all = metrics ?? []
-  const roots = all.filter((metric) => metric.scope !== "subtask")
   const primary = primaryMetricId?.trim()
-  const declared = primary
-    ? roots.find((metric) => metric.column_key === primary || metric.metric_id === primary)
-    : undefined
-  return declared?.column_key ?? roots[0]?.column_key ?? all[0]?.column_key
+  if (!primary) return undefined
+  return (metrics ?? []).find(
+    (metric) =>
+      metric.scope !== "subtask" && (metric.column_key === primary || metric.metric_id === primary),
+  )?.column_key
 }
 
 /** A row the backend did not pick as its model's headline reading (a losing
@@ -352,41 +350,6 @@ export function orderGroupsByScore<T>(
     : [...groups].reverse().flat()
 }
 
-/**
- * Composite comparison view: one score per (model, sub-eval) across a
- * suite's child evaluations, for the models x sub-evals matrix.
- *
- * Headline rows only. The cell is written once per matching row, so
- * without the filter a later judge panel or protocol arm overwrites the
- * model's summary reading — and that overwritten number is then averaged
- * across the suite and ranked as the model's standing.
- */
-export function compositeScoresByModel(
-  subSummaries: ReadonlyArray<{
-    evaluation_name: string
-    model_results: ModelResultForBenchmark[]
-  }>,
-): Map<string, { name: string; developer: string; scores: Map<string, number | null> }> {
-  const modelScores = new Map<
-    string,
-    { name: string; developer: string; scores: Map<string, number | null> }
-  >()
-  for (const sub of subSummaries) {
-    for (const result of sub.model_results) {
-      if (!isHeadlineResult(result)) continue
-      const id = result.model_info.id
-      const existing = modelScores.get(id) ?? {
-        name: result.model_info.name,
-        developer: result.model_info.developer ?? "",
-        scores: new Map<string, number | null>(),
-      }
-      existing.scores.set(sub.evaluation_name, result.score)
-      modelScores.set(id, existing)
-    }
-  }
-  return modelScores
-}
-
 export interface ModelResultForBenchmark {
   model_info: ModelInfo
   model_route_id?: string
@@ -505,14 +468,6 @@ export interface BenchmarkEvalSummary extends SignalSummaries {
   benchmark_card?: BenchmarkCard
   /** Card file path relative to the Auto-BenchmarkCards dataset root. */
   benchmark_card_source_path?: string | null
-  is_aggregated?: boolean
-  aggregate_sources?: Array<{
-    evaluation_id: string
-    composite_benchmark_key: string
-    composite_benchmark_name: string
-    models_count: number
-    avg_score_norm: number | null
-  }>
   /** Tags from the pipeline (domains, languages, tasks) */
   tags?: { domains: string[]; languages: string[]; tasks: string[] }
   /** Number of distinct metrics for this benchmark */
@@ -628,7 +583,7 @@ export interface BenchmarkLeaderboardMetric {
   metric_name: string
   display_name: string
   canonical_display_name?: string
-  lower_is_better: boolean
+  lower_is_better: boolean | null
   unit?: string
   scope: "root" | "subtask"
   subtask_key?: string
@@ -783,7 +738,8 @@ export interface MergedBenchmarkSummary {
   preferred_metric_id: string
   preferred_metric_display_name: string
   preferred_from_registry: boolean
-  lower_is_better: boolean
+  /** null when the pipeline states no direction (sources disagree). */
+  lower_is_better: boolean | null
   /** Counts at default-metric grain (spec P5). */
   sources_count: number
   all_sources_count: number
@@ -796,7 +752,7 @@ export interface MergedBenchmarkSummary {
   slices: MergedSliceOption[] | null
   /** Metric actually queried for `results` (defaults to preferred). */
   selected_metric_id: string
-  selected_lower_is_better: boolean
+  selected_lower_is_better: boolean | null
   /** For grain='slice': the slice actually queried (defaults to the first). */
   selected_slice_id: string | null
   results: MergedObservationRow[]

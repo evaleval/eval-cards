@@ -36,6 +36,7 @@ async function writeSyntheticStageJSnapshot(
     includeBenchmarkCardSources?: boolean
     dropRawModelIds?: boolean
     leadMetric?: "derived" | "column"
+    leadingNonPrimaryMetric?: boolean
   } = {},
 ) {
   // includeMergedView=false emulates a pre-merged-view snapshot: no
@@ -265,7 +266,19 @@ async function writeSyntheticStageJSnapshot(
         struct_pack(available := false, url_count := 0::BIGINT, sample_urls := []::VARCHAR[], models_with_loaded_instances := 0) AS instance_data,
         1::INTEGER AS metrics_count,
         ['Accuracy']::VARCHAR[] AS metric_names,
-        [struct_pack(
+        [${options.leadingNonPrimaryMetric ? `struct_pack(
+          column_key := 'root:error-rate',
+          metric_summary_id := 'mmlu%3Aerror-rate',
+          metric_id := 'error-rate',
+          metric_name := 'error-rate',
+          display_name := 'Error rate',
+          canonical_display_name := 'Error rate',
+          lower_is_better := true,
+          unit := 'proportion',
+          scope := 'root',
+          subtask_key := NULL::VARCHAR,
+          subtask_name := NULL::VARCHAR
+        ), ` : ""}struct_pack(
           column_key := 'root:accuracy',
           metric_summary_id := 'mmlu%3Aaccuracy',
           metric_id := 'accuracy',
@@ -1245,6 +1258,7 @@ async function withSnapshot(
     includeBenchmarkCardSources?: boolean
     dropRawModelIds?: boolean
     leadMetric?: "derived" | "column"
+    leadingNonPrimaryMetric?: boolean
   },
   run: (
     dataBackend: typeof import("../lib/data-backend"),
@@ -1832,7 +1846,16 @@ describe("judge conditions and headline rows", () => {
     })
   })
 
-  it("carries score_published and the judge name map onto merged rows", async () => {
+  it("puts the primary metric's readings under its own column when it is not the first", async () => {
+    await withSnapshot({ includeJudgeColumns: true, leadingNonPrimaryMetric: true }, async (dataBackend) => {
+      const summary = await dataBackend.getEvalSummaryById("mmlu")
+      expect(summary!.leaderboard_metrics![0].column_key).toBe("root:error-rate")
+      // Accuracy readings, never filed under the lower-is-better error rate.
+      expect(summary!.leaderboard_rows![0].values).toEqual({ "root:accuracy": 0.8 })
+    })
+  })
+
+    it("carries score_published and the judge name map onto merged rows", async () => {
     await withSnapshot({ includeJudgeColumns: true }, async (dataBackend) => {
       const merged = await dataBackend.getMergedBenchmarkSummary("mmlu")
       expect(merged!.results.every((r) => typeof r.score_published === "number")).toBe(true)

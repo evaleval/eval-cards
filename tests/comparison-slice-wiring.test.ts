@@ -220,23 +220,4 @@ describe("eval pages request the signals strip's siblings", () => {
     expect(received.evalDetail.length).toBeGreaterThan(0)
     expect(received.evalDetail.every((props) => props.comparisonIndex == null)).toBe(true)
   })
-
-  it("composite eval page requests nothing", async () => {
-    const composite = {
-      ...wmdpSource,
-      is_aggregated: true,
-      aggregate_sources: [
-        { evaluation_id: "llm-stats%2Fwmdp" },
-        { evaluation_id: "benchpress%2Fwmdp" },
-      ],
-    } as unknown as BenchmarkEvalSummary
-    client.evalSummaries = { "*": wmdpSource, "llm-stats%2Fwmdp%2Fall": composite }
-    nav.params = { id: ["llm-stats", "wmdp", "all"] }
-    const html = await mount((await import("@/app/evals/[...id]/page")).default)
-    expect(html).toContain(composite.evaluation_name)
-    expect(html).not.toContain("not found")
-    expect(fetchComparisonIndexForEvals).not.toHaveBeenCalled()
-    expect(fetchComparisonIndexForModel).not.toHaveBeenCalled()
-    expect(received.evalDetail).toEqual([])
-  })
 })

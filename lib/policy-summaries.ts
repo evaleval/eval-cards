@@ -12,9 +12,7 @@
  *   - "Not specified" sentinels collapse silently (caller decides whether
  *     to render the row at all).
  */
-import type { ModelSummaryCore, BenchmarkEvaluation, MetricConfig } from "@/lib/benchmark-schema"
-import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
-import type { ProvenanceSummary, ReproducibilitySummary, ComparabilitySummary } from "@/lib/backend-artifacts"
+import type { ModelSummaryCore, BenchmarkEvaluation } from "@/lib/benchmark-schema"
 import { formatTagLabel } from "@/lib/benchmark-tags"
 
 // ---------------------------------------------------------------------------
@@ -281,120 +279,6 @@ export function buildModelPolicySummary({
     comparabilitySentence,
     verificationLabel,
   }
-}
-
-// ---------------------------------------------------------------------------
-// EVAL view — produces single-sentence narrative for each of the four
-// interpretive signals (used by the policy-mode panel renderers).
-// ---------------------------------------------------------------------------
-
-export interface EvalPolicySignals {
-  metricSentence: string
-  reproducibilitySentence: string | null
-  provenanceSentence: string | null
-  comparabilitySentence: string | null
-}
-
-export function buildEvalPolicySignals(summary: BenchmarkEvalSummary): EvalPolicySignals {
-  const cfg = summary.metric_config
-  const metricSentence = formatMetricSentence(cfg)
-
-  const reproducibilitySentence = formatReproducibilitySentence(summary.reproducibility_summary)
-  const provenanceSentence = formatProvenanceSentence(summary)
-  const comparabilitySentence = formatComparabilitySentence(summary.comparability_summary)
-
-  return {
-    metricSentence,
-    reproducibilitySentence,
-    provenanceSentence,
-    comparabilitySentence,
-  }
-}
-
-function formatMetricSentence(cfg: MetricConfig): string {
-  const lower = cfg.lower_is_better
-  const min = cfg.min_score
-  const max = cfg.max_score
-
-  const direction = lower
-    ? "Lower scores indicate better performance"
-    : "Higher scores indicate better performance"
-
-  // Only mention the scale when both ends are documented and look like a
-  // tidy interval. Otherwise the sentence collapses to direction-only.
-  if (typeof min === "number" && typeof max === "number" && max > min) {
-    if (min === 0 && max === 1) return `${direction}, on a 0 to 1 scale.`
-    if (min === 0 && max === 100) return `${direction}, on a 0 to 100 scale.`
-    return `${direction}, on a ${min} to ${max} scale.`
-  }
-  return `${direction}.`
-}
-
-function formatReproducibilitySentence(repro?: ReproducibilitySummary): string | null {
-  if (!repro || repro.results_total === 0) return null
-  const total = repro.results_total
-  const gap = repro.has_reproducibility_gap_count
-  if (gap === 0) {
-    return "Every reported score discloses the setup items that apply to it."
-  }
-  if (gap === total) {
-    return "No reported score discloses every setup item that applies to it. Scores cannot be independently re-run as reported."
-  }
-  const documented = total - gap
-  const pct = Math.round((documented / total) * 100)
-  return `${pct}% of reported scores (${documented} of ${total}) disclose every setup item that applies to them.`
-}
-
-function formatProvenanceSentence(summary: BenchmarkEvalSummary): string | null {
-  const prov: ProvenanceSummary | undefined = summary.provenance_summary
-  if (!prov) {
-    // Fall back to coarser ratio when the summary isn't attached.
-    if (summary.third_party_ratio === 0) {
-      return "These scores were reported only by the model developers themselves."
-    }
-    if (summary.third_party_ratio === 1) {
-      return "These scores were reported by independent third parties, not the model developers."
-    }
-    return null
-  }
-  const total = prov.total_groups
-  if (total === 0) return null
-  const firstPartyOnly = prov.first_party_only_groups
-  const multi = prov.multi_source_groups
-  if (firstPartyOnly === total) {
-    return "Every reported score on this benchmark comes only from the model's own developer; no independent third-party numbers are available."
-  }
-  if (firstPartyOnly === 0 && multi === 0) {
-    return "All reported scores come from independent third parties rather than the model developers."
-  }
-  if (multi > 0) {
-    const pctMulti = Math.round((multi / total) * 100)
-    return `${pctMulti}% of reported scores have been corroborated by more than one reporting organization.`
-  }
-  return null
-}
-
-function formatComparabilitySentence(comp?: ComparabilitySummary): string | null {
-  if (!comp || comp.total_groups === 0) return null
-  const variant = comp.variant_divergent_count
-  const crossParty = comp.cross_party_divergent_count
-  const noCrossPartyChecks = comp.groups_with_cross_party_check === 0
-  if (variant === 0 && crossParty === 0 && !noCrossPartyChecks) {
-    return "Where multiple reports exist, the scores agree closely; direct comparison across reports is reasonable."
-  }
-  if (variant > 0 && crossParty > 0) {
-    return "These scores have been reported under different setups and by different organizations, which may explain some of the variation seen across reports."
-  }
-  if (variant > 0) {
-    return "These scores have been reported under different evaluation setups, which may explain some of the variation across reports."
-  }
-  if (crossParty > 0) {
-    return "Different organizations have reported notably different numbers for the same model on this benchmark."
-  }
-  if (noCrossPartyChecks) {
-    return "No independent third-party reports are available to cross-check the developer's numbers."
-  }
-  return null
 }
 
 // ---------------------------------------------------------------------------

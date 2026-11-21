@@ -8,21 +8,10 @@ import { AudienceModeProvider } from "@/components/audience-mode-provider"
 import { AutoBenchmarkCardsInfo } from "@/components/auto-benchmarkcards-info"
 import { EvalDetail } from "@/components/eval-detail"
 import { PolicyOverview } from "@/components/policy-overview"
-import EvalDetailPage from "@/app/evals/[...id]/page"
 import type { BenchmarkCard } from "@/lib/benchmark-schema"
 import type { BenchmarkEvalSummary } from "@/lib/eval-processing"
 
-const routeParams = vi.hoisted(() => ({ id: ["source", "aa-lcr"] }))
-const fetchEvalSummary = vi.hoisted(() => vi.fn())
-vi.mock("next/navigation", async () => ({
-  ...await import("./next-navigation-stub"),
-  useParams: () => routeParams,
-}))
-vi.mock("@/lib/dashboard-data-client", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@/lib/dashboard-data-client")>(),
-  fetchEvalSummary,
-  fetchEvalHierarchy: async () => null,
-}))
+vi.mock("next/navigation", async () => await import("./next-navigation-stub"))
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -222,27 +211,4 @@ describe("Auto-BenchmarkCards feedback", () => {
     }
   })
 
-  it("links composite lede and At a glance metadata to the composite card", async () => {
-    window.localStorage.setItem("eval-cards-audience-mode", "policy")
-    const composite = {
-      ...summary(card, "cards/composite.json"),
-      is_aggregated: true,
-      aggregate_sources: [
-        { evaluation_id: "source%2Fsub-a" },
-        { evaluation_id: "source%2Fsub-b" },
-      ],
-    }
-    fetchEvalSummary.mockImplementation(async (id) =>
-      id === "source%2Faa-lcr" ? composite : summary(card, "cards/component.json")
-    )
-    await render(createElement(EvalDetailPage))
-    const triggers = [...container.querySelectorAll<HTMLButtonElement>(TRIGGER)]
-    expect(triggers).toHaveLength(2)
-    for (const trigger of triggers) {
-      await click(trigger)
-      expect(document.querySelector<HTMLAnchorElement>(`${POPOVER} a`)?.href)
-        .toBe(`${DATASET_URL}/blob/main/cards/composite.json`)
-      await escape()
-    }
-  })
 })
