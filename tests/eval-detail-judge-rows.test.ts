@@ -186,7 +186,7 @@ describe("EvalDetail leaderboard rows — judge and protocol readings", () => {
     expect(html).toContain("1 assisted run also listed")
     // The judge reading is not a run of the model, so it stays its own
     // row rather than folding into Model A's number.
-    expect(html).toContain("Another judge&#x27;s reading of the same model — shown, not ranked")
+    expect(html).toContain("Another judge&#x27;s report of the same model — shown, not ranked")
 
     // Because the backend already withheld the rank, the control cannot
     // put these rows back into the standings; it governs whether they are

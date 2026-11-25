@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
 import { type ScaffoldContextPayload } from "@/lib/collections"
 
@@ -38,6 +38,10 @@ interface ScoreDistributionProps {
   series?: ScoreSeries[]
   /** Initial selected key when multi-series. Defaults to first. */
   initialKey?: string
+  /** Controlled active series key when synchronized with a parent leaderboard. */
+  activeKey?: string
+  /** Fired whenever the user switches series inside the distribution header. */
+  onActiveKeyChange?: (key: string) => void
   /** Compact variant — shorter, used for matrix per-column distributions. */
   compact?: boolean
   /** Initial view when the active series supports both modes. Defaults
@@ -158,6 +162,8 @@ export function ScoreDistribution({
   lowerIsBetter,
   series,
   initialKey,
+  activeKey: controlledActiveKey,
+  onActiveKeyChange,
   compact = false,
   defaultView,
   showViewToggle = true,
@@ -174,12 +180,39 @@ export function ScoreDistribution({
     return []
   }, [series, values, label, unit, lowerIsBetter])
 
-  const [activeKey, setActiveKey] = useState<string>(
-    () => initialKey ?? series?.[0]?.key ?? "__single",
+  const [uncontrolledKey, setUncontrolledKey] = useState<string>(
+    () => initialKey ?? seriesList[0]?.key ?? "__single",
   )
+  const prevInitialKeyRef = useRef<string | undefined>(initialKey)
+  const prevControlledKeyRef = useRef<string | undefined>(controlledActiveKey)
+
+  useEffect(() => {
+    const initialChanged = prevInitialKeyRef.current !== initialKey
+    const leftControlled =
+      prevControlledKeyRef.current !== undefined && controlledActiveKey === undefined
+    prevInitialKeyRef.current = initialKey
+    prevControlledKeyRef.current = controlledActiveKey
+
+    if (controlledActiveKey !== undefined) return
+
+    const fallbackKey = initialKey ?? seriesList[0]?.key ?? "__single"
+    setUncontrolledKey((prev) => {
+      if (initialChanged || leftControlled) return fallbackKey
+      if (seriesList.some((s) => s.key === prev)) return prev
+      return fallbackKey
+    })
+  }, [controlledActiveKey, initialKey, seriesList])
+
+  const effectiveActiveKey = controlledActiveKey ?? uncontrolledKey
+  const selectSeriesKey = (nextKey: string) => {
+    if (controlledActiveKey === undefined) {
+      setUncontrolledKey(nextKey)
+    }
+    onActiveKeyChange?.(nextKey)
+  }
 
   const active =
-    seriesList.find((s) => s.key === activeKey) ?? seriesList[0]
+    seriesList.find((s) => s.key === effectiveActiveKey) ?? seriesList[0]
 
   const stats = useMemo(() => (active ? computeStats(active.values) : null), [active])
 
@@ -425,41 +458,55 @@ export function ScoreDistribution({
             </div>
           </div>
 
-          {/* Row 2 — Metric chips. Only shown when there's more than
-              one series; otherwise the active label gets a quiet inline
-              caption next to the view kicker. */}
+          {/* Row 2 — Metric chips (<= 4 series) or compact select (>= 5 series)
+              so benchmarks with dozens of measures stay clean. */}
           {showPicker ? (
-            <div className="flex items-baseline gap-2 flex-wrap">
+            <div className="flex items-center gap-2.5 flex-wrap">
               <span
                 className="font-mono uppercase shrink-0"
                 style={{ fontSize: 10, letterSpacing: "0.14em", color: "var(--fg-subtle)" }}
               >
                 Metric
               </span>
-              <div className="flex flex-wrap items-center gap-1.5">
-                {seriesList.map((s) => {
-                  const on = s.key === active.key
-                  return (
-                    <button
-                      key={s.key}
-                      type="button"
-                      className={`ec-pill${on ? " on" : ""}`}
-                      onClick={() => setActiveKey(s.key)}
-                      title={s.caption ? `${s.label} · ${s.caption}` : s.label}
-                    >
-                      {s.label}
-                      {s.caption ? (
-                        <span
-                          className="ml-1.5"
-                          style={{ color: on ? undefined : "var(--fg-subtle)" }}
-                        >
-                          · {s.caption}
-                        </span>
-                      ) : null}
-                    </button>
-                  )
-                })}
-              </div>
+              {seriesList.length >= 5 ? (
+                <select
+                  aria-label="Metric"
+                  className="ec-select max-w-full"
+                  value={active.key}
+                  onChange={(e) => selectSeriesKey(e.target.value)}
+                >
+                  {seriesList.map((s) => (
+                    <option key={s.key} value={s.key}>
+                      {s.caption ? `${s.label} (${s.caption})` : s.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {seriesList.map((s) => {
+                    const on = s.key === active.key
+                    return (
+                      <button
+                        key={s.key}
+                        type="button"
+                        className={`ec-pill${on ? " on" : ""}`}
+                        onClick={() => selectSeriesKey(s.key)}
+                        title={s.caption ? `${s.label} · ${s.caption}` : s.label}
+                      >
+                        {s.label}
+                        {s.caption ? (
+                          <span
+                            className="ml-1.5"
+                            style={{ color: on ? undefined : "var(--fg-subtle)" }}
+                          >
+                            · {s.caption}
+                          </span>
+                        ) : null}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
             </div>
           ) : (
             <div

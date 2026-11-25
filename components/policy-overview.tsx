@@ -11,6 +11,13 @@ import { KnownIssuesPanel } from "@/components/known-issues-panel"
 
 interface PolicyOverviewProps {
   summary: BenchmarkEvalSummary
+  /** Active selected metric on multi-metric pages; keeps At a glance aligned with the leaderboard. */
+  activeMetric?: {
+    label: string
+    lowerIsBetter: boolean | null
+  }
+  /** Models reporting the active metric when filtered on a multi-metric page. */
+  modelsCount?: number
 }
 
 const SUMMARY_PREVIEW_CHARS = 280
@@ -49,7 +56,8 @@ function normalizeId(value: string | undefined | null): string {
     .replace(/[\s_\-/]+/g, "")
 }
 
-export function PolicyOverview({ summary }: PolicyOverviewProps) {
+export function PolicyOverview({ summary, activeMetric, modelsCount }: PolicyOverviewProps) {
+  const displayedModelsCount = modelsCount ?? summary.models_count
   const card = summary.benchmark_card
 
   // Defensive check: pipelines older than the "ancestor card leak" fix
@@ -192,13 +200,20 @@ export function PolicyOverview({ summary }: PolicyOverviewProps) {
   )
 
   // `metric_config` is the `primary_metric_id` metric's. On a page with
-  // several root metrics its direction is stated as that metric's only.
+  // several root metrics its direction is stated as the active metric's own.
   const rootMetrics = (summary.leaderboard_metrics ?? []).filter((m) => m.scope !== "subtask")
   const primaryColumn = primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id)
   const primaryMetric = rootMetrics.length > 1 ? rootMetrics.find((m) => m.column_key === primaryColumn) : undefined
-  const primaryMetricName = primaryMetric ? getMetricChipLabel(primaryMetric) : null
-  const directionLabel = `${primaryMetricName ? `${primaryMetricName}: ` : ""}${
-    summary.metric_config.lower_is_better ? "Lower scores are better" : "Higher scores are better"
+  const effectiveMetricName = activeMetric ? activeMetric.label : (primaryMetric ? getMetricChipLabel(primaryMetric) : null)
+  const effectiveLowerIsBetter = activeMetric ? activeMetric.lowerIsBetter : summary.metric_config.lower_is_better
+  const directionLabel = `${effectiveMetricName ? `${effectiveMetricName}: ` : ""}${
+    effectiveLowerIsBetter == null
+      ? summary.merged_view
+        ? "Sources disagree on direction"
+        : "Direction not reported"
+      : effectiveLowerIsBetter
+        ? "Lower scores are better"
+        : "Higher scores are better"
   }`
 
   // Policy-note triple: What it measures · Main caveat · Intended for.
@@ -303,9 +318,11 @@ export function PolicyOverview({ summary }: PolicyOverviewProps) {
         <dd style={{ color: "var(--fg)", lineHeight: 1.6, margin: 0 }}>
           <SignalTooltip
             content={
-              `${primaryMetricName ? `On ${primaryMetricName}` : "On this benchmark"}, a ${
-                summary.metric_config.lower_is_better ? "lower" : "higher"
-              } number means the model did better.`
+              effectiveLowerIsBetter == null
+                ? `${effectiveMetricName ? `On ${effectiveMetricName}` : "On this benchmark"}, sources disagree on whether higher or lower scores are better.`
+                : `${effectiveMetricName ? `On ${effectiveMetricName}` : "On this benchmark"}, a ${
+                    effectiveLowerIsBetter ? "lower" : "higher"
+                  } number means the model did better.`
             }
           >
             <span
@@ -316,7 +333,7 @@ export function PolicyOverview({ summary }: PolicyOverviewProps) {
             </span>
           </SignalTooltip>{" "}
           <span style={{ color: "var(--fg-muted)" }}>
-            Compared across {summary.models_count} model{summary.models_count === 1 ? "" : "s"}.
+            Compared across {displayedModelsCount} model{displayedModelsCount === 1 ? "" : "s"}.
           </span>
         </dd>
       </dl>

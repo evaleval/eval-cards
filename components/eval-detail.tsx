@@ -3,7 +3,7 @@
 import { useAudienceMode } from "@/components/audience-mode-provider"
 import { SplitBreakdown } from "@/components/split-breakdown"
 import { AutoBenchmarkCardsInfo } from "@/components/auto-benchmarkcards-info"
-import { Fragment, useEffect, useMemo, useState } from "react"
+import { Fragment, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { BenchmarkSignalsStrip } from "@/components/signals/benchmark-signals-strip"
 import { SignalsRowBadges } from "@/components/signals/signals-row-badges"
@@ -111,6 +111,15 @@ import { ComparabilityPanel } from "@/components/signals/comparability-panel"
 import { FlagScoreButton } from "@/components/flag-score-button"
 import { OpennessFilter } from "@/components/openness-filter"
 import {
+  MetricFilterBar,
+  type MetricFilterBarProps,
+  type MetricFilterItem,
+} from "@/components/metric-filter-control"
+import {
+  buildEvalMetricFilterOptions,
+  computeMetricStandings,
+} from "@/lib/metric-selection"
+import {
   MODEL_OPENNESS_ORDER,
   matchesOpenness,
   modelOpenness,
@@ -172,6 +181,13 @@ interface EvalDetailProps {
   /** Merged pages only: notes about how rows were put on one scale,
    *  shown directly above the leaderboard table. */
   leaderboardNotes?: string[]
+  /** Selected metric id / column key from `?metric=` on per-source pages. */
+  selectedMetricId?: string | null
+  /** Syncs metric selection back to the URL query string. */
+  onSelectMetric?: (nextMetricId: string | null) => void
+  /** Merged benchmark pages pass their server-side metric options here so they
+   *  share the exact same Leaderboard MetricFilterBar slot as per-source pages. */
+  metricBarOverride?: MetricFilterBarProps
 }
 
 /** One model's folded leaderboard row: the run it reports, and every
@@ -795,6 +811,89 @@ function getSetupLabel(modelResult: ModelResultForBenchmark): string {
   return parts.join(" ")
 }
 
+function findDuplicateMeanColumnKeys(
+  leaderboardMetrics: LeaderboardMetric[],
+  leaderboardRows: LeaderboardMatrixRow[],
+  primaryMetricId?: string | null,
+): Set<string> {
+  const dupes = new Set<string>()
+  const primaryTrimmed = primaryMetricId?.trim()
+  const meanMetrics = leaderboardMetrics.filter(
+    (m) =>
+      m.scope !== "subtask" &&
+      /\.mean$/i.test(m.column_key) &&
+      m.column_key !== primaryTrimmed &&
+      m.metric_id !== primaryTrimmed,
+  )
+  if (meanMetrics.length === 0) return dupes
+  const others = leaderboardMetrics.filter((m) => m.scope !== "subtask")
+  const valuesEqual = (a: string, b: string) => {
+    let comparable = 0
+    for (const row of leaderboardRows) {
+      const va = row.values[a]
+      const vb = row.values[b]
+      const aNum = isNumericScore(va)
+      const bNum = isNumericScore(vb)
+      if (aNum !== bNum) return false
+      if (aNum && bNum && Math.abs(va - vb) > 1e-6) return false
+      if (aNum && bNum) comparable += 1
+    }
+    return comparable > 0
+  }
+  for (const mean of meanMetrics) {
+    const twin = others.find(
+      (o) => o.column_key !== mean.column_key && valuesEqual(mean.column_key, o.column_key),
+    )
+    if (twin) dupes.add(mean.column_key)
+  }
+  return dupes
+}
+
+function formatAggregateBadge(valueAggregation: string | null | undefined, count: number): string {
+  if (valueAggregation === "median") return `Median of ${count}`
+  if (valueAggregation === "weighted_mean") return `Weighted mean of ${count}`
+  if (valueAggregation === "mean") return `Mean of ${count}`
+  return `${count} reports`
+}
+
+function formatAggregateHeading(valueAggregation: string | null | undefined, count: number): string {
+  if (valueAggregation === "median") return `Median across ${count} reports`
+  if (valueAggregation === "weighted_mean") return `Weighted mean across ${count} parts`
+  if (valueAggregation === "mean") return `Mean across ${count} parts`
+  return `Breakdown across ${count} reports`
+}
+
+function formatAggregateComponentLabel(
+  component: NonNullable<ModelResultForBenchmark["aggregate_components"]>[number],
+  valueAggregation: string | null | undefined,
+): string {
+  const evalId = component.evaluation_id?.trim() ?? ""
+  const isSuiteParts = valueAggregation === "mean" || valueAggregation === "weighted_mean"
+  if (isSuiteParts && evalId) {
+    const tail = evalId.includes("%2F")
+      ? decodeURIComponent(evalId.split("%2F").slice(1).join("%2F"))
+      : evalId.includes("/")
+        ? evalId.split("/").slice(1).join("/")
+        : evalId
+    if (tail) return humanizeEvaluationId(tail)
+  }
+  if (evalId && evalId.includes("/")) {
+    // Fact-level median components carry `suite/model_variant_id/timestamp`.
+    // Surface the model variant segment so readers can see which runs pooled.
+    const parts = evalId.split("/").filter(Boolean)
+    if (parts.length >= 2) {
+      const candidate = parts.length >= 3 ? parts[1] : parts[parts.length - 1]
+      if (candidate) return candidate.replace(/^[^_]+_/, "")
+    }
+  }
+  return (
+    component.composite_display_name?.trim() ||
+    component.composite_benchmark_name?.trim() ||
+    evalId ||
+    "Report"
+  )
+}
+
 export function EvalDetail({
   summary,
   hierarchyLocation,
@@ -807,6 +906,9 @@ export function EvalDetail({
   protocolPointsHref,
   leaderboardNotes,
   crossSourceContextLoader,
+  selectedMetricId,
+  onSelectMetric,
+  metricBarOverride,
 }: EvalDetailProps) {
   const { mode } = useAudienceMode()
   const isResearchView = mode === "research"
@@ -842,11 +944,165 @@ export function EvalDetail({
   // here makes the matrix mix metrics and splits in confusing ways. Those
   // evals fall into the single-metric branch where a slice picker drives the
   // score column instead.
-  const rootMetricCount = (lb.leaderboard_metrics ?? []).filter(
-    (m) => m.scope !== "subtask",
-  ).length
+  const duplicateMeanColumnKeys = useMemo(
+    () =>
+      findDuplicateMeanColumnKeys(
+        lb.leaderboard_metrics ?? [],
+        lb.leaderboard_rows ?? [],
+        lb.primary_metric_id,
+      ),
+    [lb.leaderboard_metrics, lb.leaderboard_rows, lb.primary_metric_id],
+  )
+  const rootMetrics = useMemo(
+    () =>
+      (lb.leaderboard_metrics ?? []).filter(
+        (m) => m.scope !== "subtask" && !duplicateMeanColumnKeys.has(m.column_key),
+      ),
+    [duplicateMeanColumnKeys, lb.leaderboard_metrics],
+  )
+  const rootMetricCount = rootMetrics.length
   const hasMultiMetricLeaderboard =
     rootMetricCount > 1 && (lb.leaderboard_rows?.length ?? 0) > 0
+  const primaryRootColumnKey = useMemo(
+    () => primaryMetricColumnKey(lb.leaderboard_metrics, lb.primary_metric_id),
+    [lb.leaderboard_metrics, lb.primary_metric_id],
+  )
+  const [localSelectedMetricId, setLocalSelectedMetricId] = useState<string | null>(
+    () => selectedMetricId?.trim() || null,
+  )
+  const pendingLocalMetricRef = useRef<{ active: boolean; value: string | null }>({
+    active: false,
+    value: null,
+  })
+  useEffect(() => {
+    const normalized = selectedMetricId?.trim() || null
+    if (pendingLocalMetricRef.current.active) {
+      if (normalized === pendingLocalMetricRef.current.value) {
+        pendingLocalMetricRef.current.active = false
+        return
+      }
+      if (typeof window !== "undefined") {
+        const liveMetric =
+          new URLSearchParams(window.location.search).get("metric")?.trim() || null
+        if (liveMetric === pendingLocalMetricRef.current.value) {
+          return
+        }
+      }
+      pendingLocalMetricRef.current.active = false
+    }
+    setLocalSelectedMetricId(normalized)
+  }, [selectedMetricId])
+
+  const requestedRootMetric = useMemo(() => {
+    if (!hasMultiMetricLeaderboard || !localSelectedMetricId) return undefined
+    return (
+      rootMetrics.find((m) => m.column_key === localSelectedMetricId) ??
+      rootMetrics.find((m) => m.metric_id === localSelectedMetricId)
+    )
+  }, [hasMultiMetricLeaderboard, localSelectedMetricId, rootMetrics])
+  const primaryLeaderboardMetric = useMemo(
+    () =>
+      hasMultiMetricLeaderboard
+        ? rootMetrics.find((m) => m.column_key === primaryRootColumnKey)
+        : undefined,
+    [hasMultiMetricLeaderboard, primaryRootColumnKey, rootMetrics],
+  )
+  const activeRootMetric = hasMultiMetricLeaderboard
+    ? (requestedRootMetric ?? primaryLeaderboardMetric)
+    : undefined
+  const isNonPrimaryRootMetric = Boolean(
+    activeRootMetric && activeRootMetric.column_key !== primaryRootColumnKey,
+  )
+
+  const evalMetricOptions = useMemo(
+    () =>
+      buildEvalMetricFilterOptions({
+        metrics: rootMetrics,
+        rows: lb.leaderboard_rows ?? [],
+        primaryColumnKey: primaryRootColumnKey,
+        getLabel: getMetricChipLabel,
+      }),
+    [lb.leaderboard_rows, primaryRootColumnKey, rootMetrics],
+  )
+  const evalMetricFilterItems = useMemo<MetricFilterItem[]>(() => {
+    const items: MetricFilterItem[] = evalMetricOptions.map((opt) => ({
+      key: opt.columnKey,
+      label: opt.label,
+      count: opt.modelCount,
+      direction: opt.lowerIsBetter == null ? null : opt.lowerIsBetter ? "lower" : "higher",
+      badge: opt.isPrimary ? "primary" : null,
+      isDefault: opt.isPrimary,
+    }))
+    // Retain an explicitly requested zero-count root metric in the selector so
+    // a saved ?metric= link whose scores became all-null stays visible and
+    // recoverable via Reset or switching back to the primary metric.
+    if (
+      activeRootMetric &&
+      !items.some((item) => item.key === activeRootMetric.column_key)
+    ) {
+      items.push({
+        key: activeRootMetric.column_key,
+        label: getMetricChipLabel(activeRootMetric),
+        count: 0,
+        direction:
+          activeRootMetric.lower_is_better == null
+            ? null
+            : activeRootMetric.lower_is_better
+              ? "lower"
+              : "higher",
+        badge: activeRootMetric.column_key === primaryRootColumnKey ? "primary" : null,
+        isDefault: activeRootMetric.column_key === primaryRootColumnKey,
+      })
+    }
+    return items
+  }, [activeRootMetric, evalMetricOptions, primaryRootColumnKey])
+
+  const handleSelectRootMetric = (nextKey: string | null) => {
+    if (!nextKey) {
+      pendingLocalMetricRef.current = { active: true, value: null }
+      setLocalSelectedMetricId(null)
+      onSelectMetric?.(null)
+      return
+    }
+    const matched =
+      rootMetrics.find((m) => m.column_key === nextKey) ??
+      rootMetrics.find((m) => m.metric_id === nextKey)
+    if (!matched || (primaryRootColumnKey && matched.column_key === primaryRootColumnKey)) {
+      pendingLocalMetricRef.current = { active: true, value: null }
+      setLocalSelectedMetricId(null)
+      onSelectMetric?.(null)
+      return
+    }
+    const metricIdIsUnique =
+      Boolean(matched.metric_id) &&
+      rootMetrics.filter((m) => m.metric_id === matched.metric_id).length === 1
+    const paramValue = metricIdIsUnique ? matched.metric_id! : matched.column_key
+    pendingLocalMetricRef.current = { active: true, value: paramValue }
+    setLocalSelectedMetricId(paramValue)
+    onSelectMetric?.(paramValue)
+  }
+
+  const activeMetricStats = useMemo(() => {
+    if (!activeRootMetric) return null
+    const values: number[] = []
+    let allFractions = true
+    for (const row of lb.leaderboard_rows ?? []) {
+      const val = row.values[activeRootMetric.column_key]
+      if (!isNumericScore(val)) continue
+      values.push(val)
+      if (Math.abs(val) > 1.5) allFractions = false
+    }
+    const modelsCount = values.length
+    if (modelsCount === 0) {
+      return { modelsCount: 0, avgScoreLabel: "—" }
+    }
+    const mean = values.reduce((sum, v) => sum + v, 0) / modelsCount
+    const isPercentColumn = /percent|%|pct/i.test(activeRootMetric.unit ?? "") && allFractions
+    const avgScoreLabel = isPercentColumn
+      ? `${(mean * 100).toFixed(1)}%`
+      : formatRawScore(mean, activeRootMetric.unit ?? undefined)
+    return { modelsCount, avgScoreLabel }
+  }, [activeRootMetric, lb.leaderboard_rows])
   const [overviewOpen, setOverviewOpen] = useState(true)
   // Collapse the dense technical overview by default in policy mode; expand
   // for researchers. Reset whenever the user switches modes.
@@ -1609,14 +1865,16 @@ export function EvalDetail({
         .join("&"),
     [protocolFilters],
   )
+  const activeMetricResetKey =
+    metricBarOverride?.value ?? activeRootMetric?.column_key ?? ""
   // A page number and an expanded row both describe the rows currently on
-  // screen. Narrowing the selection, or switching between one row per
-  // model and one row per run, replaces those rows, so both are reset
-  // rather than carried across to whatever now sits at the same offset.
+  // screen. Narrowing the selection, switching metrics, or switching between
+  // one row per model and one row per run replaces those rows, so both are
+  // reset rather than carried across to whatever now sits at the same offset.
   useEffect(() => {
     setLeaderboardPage(1)
     setExpandedRows({})
-  }, [protocolFilterKey, flatRunView])
+  }, [protocolFilterKey, flatRunView, activeMetricResetKey])
 
   // First click on a column picks a sensible initial direction (alpha
   // for text, "best/most-recent first" for numeric/date). Second click
@@ -1663,22 +1921,28 @@ export function EvalDetail({
     return userRowSort.dir === "asc" ? "↑" : "↓"
   }
 
-  const avgScoreLabel = formatRawScore(lb.avg_score, lb.metric_config.unit)
+  const avgScoreLabel = activeMetricStats?.avgScoreLabel ?? formatRawScore(lb.avg_score, lb.metric_config.unit)
   // `metric_config` describes the `primary_metric_id` metric only. On a page
-  // with several root metrics its direction and scale are named as that
-  // metric's, never stated for the page.
-  const primaryLeaderboardMetric = hasMultiMetricLeaderboard
-    ? (lb.leaderboard_metrics ?? []).find(
-        (m) => m.column_key === primaryMetricColumnKey(lb.leaderboard_metrics, lb.primary_metric_id),
-      )
-    : undefined
-  const primaryMetricPrefix = primaryLeaderboardMetric
-    ? `${getMetricChipLabel(primaryLeaderboardMetric)}: `
-    : ""
+  // with several root metrics its direction and scale are named as the active
+  // metric's, never borrowed across measures.
+  const activeMetricLabel = activeRootMetric ? getMetricChipLabel(activeRootMetric) : null
+  const primaryMetricPrefix = activeMetricLabel ? `${activeMetricLabel}: ` : ""
+  const effectiveHeroLowerIsBetter = isNonPrimaryRootMetric
+    ? (activeRootMetric?.lower_is_better ?? null)
+    : lb.metric_config.lower_is_better
+  const effectiveHeroScoreType = isNonPrimaryRootMetric
+    ? (activeRootMetric?.unit || "score")
+    : lb.metric_config.score_type
+  const effectiveSpecScaleConfig = isNonPrimaryRootMetric
+    ? { min_score: null, max_score: null }
+    : summary.metric_config
+  const displayedModelsCount = activeMetricStats ? activeMetricStats.modelsCount : summary.models_count
   const scoreDirectionLabel = `${primaryMetricPrefix}${
-    lb.metric_config.lower_is_better == null
-      ? "Sources disagree on direction"
-      : lb.metric_config.lower_is_better
+    effectiveHeroLowerIsBetter == null
+      ? lb.merged_view
+        ? "Sources disagree on direction"
+        : "Direction not reported"
+      : effectiveHeroLowerIsBetter
         ? "Lower scores rank higher"
         : "Higher scores rank higher"
   }`
@@ -1809,11 +2073,53 @@ export function EvalDetail({
       ? familyEvalsHref(study.family_key)
       : null
 
+  const activeMetricNarrative = isNonPrimaryRootMetric
+    ? (activeRootMetric?.canonical_display_name?.trim() ||
+        `${activeMetricLabel ?? "Selected metric"} reported on ${summary.evaluation_name}.`)
+    : summary.metric_config.evaluation_description
+
   const heroLede = isResearchView
-    ? summary.metric_config.evaluation_description
+    ? activeMetricNarrative
     : (summary.benchmark_card?.benchmark_details?.overview?.trim()
        || summary.benchmark_card?.purpose_and_intended_users?.goal?.trim()
-       || summary.metric_config.evaluation_description)
+       || activeMetricNarrative)
+
+  const metricFilterBarNode = metricBarOverride ? (
+    <MetricFilterBar
+      dataEvalBar
+      {...metricBarOverride}
+      className={`mb-4 ${metricBarOverride.className ?? ""}`.trim()}
+    />
+  ) : hasMultiMetricLeaderboard &&
+    (evalMetricFilterItems.length > 1 || isNonPrimaryRootMetric) &&
+    !lb.merged_view &&
+    splitConfig?.label !== "Metric" ? (
+    <MetricFilterBar
+      dataEvalBar
+      className="mb-4"
+      label="Metric"
+      items={evalMetricFilterItems}
+      value={activeRootMetric?.column_key ?? null}
+      onChange={handleSelectRootMetric}
+      defaultItem={
+        primaryLeaderboardMetric
+          ? undefined
+          : {
+              label: "All measures",
+              chipLabel: "All measures",
+              sublabel: "unfiltered matrix",
+              count: (lb.leaderboard_rows ?? []).length,
+            }
+      }
+      countNoun={{ singular: "model", plural: "models" }}
+      searchPlaceholder="Filter measures…"
+      statusText={
+        activeRootMetric
+          ? `Showing ${activeMetricStats?.modelsCount ?? 0} of ${(lb.leaderboard_rows ?? []).length} ${(lb.leaderboard_rows ?? []).length === 1 ? "model" : "models"} reporting this measure`
+          : `All ${(lb.leaderboard_rows ?? []).length} ${(lb.leaderboard_rows ?? []).length === 1 ? "model" : "models"} · ${evalMetricFilterItems.length} measures`
+      }
+    />
+  ) : null
 
   return (
     <div className="space-y-12">
@@ -1863,13 +2169,15 @@ export function EvalDetail({
               <span style={{ color: "var(--fg-subtle)" }}>·</span>
             </>
           )}
-          <span>{lb.metric_config.score_type}</span>
+          <span>{effectiveHeroScoreType}</span>
           <span style={{ color: "var(--fg-subtle)" }}>·</span>
           <span>
             {primaryMetricPrefix}
-            {lb.metric_config.lower_is_better == null
-              ? "Sources disagree on direction"
-              : lb.metric_config.lower_is_better
+            {effectiveHeroLowerIsBetter == null
+              ? lb.merged_view
+                ? "Sources disagree on direction"
+                : "Direction not reported"
+              : effectiveHeroLowerIsBetter
                 ? "Lower is better ↓"
                 : "Higher is better ↑"}
           </span>
@@ -1946,7 +2254,17 @@ export function EvalDetail({
       {/* AT A GLANCE (Summary view only) — pinned above the benchmark
           card so non-technical readers land on plain-language framing
           first. */}
-      {!isResearchView && <PolicyOverview summary={summary} />}
+      {!isResearchView && (
+        <PolicyOverview
+          summary={summary}
+          activeMetric={
+            isNonPrimaryRootMetric && activeMetricLabel
+              ? { label: activeMetricLabel, lowerIsBetter: effectiveHeroLowerIsBetter }
+              : undefined
+          }
+          modelsCount={activeMetricStats?.modelsCount}
+        />
+      )}
 
       {/* BENCHMARK CARD — top-level collapsible. In Researcher view it
           defaults open (methodology is the headline). In Summary view
@@ -2018,6 +2336,18 @@ export function EvalDetail({
               summary={summary}
               evalHierarchy={evalHierarchy}
               comparisonIndex={comparisonIndex}
+              activeMetric={
+                activeRootMetric && activeMetricLabel
+                  ? {
+                      metricId: activeRootMetric.metric_id || activeRootMetric.column_key,
+                      columnKey: activeRootMetric.column_key,
+                      label: activeMetricLabel,
+                      lowerIsBetter: effectiveHeroLowerIsBetter,
+                      unit: activeRootMetric.unit ?? null,
+                      isPrimary: !isNonPrimaryRootMetric,
+                    }
+                  : undefined
+              }
             />
 
             {/* Metric spec / nested datalist (paper-aligned hairline def-list) */}
@@ -2032,21 +2362,23 @@ export function EvalDetail({
                 <dd className="break-words">
                   {isResearchView
                     ? humanizeEvaluationId(summary.evaluation_id)
-                    : summary.metric_config.evaluation_description}
+                    : activeMetricNarrative}
                 </dd>
                 <dt>{isResearchView ? "Score scale" : "How to read scores"}</dt>
                 <dd>
                   {isResearchView
-                    ? `${primaryMetricPrefix}${scaleLabel(summary.metric_config)}`
+                    ? `${primaryMetricPrefix}${scaleLabel(effectiveSpecScaleConfig)}`
                     : scoreDirectionLabel}
                 </dd>
                 <dt>Models</dt>
-                <dd className="font-mono tabular-nums">{summary.models_count.toLocaleString()}</dd>
-                <dt>{hasMultiMetricLeaderboard ? "Measures" : "Avg score"}</dt>
+                <dd className="font-mono tabular-nums">{displayedModelsCount.toLocaleString()}</dd>
+                <dt>{activeRootMetric ? "Avg score" : hasMultiMetricLeaderboard ? "Measures" : "Avg score"}</dt>
                 <dd className="font-mono tabular-nums">
-                  {hasMultiMetricLeaderboard
-                    ? summary.metrics_count ?? summary.leaderboard_metrics?.length ?? 1
-                    : avgScoreLabel}
+                  {activeRootMetric
+                    ? avgScoreLabel
+                    : hasMultiMetricLeaderboard
+                      ? summary.metrics_count ?? summary.leaderboard_metrics?.length ?? 1
+                      : avgScoreLabel}
                 </dd>
                 {summary.tags?.domains && summary.tags.domains.length > 0 && (
                   <>
@@ -2133,24 +2465,37 @@ export function EvalDetail({
           metadata above the leaderboard. Auto-hidden by the panel
           itself when there are no divergence groups to show. */}
       <ComparabilityPanel
-        comparability={summary.evalcards?.annotations?.benchmark_comparability}
-        summary={summary.comparability_summary}
-        modelResults={summary.model_results}
-        leaderboardMetrics={summary.leaderboard_metrics}
-        leaderboardRows={summary.leaderboard_rows}
+        comparability={
+          isNonPrimaryRootMetric ? undefined : summary.evalcards?.annotations?.benchmark_comparability
+        }
+        summary={isNonPrimaryRootMetric ? undefined : summary.comparability_summary}
+        modelResults={isNonPrimaryRootMetric ? [] : summary.model_results}
+        leaderboardMetrics={activeRootMetric ? [activeRootMetric] : summary.leaderboard_metrics}
+        leaderboardRows={
+          activeRootMetric
+            ? (summary.leaderboard_rows ?? []).filter((r) =>
+                isNumericScore(r.values[activeRootMetric.column_key]),
+              )
+            : summary.leaderboard_rows
+        }
       />
 
       {hasMultiMetricLeaderboard ? (
         <section>
           <ApplesToApplesBanner
-            summary={lb.comparability_summary}
-            hasActionableDetail={hasComparabilityActionableDetail}
+            summary={isNonPrimaryRootMetric ? undefined : lb.comparability_summary}
+            hasActionableDetail={!isNonPrimaryRootMetric && hasComparabilityActionableDetail}
           />
           <MultiMetricLeaderboard
             summary={lb}
             isResearchView={isResearchView}
             splitConfig={splitConfig}
             judgeDisplayName={judgeDisplayName}
+            activeRootMetric={activeRootMetric}
+            isNonPrimaryRootMetric={isNonPrimaryRootMetric}
+            onSelectRootMetric={(columnKey) => handleSelectRootMetric(columnKey)}
+            duplicateMeanColumnKeys={duplicateMeanColumnKeys}
+            metricBar={metricFilterBarNode}
           />
         </section>
       ) : (
@@ -2175,7 +2520,9 @@ export function EvalDetail({
                   : `${rankedRowCount} of ${lb.models_count}`}
               {" · "}
               {lb.metric_config.lower_is_better == null
-                ? "sources disagree on direction"
+                ? lb.merged_view
+                  ? "sources disagree on direction"
+                  : "direction not reported"
                 : lb.metric_config.lower_is_better
                   ? "lower is better ↓"
                   : "higher is better ↑"}
@@ -2192,6 +2539,8 @@ export function EvalDetail({
           >
             {leaderboardDescription}
           </p>
+
+          {metricFilterBarNode}
 
           {splitConfig && (
             <SplitPicker config={splitConfig} className="mb-4" />
@@ -2362,6 +2711,23 @@ export function EvalDetail({
             </div>
           )}
 
+          {(() => {
+            const singleMetricEmbedParam = (() => {
+              if (!metricBarOverride?.value) return null
+              const activeItem = metricBarOverride.items.find(
+                (item) => item.key === metricBarOverride.value,
+              )
+              if (activeItem?.isDefault) return null
+              return metricBarOverride.value
+            })()
+            const singleEmbedMetricQs = singleMetricEmbedParam
+              ? `?metric=${encodeURIComponent(singleMetricEmbedParam)}`
+              : ""
+            const singleEmbedMetricAmp = singleMetricEmbedParam
+              ? `&metric=${encodeURIComponent(singleMetricEmbedParam)}`
+              : ""
+            return (
+              <>
           {unassistedLeaderboardRows.length >= 3 && (
             <div className="mb-4">
               <div className="flex justify-end mb-2">
@@ -2373,17 +2739,17 @@ export function EvalDetail({
                     {
                       id: "distribution",
                       label: "Distribution",
-                      embedPath: `/embed/eval/distribution/${routeIdToPath(summary.evaluation_id)}`,
+                      embedPath: `/embed/eval/distribution/${routeIdToPath(summary.evaluation_id)}${singleEmbedMetricQs}`,
                     },
                     {
                       id: "frontier",
                       label: "Frontier",
-                      embedPath: `/embed/eval/frontier/${routeIdToPath(summary.evaluation_id)}`,
+                      embedPath: `/embed/eval/frontier/${routeIdToPath(summary.evaluation_id)}${singleEmbedMetricQs}`,
                     },
                     {
                       id: "both",
                       label: "Both",
-                      embedPath: `/embed/eval/distribution/${routeIdToPath(summary.evaluation_id)}?view=both`,
+                      embedPath: `/embed/eval/distribution/${routeIdToPath(summary.evaluation_id)}?view=both${singleEmbedMetricAmp}`,
                     },
                     // Same gate as the Context chip: the server-built
                     // scaffold-context payload on this page's summary.
@@ -2392,7 +2758,7 @@ export function EvalDetail({
                           {
                             id: "context",
                             label: "Context",
-                            embedPath: `/embed/eval/distribution/${routeIdToPath(summary.evaluation_id)}?view=context`,
+                            embedPath: `/embed/eval/distribution/${routeIdToPath(summary.evaluation_id)}?view=context${singleEmbedMetricAmp}`,
                           },
                         ]
                       : []),
@@ -2461,12 +2827,15 @@ export function EvalDetail({
               </div>
             )}
             <EmbedButton
-              embedPath={`/embed/eval/leaderboard/${routeIdToPath(summary.evaluation_id)}`}
+              embedPath={`/embed/eval/leaderboard/${routeIdToPath(summary.evaluation_id)}${singleEmbedMetricQs}`}
               label="Leaderboard"
               defaultHeight={560}
               size="sm"
             />
           </div>
+              </>
+            )
+          })()}
           <div className="ec-card" style={{ padding: 0, overflow: "hidden" }}>
             {/* Mobile (< lg): compact embed-style list — rank, model ·
                 developer, score. Drops the expand chevron, the score
@@ -2693,7 +3062,7 @@ export function EvalDetail({
                       onClick={() => cycleRowSort("score")}
                       title={
                         protocolColumns.length > 0
-                          ? "The run the producer picked as this model's headline reading. Expand a row to see every run the study reported."
+                          ? "The run the producer picked as this model's headline report. Expand a row to see every run the study reported."
                           : "Sort by score"
                       }
                     />
@@ -2818,7 +3187,7 @@ export function EvalDetail({
                   const unrankedReason = isAssisted
                     ? "Assisted run (answer feedback) — shown, not ranked"
                     : judgeLabel
-                      ? "Another judge's reading of the same model — shown, not ranked"
+                      ? "Another judge's report of the same model — shown, not ranked"
                       : "Another run of the same model — shown, not ranked"
 
                   return (
@@ -2921,7 +3290,10 @@ export function EvalDetail({
                                   className="mt-0.5 font-mono uppercase"
                                   style={{ fontSize: 9.5, letterSpacing: "0.1em", color: "var(--fg-subtle)" }}
                                 >
-                                  Avg of {modelResult.aggregate_components.length}
+                                  {formatAggregateBadge(
+                                    modelResult.value_aggregation,
+                                    modelResult.aggregate_components.length,
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -2983,7 +3355,7 @@ export function EvalDetail({
                             <div
                               className="mt-0.5 text-right"
                               style={{ fontSize: 10, color: "var(--fg-subtle)" }}
-                              title={`This row reports the run the producer picked as ${modelResult.model_info.name}'s headline reading on this page. Expand it to see every run the study reported.`}
+                              title={`This row reports the run the producer picked as ${modelResult.model_info.name}'s headline report on this page. Expand it to see every run the study reported.`}
                             >
                               {foldRangeLabel(fold)}
                             </div>
@@ -3286,40 +3658,116 @@ export function EvalDetail({
                                 </div>
                               )}
 
-                              {modelResult.aggregate_components && modelResult.aggregate_components.length > 1 && (
-                                <div className="space-y-2">
+                              {modelResult.aggregate_components && modelResult.aggregate_components.length > 1 && (() => {
+                                const agg = modelResult.value_aggregation
+                                const comps = [...modelResult.aggregate_components].sort((a, b) =>
+                                  lb.metric_config.lower_is_better ? a.score - b.score : b.score - a.score,
+                                )
+                                const finiteScores = comps
+                                  .map((c) => c.score)
+                                  .filter((s): s is number => typeof s === "number" && Number.isFinite(s))
+                                const minScore = finiteScores.length > 0 ? Math.min(...finiteScores) : null
+                                const maxScore = finiteScores.length > 0 ? Math.max(...finiteScores) : null
+                                const isSuiteParts = agg === "mean" || agg === "weighted_mean"
+                                const summaryPrefix =
+                                  agg === "median"
+                                    ? "Median"
+                                    : agg === "weighted_mean"
+                                      ? "Weighted mean"
+                                      : agg === "mean"
+                                        ? "Mean"
+                                        : "Value"
+                                return (
                                   <div
-                                    className="font-mono uppercase"
-                                    style={{ fontSize: 10, letterSpacing: "0.14em", color: "var(--fg-subtle)" }}
+                                    style={{
+                                      border: "1px solid var(--border-soft)",
+                                      background: "var(--bg)",
+                                    }}
                                   >
-                                    Composite score breakdown
+                                    <div
+                                      className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2"
+                                      style={{
+                                        borderBottom: "1px solid var(--border-soft)",
+                                        background: "var(--bg-subtle)",
+                                      }}
+                                    >
+                                      <span
+                                        className="font-mono uppercase"
+                                        style={{
+                                          fontSize: 10,
+                                          letterSpacing: "0.14em",
+                                          color: "var(--fg-muted)",
+                                        }}
+                                      >
+                                        {formatAggregateHeading(agg, comps.length)}
+                                      </span>
+                                      <span
+                                        className="font-mono tabular-nums"
+                                        style={{ fontSize: 11, color: "var(--fg-muted)" }}
+                                      >
+                                        {summaryPrefix} {formatRawScore(modelResult.score, lb.metric_config.unit)}
+                                        {minScore != null && maxScore != null && minScore !== maxScore
+                                          ? ` · Spread ${formatRawScore(minScore, lb.metric_config.unit)} – ${formatRawScore(maxScore, lb.metric_config.unit)}`
+                                          : ""}
+                                      </span>
+                                    </div>
+                                    <div className="divide-y divide-[color:var(--border-soft)]">
+                                      {comps.map((component, i) => {
+                                        const compLabel = formatAggregateComponentLabel(component, agg)
+                                        const sourceLabel =
+                                          component.source_name?.trim() ||
+                                          component.source_organization_name?.trim() ||
+                                          component.composite_display_name?.trim() ||
+                                          component.composite_benchmark_name?.trim() ||
+                                          ""
+                                        const childHref =
+                                          isSuiteParts && component.evaluation_id?.includes("%2F")
+                                            ? `/evals/${routeIdToPath(component.evaluation_id)}`
+                                            : null
+                                        return (
+                                          <div
+                                            key={`${component.evaluation_id}-${i}`}
+                                            className="grid grid-cols-[minmax(0,1fr)_auto] sm:grid-cols-[minmax(0,1fr)_auto_72px] items-center gap-x-3 gap-y-1 px-3.5 py-2"
+                                          >
+                                            <div className="min-w-0">
+                                              {childHref ? (
+                                                <Link
+                                                  href={childHref}
+                                                  className="block truncate text-[12.5px] hover:text-[color:var(--accent)] transition-colors"
+                                                  style={{ color: "var(--fg)" }}
+                                                  title={compLabel}
+                                                >
+                                                  {compLabel}
+                                                </Link>
+                                              ) : (
+                                                <span
+                                                  className={`block truncate ${isSuiteParts ? "text-[12.5px]" : "font-mono text-[11.5px]"}`}
+                                                  style={{ color: "var(--fg)" }}
+                                                  title={component.evaluation_id || compLabel}
+                                                >
+                                                  {compLabel}
+                                                </span>
+                                              )}
+                                            </div>
+                                            <span
+                                              className="hidden sm:inline text-[11.5px] truncate max-w-[14rem]"
+                                              style={{ color: "var(--fg-muted)" }}
+                                            >
+                                              {sourceLabel}
+                                            </span>
+                                            <span
+                                              className="text-right font-mono tabular-nums text-[12.5px]"
+                                              style={{ color: "var(--fg)" }}
+                                            >
+                                              {formatRawScore(component.score, lb.metric_config.unit)}
+                                            </span>
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
                                   </div>
-                                  <div className="overflow-x-auto" style={{ border: "1px solid var(--border-soft)" }}>
-                                    <table className="ec-htable">
-                                      <thead>
-                                        <tr>
-                                          <th>Benchmark</th>
-                                          <th>Source</th>
-                                          <th className="num">Raw</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {modelResult.aggregate_components.map((component, i) => (
-                                          <tr key={`${component.evaluation_id}-${i}`}>
-                                            <td className="font-medium text-[13px]">{component.composite_benchmark_name}</td>
-                                            <td className="text-[13px]" style={{ color: "var(--fg-muted)" }}>
-                                              {component.source_organization_name}
-                                            </td>
-                                            <td className="num font-mono tabular-nums text-[13px]" style={{ color: "var(--fg-muted)" }}>
-                                              {formatRawScore(component.score)}
-                                            </td>
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                </div>
-                              )}
+                                )
+                              })()}
 
                               {slices.length > 1 && (
                                 <div className="space-y-2">
@@ -3510,6 +3958,11 @@ function MultiMetricLeaderboard({
   isResearchView,
   splitConfig,
   judgeDisplayName,
+  activeRootMetric,
+  isNonPrimaryRootMetric = false,
+  onSelectRootMetric,
+  duplicateMeanColumnKeys,
+  metricBar,
 }: {
   summary: BenchmarkEvalSummary
   isResearchView: boolean
@@ -3517,28 +3970,29 @@ function MultiMetricLeaderboard({
   /** Same server-resolved map the per-row leaderboard labels with, so one
    *  judge id reads the same on both surfaces. */
   judgeDisplayName: (modelId: string) => string
+  activeRootMetric?: LeaderboardMetric
+  isNonPrimaryRootMetric?: boolean
+  onSelectRootMetric?: (columnKey: string) => void
+  duplicateMeanColumnKeys: ReadonlySet<string>
+  metricBar?: React.ReactNode
 }) {
   const [page, setPage] = useState(1)
-  // The column the page ranks on: the eval's declared primary metric, which
-  // is what the hero, the metric spec block and every other surface here
-  // summarise. Sorting on whichever measure comes first instead would open a
-  // page like OpenEval HarmBench on an attack-success-rate ranking under a
-  // refusal-score heading.
+  // The column the page ranks on: the active filtered root metric (defaulting
+  // to the eval's declared primary metric). When no primary metric is declared
+  // and no metric was requested, fall back to alphabetical model order.
   const primaryMetricKey = useMemo(
     () => primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id),
     [summary.leaderboard_metrics, summary.primary_metric_id],
   )
-  // We don't sort by metric coverage by default — coverage tells you how
-  // many slices reported, not how the model performed.
-  const [sortKey, setSortKey] = useState<string>(() => primaryMetricKey ?? "model")
+  const initialSortMetricKey = activeRootMetric?.column_key ?? primaryMetricKey
+  const [sortKey, setSortKey] = useState<string>(() => initialSortMetricKey ?? "model")
   // Best-first in the metric's own direction, the same rule a header click
   // applies — a lower-is-better primary metric must not open worst-first.
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">(() =>
-    (summary.leaderboard_metrics ?? []).find((m) => m.column_key === primaryMetricKey)
-      ?.lower_is_better
-      ? "asc"
-      : "desc",
-  )
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">(() => {
+    if (!initialSortMetricKey) return "asc"
+    const m = (summary.leaderboard_metrics ?? []).find((x) => x.column_key === initialSortMetricKey)
+    return m?.lower_is_better ? "asc" : "desc"
+  })
   const [activeSliceTab, setActiveSliceTab] = useState<string>("all")
   const [minParamStep, setMinParamStep] = useState(0)
   const [maxParamStep, setMaxParamStep] = useState(PARAM_RANGE_MAX_INDEX)
@@ -3662,40 +4116,15 @@ function MultiMetricLeaderboard({
   }, [leaderboardMetrics])
 
   const hasSliceTabs = sliceTabs.length > 1
-
-  // A `<benchmark-slug>.mean` column whose per-row values are identical to an
-  // earlier column (e.g. cyse2's `cyse2-vulnerability-exploit.mean` mirrors
-  // `accuracy`) is a redundant alias of the primary score, not a distinct
-  // measure. Suppress it so the matrix doesn't render two columns of the same
-  // numbers under a humanised "Mean" header next to the real metric.
-  const duplicateMeanColumnKeys = useMemo(() => {
-    const dupes = new Set<string>()
-    const meanMetrics = leaderboardMetrics.filter(
-      (m) => m.scope !== "subtask" && /\.mean$/i.test(m.column_key),
-    )
-    if (meanMetrics.length === 0) return dupes
-    const others = leaderboardMetrics.filter((m) => m.scope !== "subtask")
-    const valuesEqual = (a: string, b: string) => {
-      let comparable = 0
-      for (const row of leaderboardRows) {
-        const va = row.values[a]
-        const vb = row.values[b]
-        const aNum = isNumericScore(va)
-        const bNum = isNumericScore(vb)
-        if (aNum !== bNum) return false
-        if (aNum && bNum && Math.abs(va - vb) > 1e-6) return false
-        if (aNum && bNum) comparable += 1
-      }
-      return comparable > 0
-    }
-    for (const mean of meanMetrics) {
-      const twin = others.find(
-        (o) => o.column_key !== mean.column_key && valuesEqual(mean.column_key, o.column_key),
-      )
-      if (twin) dupes.add(mean.column_key)
-    }
-    return dupes
-  }, [leaderboardMetrics, leaderboardRows])
+  const isSingleMetricFiltered =
+    activeRootMetric != null && (!hasSliceTabs || activeSliceTab === "all")
+  const rootMetrics = useMemo(
+    () =>
+      leaderboardMetrics.filter(
+        (m) => m.scope !== "subtask" && !duplicateMeanColumnKeys.has(m.column_key),
+      ),
+    [duplicateMeanColumnKeys, leaderboardMetrics],
+  )
 
   const visibleMetrics = useMemo(
     () =>
@@ -3721,6 +4150,10 @@ function MultiMetricLeaderboard({
   const visibleMetricColumnKeySet = useMemo(
     () => new Set(visibleMetrics.map((metric) => metric.column_key)),
     [visibleMetrics]
+  )
+  const tableMetrics = useMemo(
+    () => (isSingleMetricFiltered && activeRootMetric ? [activeRootMetric] : visibleMetrics),
+    [activeRootMetric, isSingleMetricFiltered, visibleMetrics],
   )
 
   // Column-uniform percent presentation: matrix cells arrive on the
@@ -3765,7 +4198,7 @@ function MultiMetricLeaderboard({
     [leaderboardRows]
   )
 
-  const filteredRows = useMemo(() => {
+  const sizeFilteredRows = useMemo(() => {
     return leaderboardRows.filter((row) => {
       const paramsBillions = getParamsBillionsFromModelInfo(row.model_info)
 
@@ -3776,6 +4209,13 @@ function MultiMetricLeaderboard({
       return true
     })
   }, [leaderboardRows, numericMaxParams, numericMinParams, showUnknownSize])
+
+  const filteredRows = useMemo(() => {
+    if (!isSingleMetricFiltered || !activeRootMetric) return sizeFilteredRows
+    return sizeFilteredRows.filter((row) =>
+      isNumericScore(row.values[activeRootMetric.column_key]),
+    )
+  }, [activeRootMetric, isSingleMetricFiltered, sizeFilteredRows])
 
   const sortedRows = useMemo(() => {
     const rows = [...filteredRows]
@@ -3862,6 +4302,18 @@ function MultiMetricLeaderboard({
   }, [summary.evaluation_id])
 
   useEffect(() => {
+    if (activeRootMetric) {
+      setSortKey(activeRootMetric.column_key)
+      setSortDirection(activeRootMetric.lower_is_better ? "asc" : "desc")
+    } else {
+      setSortKey("model")
+      setSortDirection("asc")
+    }
+    setPage(1)
+  }, [activeRootMetric?.column_key, activeRootMetric?.lower_is_better])
+
+  useEffect(() => {
+    if (isSingleMetricFiltered) return
     if (leaderboardMetricMap.has(sortKey) && !visibleMetricColumnKeySet.has(sortKey)) {
       // The currently-sorted metric was hidden — fall back to the primary
       // metric when it is still visible, then the first visible root-scope
@@ -3879,6 +4331,7 @@ function MultiMetricLeaderboard({
       setSortDirection(leaderboardMetricMap.get(fallback)?.lower_is_better ? "asc" : "desc")
     }
   }, [
+    isSingleMetricFiltered,
     leaderboardMetricMap,
     leaderboardMetrics,
     primaryMetricKey,
@@ -3908,10 +4361,26 @@ function MultiMetricLeaderboard({
     [page, sortedRows]
   )
 
-  const rankByModelId = useMemo(
-    () => new Map(sortedRows.map((row, index) => [row.model_info.id, index + 1])),
-    [sortedRows]
-  )
+  const rankByModelId = useMemo(() => {
+    if (isSingleMetricFiltered && activeRootMetric) {
+      return computeMetricStandings(
+        filteredRows,
+        (row) => row.values[activeRootMetric.column_key],
+        (row) => row.model_info.id,
+        activeRootMetric.lower_is_better,
+      )
+    }
+    const rankedMetric = leaderboardMetricMap.get(sortKey)
+    if (rankedMetric) {
+      return computeMetricStandings(
+        filteredRows,
+        (row) => row.values[rankedMetric.column_key],
+        (row) => row.model_info.id,
+        rankedMetric.lower_is_better,
+      )
+    }
+    return new Map<string, number>()
+  }, [activeRootMetric, filteredRows, isSingleMetricFiltered, leaderboardMetricMap, sortKey])
 
   const setMetricVisibility = (metricKey: string, nextVisible: boolean) => {
     setVisibleMetricKeys((current) => {
@@ -3954,6 +4423,16 @@ function MultiMetricLeaderboard({
   }
 
 
+  const embedMetricParam = (() => {
+    if (!activeRootMetric || activeRootMetric.column_key === primaryMetricKey) return null
+    const metricIdIsUnique =
+      Boolean(activeRootMetric.metric_id) &&
+      rootMetrics.filter((m) => m.metric_id === activeRootMetric.metric_id).length === 1
+    return metricIdIsUnique ? activeRootMetric.metric_id! : activeRootMetric.column_key
+  })()
+  const embedMetricQs = embedMetricParam ? `?metric=${encodeURIComponent(embedMetricParam)}` : ""
+  const embedMetricAmp = embedMetricParam ? `&metric=${encodeURIComponent(embedMetricParam)}` : ""
+
   return (
     <section>
       {/* The parent EvalDetail already renders the apples-to-apples
@@ -3969,9 +4448,11 @@ function MultiMetricLeaderboard({
             ? `${leaderboardRows.length} models`
             : `${filteredRows.length} of ${leaderboardRows.length} models`}
           {" · "}
-          {visibleMetrics.length === leaderboardMetrics.length
-            ? `${leaderboardMetrics.length} measures`
-            : `${visibleMetrics.length} of ${leaderboardMetrics.length} measures`}
+          {isSingleMetricFiltered && activeRootMetric
+            ? getMetricChipLabel(activeRootMetric)
+            : visibleMetrics.length === leaderboardMetrics.length
+              ? `${leaderboardMetrics.length} measures`
+              : `${visibleMetrics.length} of ${leaderboardMetrics.length} measures`}
         </span>
       </div>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between mb-4">
@@ -3979,10 +4460,19 @@ function MultiMetricLeaderboard({
           className="text-[13px] leading-[1.6]"
           style={{ color: "var(--fg-muted)", maxWidth: 720 }}
         >
-          {isResearchView
-            ? "Each column is a reported benchmark measure."
-            : "Each column is a separately reported measure so the benchmark can be read without flattening different results into one number."}
+          {isSingleMetricFiltered && activeRootMetric
+            ? `Models reporting ${getMetricChipLabel(activeRootMetric)}${
+                activeRootMetric.lower_is_better == null
+                  ? "."
+                  : activeRootMetric.lower_is_better
+                    ? ", ranked lowest score first."
+                    : ", ranked highest score first."
+              }`
+            : isResearchView
+              ? "Each column is a reported benchmark measure."
+              : "Each column is a separately reported measure so the benchmark can be read without flattening different results into one number."}
         </p>
+        {!isSingleMetricFiltered && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button type="button" className="ec-pill inline-flex items-center gap-1.5 shrink-0">
@@ -4060,7 +4550,10 @@ function MultiMetricLeaderboard({
             })}
           </DropdownMenuContent>
         </DropdownMenu>
+        )}
       </div>
+
+      {metricBar}
 
       {splitConfig && (
         <SplitPicker config={splitConfig} className="mb-4" />
@@ -4068,13 +4561,14 @@ function MultiMetricLeaderboard({
 
       {/* Distribution panel — one curve, dropdown swaps between metrics */}
       {(() => {
-        const distSeries = visibleMetrics
+        const seriesMetrics = isSingleMetricFiltered ? rootMetrics : visibleMetrics
+        const distSeries = seriesMetrics
           .map((metric) => {
             // Same ×100 presentation as the leaderboard cells, so the
             // distribution axis and frontier labels match the table.
             const scale = percentDisplayColumns.has(metric.column_key) ? 100 : 1
             const points: Array<{ score: number; releaseDate: string | null; modelName: string }> = []
-            for (const r of filteredRows) {
+            for (const r of sizeFilteredRows) {
               const score = r.values[metric.column_key]
               if (!isNumericScore(score)) continue
               points.push({
@@ -4097,7 +4591,28 @@ function MultiMetricLeaderboard({
           })
           .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
 
+        const hasActiveDistSeries =
+          !isSingleMetricFiltered ||
+          !activeRootMetric ||
+          distSeries.some((entry) => entry.key === activeRootMetric.column_key)
+
+        if (!hasActiveDistSeries && activeRootMetric) {
+          return (
+            <div
+              className="mb-4 px-4 py-3 font-mono text-[11px]"
+              style={{
+                border: "1px solid var(--border-soft)",
+                background: "var(--bg-warm)",
+                color: "var(--fg-muted)",
+              }}
+            >
+              Score distribution requires at least 3 models reporting {getMetricChipLabel(activeRootMetric)}.
+            </div>
+          )
+        }
+
         if (distSeries.length === 0) return null
+        const targetDistKey = activeRootMetric?.column_key ?? primaryMetricKey
         return (
           <div className="mb-4">
             <div className="flex justify-end mb-2">
@@ -4109,17 +4624,17 @@ function MultiMetricLeaderboard({
                   {
                     id: "distribution",
                     label: "Distribution",
-                    embedPath: `/embed/eval/distribution/${routeIdToPath(summary.evaluation_id)}`,
+                    embedPath: `/embed/eval/distribution/${routeIdToPath(summary.evaluation_id)}${embedMetricQs}`,
                   },
                   {
                     id: "frontier",
                     label: "Frontier",
-                    embedPath: `/embed/eval/frontier/${routeIdToPath(summary.evaluation_id)}`,
+                    embedPath: `/embed/eval/frontier/${routeIdToPath(summary.evaluation_id)}${embedMetricQs}`,
                   },
                   {
                     id: "both",
                     label: "Both",
-                    embedPath: `/embed/eval/distribution/${routeIdToPath(summary.evaluation_id)}?view=both`,
+                    embedPath: `/embed/eval/distribution/${routeIdToPath(summary.evaluation_id)}?view=both${embedMetricAmp}`,
                   },
                 ]}
               />
@@ -4129,8 +4644,20 @@ function MultiMetricLeaderboard({
               // Open on the metric the page ranks on, not the first column
               // that happened to have enough points to plot.
               initialKey={
-                distSeries.some((entry) => entry.key === primaryMetricKey)
-                  ? primaryMetricKey
+                targetDistKey && distSeries.some((entry) => entry.key === targetDistKey)
+                  ? targetDistKey
+                  : undefined
+              }
+              activeKey={
+                isSingleMetricFiltered &&
+                activeRootMetric &&
+                distSeries.some((entry) => entry.key === activeRootMetric.column_key)
+                  ? activeRootMetric.column_key
+                  : undefined
+              }
+              onActiveKeyChange={
+                isSingleMetricFiltered && onSelectRootMetric
+                  ? (nextKey) => onSelectRootMetric(nextKey)
                   : undefined
               }
             />
@@ -4140,7 +4667,7 @@ function MultiMetricLeaderboard({
 
       <div className="flex justify-end mb-2">
         <EmbedButton
-          embedPath={`/embed/eval/leaderboard/${routeIdToPath(summary.evaluation_id)}`}
+          embedPath={`/embed/eval/leaderboard/${routeIdToPath(summary.evaluation_id)}${embedMetricQs}`}
           label="Leaderboard"
           defaultHeight={560}
           size="sm"
@@ -4188,7 +4715,7 @@ function MultiMetricLeaderboard({
                   {isResearchView ? "Developer" : "Provider"}
                   {getSortIndicator("developer")}
                 </th>
-                {visibleMetrics.map((metric) => {
+                {tableMetrics.map((metric) => {
                   // When a slice is active in the dropdown, the slice
                   // name is already shown above the table — no need to
                   // repeat it as a per-column topline.
@@ -4236,8 +4763,10 @@ function MultiMetricLeaderboard({
               {pagedRows.map((row) => {
                 const rank = rankByModelId.get(row.model_info.id) ?? 0
                 const expandKey = row.model_info.id
-                const isExpanded = expandedRows[expandKey] ?? false
                 const matchingResult = modelResultByModelId.get(row.model_info.id)
+                const canExpandRepro =
+                  !isNonPrimaryRootMetric && isResearchView && matchingResult != null
+                const isExpanded = canExpandRepro && (expandedRows[expandKey] ?? false)
                 const isTopRank = rank === 1
                 const rankColor = rank === 1 ? "var(--accent)" : "var(--fg-muted)"
                 const familyLabel = row.model_info.architecture ?? row.model_info.parameter_count ?? null
@@ -4254,15 +4783,15 @@ function MultiMetricLeaderboard({
                       style={{
                         fontSize: 14,
                         fontWeight: isTopRank ? 600 : 500,
-                        color: rankColor,
+                        color: rank > 0 ? rankColor : "var(--fg-subtle)",
                       }}
                     >
-                      #{rank}
+                      {rank > 0 ? `#${rank}` : "—"}
                     </span>
                   </td>
                   <td className="align-top whitespace-normal">
                     <div className="flex items-start gap-1.5 leading-tight">
-                      {isResearchView && matchingResult && (
+                      {canExpandRepro && (
                         <button
                           type="button"
                           onClick={() => toggleExpandedRow(expandKey)}
@@ -4306,7 +4835,7 @@ function MultiMetricLeaderboard({
                     </div>
                   </td>
 
-                  {visibleMetrics.map((metric) => {
+                  {tableMetrics.map((metric) => {
                     const score = row.values[metric.column_key]
                     const annotations = row.annotations_by_metric?.[metric.column_key]
                     const comparabilityStatus =
@@ -4400,10 +4929,10 @@ function MultiMetricLeaderboard({
                       : <span style={{ color: "var(--fg-subtle)" }}>—</span>}
                   </td>
                 </tr>
-                {isResearchView && isExpanded && matchingResult && (
+                {canExpandRepro && isExpanded && matchingResult && (
                   <tr>
                     <td
-                      colSpan={visibleMetrics.length + 7}
+                      colSpan={tableMetrics.length + 6}
                       style={{ background: "var(--bg-warm)", padding: "20px 24px" }}
                     >
                       <div className="space-y-3">
@@ -4412,7 +4941,7 @@ function MultiMetricLeaderboard({
                           benchmarkKey={summary.benchmark_id ?? summary.composite_benchmark_key}
                           evalName={summary.evaluation_name}
                           snapshotId={summary.snapshot_id}
-                          comparabilityByMetric={visibleMetrics
+                          comparabilityByMetric={tableMetrics
                             .filter(
                               (metric) =>
                                 isNumericScore(row.values[metric.column_key]) ||
@@ -4431,7 +4960,16 @@ function MultiMetricLeaderboard({
                             modelId={matchingResult.model_info.id}
                             benchmarkName={summary.evaluation_name}
                             benchmarkId={summary.evaluation_id}
-                            score={formatRawScore(matchingResult.score, summary.metric_config.unit)}
+                            score={
+                              isSingleMetricFiltered &&
+                              activeRootMetric &&
+                              isNumericScore(row.values[activeRootMetric.column_key])
+                                ? formatMetricValue(
+                                    activeRootMetric.column_key,
+                                    row.values[activeRootMetric.column_key]!,
+                                  )
+                                : formatRawScore(matchingResult.score, summary.metric_config.unit)
+                            }
                             sourceUrl={matchingResult.source_metadata.source_url}
                             sourceRecordUrl={matchingResult.source_record_url}
                             eeeRecordUrl={matchingResult.eee_record_url}
@@ -4446,8 +4984,10 @@ function MultiMetricLeaderboard({
 
               {filteredRows.length === 0 && (
                 <tr>
-                  <td colSpan={visibleMetrics.length + 6} style={{ padding: "32px 16px", textAlign: "center", color: "var(--fg-muted)" }}>
-                    No models match the selected parameter range.
+                  <td colSpan={tableMetrics.length + 6} style={{ padding: "32px 16px", textAlign: "center", color: "var(--fg-muted)" }}>
+                    {isSingleMetricFiltered && activeRootMetric
+                      ? `No models match the current filters for ${getMetricChipLabel(activeRootMetric)}.`
+                      : "No models match the selected parameter range."}
                   </td>
                 </tr>
               )}

@@ -26,7 +26,14 @@ import type {
   ScaleConversion,
 } from "./backend-artifacts"
 import { isPercentUnit, isPhysicalQuantityUnit, isPlainQuantityUnit } from "./score-scale"
-import { averageable, averageReadings, onOneScale, type AverageableReading } from "./headline-readings"
+import {
+  averageable,
+  averageReadings,
+  formatReading,
+  onOneScale,
+  type AverageableReading,
+} from "./headline-readings"
+import { getComparisonMetricKey } from "./metric-selection"
 
 export type OverlapSourceKind = "comparison-index" | "summary"
 
@@ -38,6 +45,7 @@ export interface OverlapPart {
   score: number
   displayScore: string
   unit: string | null
+  statedUnitless?: boolean
   /** The model's rank on the part's own lead reading. */
   rank: { position: number; total: number } | null
 }
@@ -57,6 +65,7 @@ export interface OverlapAppearance {
   score: number
   displayScore: string
   unit: string | null
+  statedUnitless?: boolean
   /** Set when the source reports the benchmark only through its parts:
    *  `score` is their mean when they are averageable. */
   parts?: OverlapPart[]
@@ -104,6 +113,9 @@ export interface OverlapRow {
    *  latency, cost…): scores are raw quantities in that unit and must never
    *  be %-formatted or ×100-harmonised. Null → percent-family display. */
   plainUnit: string | null
+  /** True when every appearance is a stated-unitless secondary metric (e.g.
+   *  signed bias score, word count): display raw numbers, never %. */
+  statedUnitless?: boolean
 }
 
 /** One of the current model's own result rows, keyed by eval_summary_id.
@@ -132,6 +144,7 @@ export interface OverlapSummaryCandidate {
   /** NaN for parts that are not averageable. */
   score: number
   unit: string | null
+  statedUnitless?: boolean
   metricSummaryId: string
   metricName: string
   metricKey: string | null
@@ -168,6 +181,7 @@ export interface OverlapLeadReading {
   metricSummaryId: string
   split: string | null
   rank: { position: number; total: number } | null
+  statedUnitless?: boolean
 }
 
 const tCrit95: Record<number, number> = {
@@ -259,10 +273,23 @@ function overlapRowFrom(
   // number, which keeps its NaN.
   const scale = onOneScale(collected.map(readingOf))
   const sameUnit = new Set(collected.map((c) => (c.unit ?? "").trim().toLowerCase())).size === 1
+  const allStatedUnitless =
+    collected.length > 0 && collected.every((c) => Boolean(c.statedUnitless) && !c.unit)
   let scaled: OverlapAppearance[]
   let useHigh: boolean
   let plainUnit: string | null = null
-  if (scale && (scale.canonical || !sameUnit)) {
+  let statedUnitless = false
+  if (allStatedUnitless) {
+    // Stated-unitless secondary metrics (signed bias scores, word counts, RTFx)
+    // must keep their raw reported numbers even when the producer stamped
+    // score_canonical / scale_conversion ("none" or bounded [-1, 1]).
+    useHigh = false
+    statedUnitless = true
+    scaled = collected.map((c) => ({
+      ...c,
+      displayScore: Number.isFinite(c.score) ? formatReading(c.score, null) : "",
+    }))
+  } else if (scale && (scale.canonical || !sameUnit)) {
     useHigh = scale.unit === "percent"
     scaled = collected.map((c, i) => ({
       ...c,
@@ -311,6 +338,7 @@ function overlapRowFrom(
     ci95,
     isPercentScale: useHigh,
     plainUnit,
+    ...(statedUnitless ? { statedUnitless: true } : {}),
   }
 }
 
@@ -318,24 +346,49 @@ function overlapRowFrom(
 function partsAppearanceFields(
   parts: Array<Omit<OverlapPart, "displayScore">>,
   readings: AverageableReading[],
-): Pick<OverlapAppearance, "metricKey" | "lowerIsBetter" | "split" | "score" | "unit" | "displayScore" | "parts" | "metricName"> {
-  const average = averageReadings(readings)
+): Pick<
+  OverlapAppearance,
+  "metricKey" | "lowerIsBetter" | "split" | "score" | "unit" | "statedUnitless" | "displayScore" | "parts" | "metricName"
+> {
+  const allPartsStatedUnitless =
+    parts.length > 0 && parts.every((p) => Boolean(p.statedUnitless) && !p.unit)
+  const effectiveReadings = allPartsStatedUnitless
+    ? readings.map((r) => ({
+        ...r,
+        unit: null,
+        scoreCanonical: undefined,
+        scaleConversion: undefined,
+      }))
+    : readings
+  const average = averageReadings(effectiveReadings)
   const score = average?.mean ?? Number.NaN
-  const unit = average?.unit ?? null
+  const statedUnitless = Boolean(average) && allPartsStatedUnitless
+  const unit = statedUnitless ? null : (average?.unit ?? null)
   return {
     metricKey: average ? (readings[0].metricKey ?? null) : null,
     lowerIsBetter: average ? Boolean(readings[0].lowerIsBetter) : false,
     split: null,
     score,
     unit,
-    displayScore: average ? formatHeuristicPercent(score, unit) : "",
+    ...(statedUnitless ? { statedUnitless: true } : {}),
+    displayScore: average
+      ? statedUnitless
+        ? formatReading(score, null)
+        : formatHeuristicPercent(score, unit)
+      : "",
     metricName: partsMetricName(parts),
     parts: withDisplay(parts),
   }
 }
 
 function withDisplay(parts: Array<Omit<OverlapPart, "displayScore">>): OverlapPart[] {
-  return parts.map((part) => ({ ...part, displayScore: formatHeuristicPercent(part.score, part.unit) }))
+  return parts.map((part) => ({
+    ...part,
+    displayScore:
+      part.statedUnitless && !part.unit
+        ? formatReading(part.score, null)
+        : formatHeuristicPercent(part.score, part.unit),
+  }))
 }
 
 export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
@@ -435,6 +488,7 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
           if (cellInfo == null || !Number.isFinite(cellInfo.score)) continue
           const score = cellInfo.score
           const unit = targetMetric.unit ?? null
+          const statedUnitless = Boolean(lead.statedUnitless && !unit)
           // Generation params prefer the score cell; absent fields (old
           // snapshots) fall back to the unique-row summary join. A null on
           // the cell is authoritative ("not reported"), not absence.
@@ -463,12 +517,13 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
               evalSummaryId: evalId,
               metricSummaryId: targetMetric.metric_summary_id,
               metricName: targetMetric.metric_name ?? "",
-              metricKey: targetMetric.metric_key ?? null,
+              metricKey: getComparisonMetricKey(targetMetric),
               lowerIsBetter: Boolean(targetMetric.lower_is_better),
               split: lead.split,
               score,
-              displayScore: formatHeuristicPercent(score, unit),
+              displayScore: statedUnitless ? formatReading(score, null) : formatHeuristicPercent(score, unit),
               unit,
+              ...(statedUnitless ? { statedUnitless: true } : {}),
               temperature,
               maxTokens,
               collectionId: fallback?.collectionId ?? null,
@@ -494,6 +549,7 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
           metricName: m.appearance.metricName,
           score: m.appearance.score,
           unit: m.appearance.unit,
+          ...(m.appearance.statedUnitless ? { statedUnitless: true } : {}),
           rank: m.rank,
         })
         if (own) {
@@ -618,6 +674,7 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
           evalSummaryId: ids[0] ?? "",
           ...(c.ownEvalParts?.length ? { ownEvalParts: withDisplay(c.ownEvalParts) } : {}),
         }
+    const statedUnitless = Boolean(c.statedUnitless && !c.unit)
     out.push(
       overlapRowFrom(c.groupKey, c.groupKey, c.displayName, [
         {
@@ -629,8 +686,13 @@ export function buildOverlapRows(input: BuildOverlapRowsInput): OverlapRow[] {
           lowerIsBetter: c.lowerIsBetter,
           split: c.split,
           score: c.score,
-          displayScore: Number.isFinite(c.score) ? formatHeuristicPercent(c.score, c.unit) : "",
+          displayScore: Number.isFinite(c.score)
+            ? statedUnitless
+              ? formatReading(c.score, null)
+              : formatHeuristicPercent(c.score, c.unit)
+            : "",
           unit: c.unit,
+          ...(statedUnitless ? { statedUnitless: true } : {}),
           temperature: c.temperature,
           maxTokens: c.maxTokens,
           collectionId: c.collectionId ?? null,

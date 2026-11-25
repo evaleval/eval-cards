@@ -69,7 +69,12 @@ function pointsForColumn(
   const points: DistributionPoint[] = []
   for (const row of rows ?? []) {
     const raw = (row.values as Record<string, unknown> | undefined)?.[columnKey]
-    const numeric = typeof raw === "number" ? raw : Number(raw)
+    const numeric =
+      typeof raw === "number"
+        ? raw
+        : typeof raw === "string" && raw.trim() !== ""
+          ? Number(raw)
+          : Number.NaN
     if (!Number.isFinite(numeric)) continue
     const modelInfo = (row as { model_info?: { name?: string; release_date?: string | null } }).model_info
     points.push({

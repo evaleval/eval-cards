@@ -235,6 +235,7 @@ const EVAL_CELL_JOIN_COLUMNS = `
   CAST(to_json(e.derived_tags) AS VARCHAR) AS eval_derived_tags,
   CAST(to_json(e.metric_config) AS VARCHAR) AS eval_metric_config,
   CAST(to_json(e.source_data) AS VARCHAR) AS eval_source_data,
+  e.primary_metric_id AS eval_primary_metric_id,
   e.is_summary_score AS eval_is_summary_score
 `
 
@@ -547,7 +548,23 @@ function scoreDetailsFromRow(row: Row): ScoreDetails {
 }
 
 function metricConfigFromRow(row: Row): MetricConfig {
-  const config = (parseMaybeJson(row.metric_config) ?? parseMaybeJson(row.eval_metric_config) ?? {}) as Partial<MetricConfig>
+  const rawRowConfig = parseMaybeJson(row.metric_config)
+  const rawEvalConfig = parseMaybeJson(row.eval_metric_config)
+  const metricKey = optionalString(row.metric_id)
+  const primaryMetricId = optionalString(row.eval_primary_metric_id)
+  const isLeadRow = row.is_lead_metric == null ? null : Boolean(row.is_lead_metric)
+  // evals_view.metric_config describes eval_primary_metric_id, so its fields
+  // stand in for missing row fields only when this reading sits on that metric
+  // (or is not explicitly marked non-lead when primaryMetricId is absent).
+  const inheritsPrimaryConfig = primaryMetricId
+    ? metricKey === primaryMetricId
+    : isLeadRow !== false
+  const config = (
+    rawRowConfig ??
+    (inheritsPrimaryConfig ? rawEvalConfig : undefined) ??
+    {}
+  ) as Partial<MetricConfig>
+  const unitFallback = ((rawRowConfig ?? (inheritsPrimaryConfig ? rawEvalConfig : undefined) ?? {}) as Partial<MetricConfig>).unit
   const scoreType = config.score_type === "binary" || config.score_type === "discrete"
     ? config.score_type
     : "continuous"
@@ -563,11 +580,11 @@ function metricConfigFromRow(row: Row): MetricConfig {
     ),
     lower_is_better: Boolean(row.lower_is_better ?? config.lower_is_better ?? false),
     score_type: scoreType,
-    min_score: optionalNumber(config.min_score ?? row.min_score),
-    max_score: optionalNumber(config.max_score ?? row.max_score),
-    unit: readingUnit(optionalString(row.metric_unit), optionalString(config.unit), {
-      metricKey: optionalString(row.metric_id),
-      primaryMetricId: optionalString(row.eval_primary_metric_id),
+    min_score: optionalNumber(row.min_score ?? config.min_score),
+    max_score: optionalNumber(row.max_score ?? config.max_score),
+    unit: readingUnit(optionalString(row.metric_unit), optionalString(unitFallback), {
+      metricKey,
+      primaryMetricId: primaryMetricId ?? (isLeadRow === false ? "__non_lead__" : undefined),
     }),
   }
 }
@@ -767,9 +784,18 @@ function reshapeCellToModelResult(row: Row): ModelResultForBenchmark {
     metric_source_label: optionalString(row.metric_source_label),
     comparability_status: comparabilityStatusFromRow(row),
     score_published: optionalNumber(row.score_published),
-    aggregate_components: asArray<NonNullable<ModelResultForBenchmark["aggregate_components"]>[number]>(
-      aggregateComponents
-    ),
+    value_aggregation: optionalString(row.value_aggregation),
+    aggregate_components: asArray<Record<string, unknown>>(aggregateComponents).map((item) => ({
+      ...(item as NonNullable<ModelResultForBenchmark["aggregate_components"]>[number]),
+      composite_benchmark_key:
+        optionalString(item.composite_benchmark_key) ?? optionalString(item.composite_slug),
+      composite_benchmark_name:
+        optionalString(item.composite_benchmark_name) ?? optionalString(item.composite_display_name),
+      composite_slug: optionalString(item.composite_slug),
+      composite_display_name: optionalString(item.composite_display_name),
+      source_name: optionalString(item.source_name),
+      source_organization_name: optionalString(item.source_organization_name),
+    })),
     result: resultFromCell(row),
   }
 }
@@ -800,6 +826,7 @@ function reshapeCellToBenchmarkEvaluation(row: Row): BenchmarkEvaluation {
       optionalString(row.eval_parent_benchmark_display_name) ??
       optionalString(row.eval_composite_benchmark_name),
     benchmark_leaf_name: optionalString(row.eval_evaluation_name),
+    primary_metric_id: optionalString(row.eval_primary_metric_id),
     is_slice: Boolean(row.eval_is_slice),
     is_summary_score: Boolean(row.eval_is_summary_score ?? row.is_summary_score),
     source_data: sourceDataFromRow(row),
@@ -982,6 +1009,8 @@ interface EvalResultsViewCapabilities {
   split: boolean
   /** `score_canonical` and `scale_conversion`: the producer's scale fields. */
   canonicalScale: boolean
+  /** `value_aggregation`: whether `score` is a single fact, median, mean, or weighted_mean. */
+  valueAggregation: boolean
 }
 
 /**
@@ -1028,6 +1057,7 @@ async function evalResultsViewCapabilities(): Promise<EvalResultsViewCapabilitie
     leadMetric: names.has("is_lead_metric"),
     split: names.has("split"),
     canonicalScale: names.has("score_canonical") && names.has("scale_conversion"),
+    valueAggregation: names.has("value_aggregation"),
   }
 }
 
@@ -1114,7 +1144,10 @@ function additiveEvalRowColumns(caps: EvalResultsViewCapabilities) {
   ${collectionRowColumns(caps)},
   ${caps.evaluatorDisplayName
     ? "r.evaluator_display_name"
-    : "CAST(NULL AS VARCHAR) AS evaluator_display_name"},${issue47Columns(caps)}`
+    : "CAST(NULL AS VARCHAR) AS evaluator_display_name"},
+  ${caps.valueAggregation
+    ? "r.value_aggregation"
+    : "CAST(NULL AS VARCHAR) AS value_aggregation"},${issue47Columns(caps)}`
 }
 
 function evalCellJoinColumns(caps: EvalResultsViewCapabilities) {
@@ -1443,6 +1476,139 @@ function loadEvalMatrices(): Record<string, MatrixEntry> | null {
   return evalMatrixCache
 }
 
+export function pivotMultiMetricLeaderboardRows(
+  declaredRootMetrics: ReadonlyArray<{
+    column_key?: string
+    metric_id?: string
+    metric_summary_id?: string
+    scope?: string
+    lower_is_better?: boolean | null
+  }>,
+  reshapedAllMetricResults: ReadonlyArray<ModelResultForBenchmark>,
+  allMetricCellRows: ReadonlyArray<Row>,
+  baseRowByRoute: ReadonlyMap<string, ModelResultForBenchmark>,
+) {
+  const colKeyBySummaryId = new Map<string, string>()
+  const colKeyByMetricId = new Map<string, string>()
+  const lowerByColKey = new Map<string, boolean>()
+  for (const m of declaredRootMetrics) {
+    const colKey = m.column_key ?? m.metric_id ?? m.metric_summary_id
+    if (!colKey) continue
+    if (m.metric_summary_id) colKeyBySummaryId.set(m.metric_summary_id, colKey)
+    if (m.metric_id && !colKeyByMetricId.has(m.metric_id)) colKeyByMetricId.set(m.metric_id, colKey)
+    if (m.column_key && !colKeyByMetricId.has(m.column_key)) colKeyByMetricId.set(m.column_key, colKey)
+    lowerByColKey.set(colKey, Boolean(m.lower_is_better))
+  }
+
+  type PivotAcc = {
+    base: ModelResultForBenchmark
+    values: Record<string, number>
+    assistedByCol: Record<string, boolean>
+    verified: Record<string, boolean>
+    comparability: Record<string, ComparabilityStatus>
+    judgeCondition: Record<string, string>
+    judgeAlternates: Record<string, Map<string, number>>
+  }
+  const byModelRoute = new Map<string, PivotAcc>()
+
+  for (let i = 0; i < reshapedAllMetricResults.length; i++) {
+    const mr = reshapedAllMetricResults[i]
+    const rawRow = allMetricCellRows[i]
+    const canonical = optionalNumber(rawRow?.score_canonical)
+    const cellScore = canonical != null && Number.isFinite(canonical) ? canonical : mr.score
+    if (!Number.isFinite(cellScore) || !mr.model_route_id) continue
+    const mSummaryId = optionalString(rawRow?.metric_summary_id)
+    const mId = optionalString(rawRow?.metric_id)
+    const colKey =
+      (mSummaryId ? colKeyBySummaryId.get(mSummaryId) : undefined) ??
+      (mId ? colKeyByMetricId.get(mId) : undefined)
+    if (!colKey) continue
+
+    if (!isHeadlineResult(mr)) {
+      // Mirror scripts/build-eval-matrices.mjs: preserve non-headline judge
+      // readings on the cell instead of dropping alternate panels silently.
+      if (!mr.judge_condition) continue
+      const existing = byModelRoute.get(mr.model_route_id) ?? {
+        base: baseRowByRoute.get(mr.model_route_id) ?? mr,
+        values: {},
+        assistedByCol: {},
+        verified: {},
+        comparability: {},
+        judgeCondition: {},
+        judgeAlternates: {},
+      }
+      const altMap = existing.judgeAlternates[colKey] ?? new Map<string, number>()
+      if (!altMap.has(mr.judge_condition)) {
+        altMap.set(mr.judge_condition, cellScore as number)
+      }
+      existing.judgeAlternates[colKey] = altMap
+      byModelRoute.set(mr.model_route_id, existing)
+      continue
+    }
+
+    const acc = byModelRoute.get(mr.model_route_id) ?? {
+      base: baseRowByRoute.get(mr.model_route_id) ?? mr,
+      values: {},
+      assistedByCol: {},
+      verified: {},
+      comparability: {},
+      judgeCondition: {},
+      judgeAlternates: {},
+    }
+    const nextAssisted = isAssistedResult(mr.protocol_condition)
+    const hasPrev = Object.prototype.hasOwnProperty.call(acc.values, colKey)
+    const prevAssisted = acc.assistedByCol[colKey] ?? false
+    const lowerIsBetter = lowerByColKey.get(colKey) ?? false
+    const shouldReplace =
+      !hasPrev ||
+      (prevAssisted && !nextAssisted) ||
+      (prevAssisted === nextAssisted &&
+        (lowerIsBetter ? cellScore < acc.values[colKey] : cellScore > acc.values[colKey]))
+    if (shouldReplace) {
+      acc.values[colKey] = cellScore as number
+      acc.assistedByCol[colKey] = nextAssisted
+      if (mr.result?.is_verified_evaluator) acc.verified[colKey] = true
+      else delete acc.verified[colKey]
+      const comp = comparabilityStatusFromRow(rawRow ?? {})
+      if (comp) acc.comparability[colKey] = comp
+      else delete acc.comparability[colKey]
+      if (mr.judge_condition) acc.judgeCondition[colKey] = mr.judge_condition
+      else delete acc.judgeCondition[colKey]
+    }
+    byModelRoute.set(mr.model_route_id, acc)
+  }
+
+  return Array.from(byModelRoute.values())
+    .filter((acc) => Object.keys(acc.values).length > 0)
+    .map((acc) => {
+      const alternatesByMetric: Record<string, Array<{ judge_condition: string; score: number }>> = {}
+      for (const [col, altMap] of Object.entries(acc.judgeAlternates)) {
+        if (!Object.prototype.hasOwnProperty.call(acc.values, col)) continue
+        const entries = Array.from(altMap.entries())
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([judge_condition, score]) => ({ judge_condition, score }))
+        if (entries.length > 0) alternatesByMetric[col] = entries
+      }
+      return {
+        model_info: acc.base.model_info,
+        model_route_id: acc.base.model_route_id,
+        model_group_id: acc.base.model_group_id,
+        evaluation_timestamp: acc.base.evaluation_timestamp,
+        source_metadata: acc.base.source_metadata,
+        source_data: acc.base.source_data,
+        values: acc.values,
+        verified: Object.keys(acc.verified).length > 0 ? acc.verified : undefined,
+        comparability_status_by_metric:
+          Object.keys(acc.comparability).length > 0 ? acc.comparability : undefined,
+        judge_condition_by_metric:
+          Object.keys(acc.judgeCondition).length > 0 ? acc.judgeCondition : undefined,
+        judge_alternates_by_metric:
+          Object.keys(alternatesByMetric).length > 0 ? alternatesByMetric : undefined,
+        metrics_present: Object.keys(acc.values).length,
+      }
+    })
+}
+
 export async function getEvalSummaryById(evalId: string): Promise<BenchmarkEvalSummary | null> {
   // Use the same aliased projection as EVAL_LIST_COLUMNS so the legacy
   // `composite_benchmark_*` / `benchmark_family_*` consumer fields are
@@ -1508,6 +1674,37 @@ export async function getEvalSummaryById(evalId: string): Promise<BenchmarkEvalS
     }
   }
 
+  // When an eval declares >1 root metric, fetch all non-null rows for this
+  // evaluation BEFORE resolving judge display names and assembling the summary
+  // so multi-metric `leaderboard_rows` include every root measure, secondary-only
+  // models (e.g. models reporting Attack Success Rate on HarmBench without
+  // HarmBench Refusal Score), and non-primary judge display names even when
+  // pre-baked data/eval-matrices.json is absent. Single-metric evals skip this.
+  const parsedLeaderboardMetrics = parseMaybeJson(evalRow.leaderboard_metrics)
+  const declaredMetrics = (Array.isArray(parsedLeaderboardMetrics)
+    ? parsedLeaderboardMetrics
+    : []) as Array<{
+    column_key?: string
+    metric_id?: string
+    metric_summary_id?: string
+    scope?: string
+    lower_is_better?: boolean | null
+  }>
+  const declaredRootMetrics = declaredMetrics.filter((m) => m.scope !== "subtask")
+  let allMetricCellRows: Row[] = []
+  if (declaredRootMetrics.length > 1) {
+    allMetricCellRows = await readRows<Row>(
+      `SELECT ${evalCellJoinColumns(caps)}
+       FROM eval_results_view r
+       LEFT JOIN evals_view e ON r.evaluation_id = e.evaluation_id
+       WHERE r.evaluation_id = ?
+         AND r.score IS NOT NULL
+       ORDER BY r.position ASC NULLS LAST`,
+      [evalId],
+      { contextLabel: `eval_id=${evalId} all_metrics` }
+    )
+  }
+
   const summary = {
     ...evalRow,
     derived_tags: coerceTags(evalRow.derived_tags),
@@ -1519,29 +1716,39 @@ export async function getEvalSummaryById(evalId: string): Promise<BenchmarkEvalS
     instance_data: parseMaybeJson(evalRow.instance_data),
     root_metrics: parseMaybeJson(evalRow.root_metrics),
     subtasks: parseMaybeJson(evalRow.subtasks),
-    leaderboard_metrics: parseMaybeJson(evalRow.leaderboard_metrics),
+    leaderboard_metrics: parsedLeaderboardMetrics,
     reproducibility_summary: parseMaybeJson(evalRow.reproducibility_summary),
     provenance_summary: parseMaybeJson(evalRow.provenance_summary),
     comparability_summary: parseMaybeJson(evalRow.comparability_summary),
     source_data: parseMaybeJson(evalRow.source_data),
     model_results: cellRows.map(reshapeCellToModelResult),
     snapshot_id: await evalResultsSnapshotId(),
-    judge_display_names: await fetchJudgeDisplayNames([...cellRows, ...matrixJudgeRows]),
+    judge_display_names: await fetchJudgeDisplayNames([
+      ...cellRows,
+      ...allMetricCellRows,
+      ...matrixJudgeRows,
+    ]),
   } as unknown as BenchmarkEvalSummary
+
+  const baseRowByRoute = new Map<string, ModelResultForBenchmark>()
+  for (const result of summary.model_results) {
+    if (result.model_route_id) {
+      baseRowByRoute.set(result.model_route_id, result)
+    }
+  }
+  const reshapedAllMetricResults =
+    allMetricCellRows.length > 0 ? allMetricCellRows.map(reshapeCellToModelResult) : []
+  for (const result of reshapedAllMetricResults) {
+    if (result.model_route_id && !baseRowByRoute.has(result.model_route_id)) {
+      baseRowByRoute.set(result.model_route_id, result)
+    }
+  }
 
   // Splice in precomputed multi-metric leaderboard_rows and subtask
   // leaderboard_metrics from data/eval-matrices.json. Models in the matrix
-  // but not in cellRows (zero-coverage primary metric) are also surfaced
-  // so a user can still see per-slice or non-primary scores. The base row
-  // shape comes from any matching cellRow when one exists.
+  // but not in primary cellRows (zero-coverage primary metric) resolve their
+  // base metadata from `baseRowByRoute` (enriched by `allMetricCellRows`).
   if (matrix) {
-    const baseRowByRoute = new Map<string, ModelResultForBenchmark>()
-    for (const result of summary.model_results) {
-      if (result.model_route_id) {
-        baseRowByRoute.set(result.model_route_id, result)
-      }
-    }
-
     const leaderboardRows = matrix.leaderboard_rows
       .map((row) => {
         const base = baseRowByRoute.get(row.model_route_id)
@@ -1610,6 +1817,23 @@ export async function getEvalSummaryById(evalId: string): Promise<BenchmarkEvalS
       ]
       summary.leaderboard_metrics =
         merged as unknown as BenchmarkEvalSummary["leaderboard_metrics"]
+    }
+  }
+
+  // Live multi-metric pivot fallback when data/eval-matrices.json is not baked:
+  // build `leaderboard_rows` directly from `allMetricCellRows` across every
+  // declared root metric so per-source metric switching works everywhere.
+  if (!(summary.leaderboard_rows && summary.leaderboard_rows.length > 0) && reshapedAllMetricResults.length > 0) {
+    const pivotedRows = pivotMultiMetricLeaderboardRows(
+      declaredRootMetrics,
+      reshapedAllMetricResults,
+      allMetricCellRows,
+      baseRowByRoute,
+    )
+    if (pivotedRows.length > 0) {
+      summary.leaderboard_rows = dedupeLeaderboardRowsByModelIdentity(
+        pivotedRows as BenchmarkEvalSummary["leaderboard_rows"] & object[],
+      )
     }
   }
 

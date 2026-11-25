@@ -28,18 +28,30 @@ import { formatReading } from "@/lib/headline-readings"
 import { getMetricChipLabel } from "@/lib/metric-labels"
 import { routeIdFromSegments } from "@/lib/utils"
 
+function parseFiniteCell(raw: unknown): number | null {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) ? raw : null
+  }
+  if (typeof raw === "string" && raw.trim() !== "") {
+    const n = Number(raw)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
 /**
- * Embed-only leaderboard for one eval. Single-metric evals render as a
- * compact ranked list; multi-metric evals (e.g. agentharm with
- * Copyright / Cybercrime / … columns) render as a multi-column table,
- * mirroring the eval page's MultiMetricLeaderboard layout.
+ * Embed-only leaderboard for one eval. Single-metric evals — and multi-metric
+ * evals filtered via `?metric=` or declaring `primary_metric_id` — render as a
+ * single-metric ranked list of models reporting that measure. Multi-metric
+ * evals with neither `?metric=` nor `primary_metric_id` preserve the
+ * multi-column matrix.
  *
  * Slice-aware: when the eval has subtask slices (e.g. Global MMLU's
  * per-language splits), shows a SPLIT dropdown above the table.
  *
  * Query params:
  *   ?limit=25            — cap rows (default 25, max 100)
- *   ?metric=<column_key> — for multi-metric evals, sort by this column
+ *   ?metric=<column_key> — filter columns and rows to this metric
  *                          (doubles as the merged metric id for merged ids)
  *   ?slice=<subtask_key> — start with this slice selected
  *
@@ -54,6 +66,7 @@ export default function EmbedEvalLeaderboard() {
   const limitRaw = Number(searchParams.get("limit") ?? "25")
   const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, limitRaw)) : 25
   const sortMetricKey = searchParams.get("metric")
+  const requestedMetricParam = sortMetricKey && sortMetricKey.trim() ? sortMetricKey.trim() : null
   const sliceParam = searchParams.get("slice")
 
   const { summary, error, sources, activeSource, setActiveSource, scaleNotes } = useEmbedEvalSummary(
@@ -104,14 +117,16 @@ export default function EmbedEvalLeaderboard() {
   // Sort key — URL param seeds the initial value; column-header clicks
   // override it without touching the URL. Null means the eval's
   // `primary_metric_id` column (or the active slice of it).
-  const [sortOverride, setSortOverride] = useState<string | null>(
-    sortMetricKey && sortMetricKey.trim() ? sortMetricKey.trim() : null,
-  )
+  const [sortOverride, setSortOverride] = useState<string | null>(requestedMetricParam)
   // Sort direction override. Null = derive from the metric's
   // lower_is_better (default behavior). Clicking the active column flips
   // this; clicking a different column resets to null so the new column
   // picks up its own default direction.
   const [sortDirOverride, setSortDirOverride] = useState<"asc" | "desc" | null>(null)
+  useEffect(() => {
+    setSortOverride(requestedMetricParam)
+    setSortDirOverride(null)
+  }, [requestedMetricParam])
   useEffect(() => {
     if (!sliceAxis) return
     if (activeSlice === ALL_SLICE_KEY) return
@@ -185,28 +200,45 @@ export default function EmbedEvalLeaderboard() {
     // Top-level metrics first; subtask metrics keep their order after them.
     // We display all metrics that have at least one numeric score in the
     // rows — pruning empty columns keeps the table readable.
+    // Resolve declared ?metric= / primary_metric_id against eligible metrics
+    // BEFORE pruning empty columns so an all-null selected metric never falls
+    // back to rendering a different metric's scores.
+    const defaultKey =
+      sliceAxis && activeSlice !== ALL_SLICE_KEY
+        ? `${sliceAxis.primaryColumn}::${activeSlice}`
+        : primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id)
+    const requestedMetric = requestedMetricParam
+      ? metrics.find((m) => m.column_key === requestedMetricParam) ??
+        metrics.find((m) => m.metric_id === requestedMetricParam) ??
+        metrics.find((m) => m.metric_summary_id === requestedMetricParam) ??
+        null
+      : null
+    const defaultMetric = defaultKey
+      ? metrics.find((m) => m.column_key === defaultKey) ?? null
+      : null
+    const filteredMetric = requestedMetric ?? (!sliceAxis ? defaultMetric : null)
+
     const metricsWithData = metrics.filter((m) => {
       const key = m.column_key ?? m.metric_summary_id
       if (!key) return false
       for (const row of rows) {
         const raw = (row.values as Record<string, unknown> | undefined)?.[key]
-        const n = typeof raw === "number" ? raw : Number(raw)
-        if (Number.isFinite(n)) return true
+        if (parseFiniteCell(raw) !== null) return true
       }
       return false
     })
-    if (metricsWithData.length === 0) return null
-    const isMulti = metricsWithData.length > 1
+    const displayedMetrics = filteredMetric ? [filteredMetric] : metricsWithData
+    if (displayedMetrics.length === 0) return null
+    const isMulti = displayedMetrics.length > 1
 
-    // Sort key: explicit override wins, else the primary metric's column
-    // (its active slice when a slice is picked).
-    const defaultKey =
-      sliceAxis && activeSlice !== ALL_SLICE_KEY
-        ? `${sliceAxis.primaryColumn}::${activeSlice}`
-        : primaryMetricColumnKey(summary.leaderboard_metrics, summary.primary_metric_id)
-    const sortMetric =
-      (sortOverride && metricsWithData.find((m) => m.column_key === sortOverride)) ||
-      metricsWithData.find((m) => m.column_key === defaultKey)
+    const sortMetric: LbMetric | undefined =
+      filteredMetric ??
+      (sortOverride
+        ? displayedMetrics.find(
+            (m) => m.column_key === sortOverride || m.metric_id === sortOverride,
+          )
+        : undefined) ??
+      displayedMetrics.find((m) => m.column_key === defaultKey)
     const sortKey = sortMetric?.column_key ?? sortMetric?.metric_summary_id ?? ""
     // The sorted metric's own direction; a metric reporting none sorts
     // high-to-low and says its direction is not reported.
@@ -233,8 +265,17 @@ export default function EmbedEvalLeaderboard() {
     }
 
     // A study embed takes its rows from the observation grain, where the
-    // protocol lives; every other embed keeps the metric matrix.
-    const protocolMode = protocol && !isMulti && !sliceAxis ? protocol : null
+    // protocol lives; every other embed keeps the metric matrix. Because
+    // `summary.model_results` only carries the eval's primary metric, only
+    // enable protocol mode on single-metric evals displaying that metric —
+    // never on multi-metric evals (even when secondary columns are all-null).
+    const isDisplayingSinglePrimaryMetric =
+      metrics.length <= 1 &&
+      (defaultMetric != null
+        ? filteredMetric?.column_key === defaultMetric.column_key
+        : !requestedMetric || requestedMetric === metrics[0])
+    const protocolMode =
+      protocol && isDisplayingSinglePrimaryMetric && !sliceAxis ? protocol : null
     let sourceRows: TableRow[]
     if (protocolMode) {
       // Assisted runs, where the model is told when its answer is
@@ -266,11 +307,11 @@ export default function EmbedEvalLeaderboard() {
         .map((row) => {
           const values: Record<string, number> = {}
           let anyScore = false
-          for (const m of metricsWithData) {
+          for (const m of displayedMetrics) {
             const key = m.column_key ?? m.metric_summary_id ?? ""
             const raw = (row.values as Record<string, unknown> | undefined)?.[key]
-            const n = typeof raw === "number" ? raw : Number(raw)
-            if (Number.isFinite(n)) {
+            const n = parseFiniteCell(raw)
+            if (n !== null) {
               values[key] = n
               anyScore = true
             }
@@ -323,7 +364,7 @@ export default function EmbedEvalLeaderboard() {
     }
 
     return {
-      metrics: metricsWithData,
+      metrics: displayedMetrics,
       rows: tableRows,
       sortKey,
       sortLower,
@@ -331,7 +372,7 @@ export default function EmbedEvalLeaderboard() {
       isMulti,
       protocol: protocolMode,
     }
-  }, [summary, sortOverride, sortDirOverride, sliceAxis, activeSlice, protocol, protocolSort])
+  }, [summary, requestedMetricParam, sortOverride, sortDirOverride, sliceAxis, activeSlice, protocol, protocolSort])
 
   if (error) {
     // Keep the source picker reachable so a failed pinned-source fetch
@@ -562,7 +603,20 @@ export default function EmbedEvalLeaderboard() {
             </tr>
           </thead>
           <tbody>
-            {visible.map((row, i) => (
+            {visible.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={2 + (view.protocol?.columns.length ?? 0) + view.metrics.length}
+                  className="font-mono text-center"
+                  style={{ padding: "16px 8px", fontSize: 11, color: "var(--fg-muted)" }}
+                >
+                  {view.metrics[0]
+                    ? `No models report ${getMetricChipLabel(view.metrics[0])}.`
+                    : "No models match the current selection."}
+                </td>
+              </tr>
+            ) : (
+            visible.map((row, i) => (
               <tr
                 key={`${row.modelName}-${i}`}
                 style={{ borderBottom: "1px solid var(--border-soft)" }}
@@ -651,7 +705,7 @@ export default function EmbedEvalLeaderboard() {
                   )
                 })}
               </tr>
-            ))}
+            )))}
           </tbody>
         </table>
       </div>

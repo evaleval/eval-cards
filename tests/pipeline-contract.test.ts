@@ -405,7 +405,7 @@ describe("Tier A — pipeline contracts (judge-condition view columns)", () => {
       label: "judged by GPT-4o",
       tooltip:
         "Judge model id: openai/gpt-4o-2024-05-13\n"
-        + "Other judge readings, not ranked:\n"
+        + "Other judge reports, not ranked:\n"
         + "judged by Llama 3.1 405B: 0.21",
     })
 
@@ -418,7 +418,7 @@ describe("Tier A — pipeline contracts (judge-condition view columns)", () => {
     // Headline pick with an undisclosed judge, alternates disclosed: say so.
     expect(
       judgeCellSummary(null, [{ judge_condition: llama, score: 0.21 }], displayName, format),
-    ).toMatchObject({ label: "1 other judge reading" })
+    ).toMatchObject({ label: "1 other judge report" })
 
     // Nothing named a judge.
     expect(judgeCellSummary(null, [], displayName, format)).toBeNull()

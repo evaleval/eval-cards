@@ -9,6 +9,7 @@ import {
   buildDistributionSeries,
   buildDistributionSliceAxis,
 } from "@/lib/distribution-series"
+import { getMetricChipLabel } from "@/lib/metric-labels"
 import { routeIdFromSegments } from "@/lib/utils"
 
 /**
@@ -63,6 +64,39 @@ export default function EmbedEvalFrontier() {
     [summary, sliceAxis, activeSlice],
   )
 
+  const requestedMetricParam = searchParams.get("metric")?.trim() || null
+  const requestedMetricMeta = useMemo(() => {
+    if (!requestedMetricParam || !summary) return null
+    const metrics = summary.leaderboard_metrics ?? []
+    return (
+      metrics.find(
+        (m) =>
+          m.scope !== "subtask" &&
+          (m.metric_id === requestedMetricParam || m.column_key === requestedMetricParam),
+      ) ??
+      metrics.find(
+        (m) => m.metric_id === requestedMetricParam || m.column_key === requestedMetricParam,
+      ) ??
+      null
+    )
+  }, [requestedMetricParam, summary])
+
+  const requestedMetricMissingSeries = useMemo(() => {
+    if (!requestedMetricParam || !summary || summary.merged_view) return false
+    if (!requestedMetricMeta) return false
+    const key = requestedMetricMeta.column_key ?? requestedMetricMeta.metric_summary_id
+    if (!key) return false
+    if (sliceAxis && key === sliceAxis.primaryColumn) return false
+    return !series || !series.some((s) => s.key === key)
+  }, [requestedMetricMeta, requestedMetricParam, series, sliceAxis, summary])
+
+  const initialMetricKey = useMemo(() => {
+    if (!requestedMetricParam || !series) return undefined
+    if (series.some((s) => s.key === requestedMetricParam)) return requestedMetricParam
+    const key = requestedMetricMeta?.column_key ?? requestedMetricMeta?.metric_summary_id
+    return key && series.some((s) => s.key === key) ? key : undefined
+  }, [requestedMetricMeta, requestedMetricParam, series])
+
   if (error) {
     // Keep the source picker reachable so a failed pinned-source fetch
     // isn't a dead end — switching back to Merged (or another source)
@@ -86,6 +120,19 @@ export default function EmbedEvalFrontier() {
       </div>
     )
   }
+  if (requestedMetricMissingSeries && requestedMetricMeta) {
+    return (
+      <div>
+        <EmbedSourcePicker sources={sources} value={activeSource} onChange={setActiveSource} />
+        <EmbedStudyContext summary={summary} />
+        <div className="font-mono" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+          Pareto frontier requires at least 3 models reporting{" "}
+          {getMetricChipLabel(requestedMetricMeta)}.
+        </div>
+      </div>
+    )
+  }
+
   if (!series) {
     return (
       <div className="font-mono" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
@@ -140,7 +187,12 @@ export default function EmbedEvalFrontier() {
           </select>
         </div>
       )}
-      <ScoreDistribution series={series} defaultView="frontier" showViewToggle={false} />
+      <ScoreDistribution
+        series={series}
+        initialKey={initialMetricKey}
+        defaultView="frontier"
+        showViewToggle={false}
+      />
     </div>
   )
 }

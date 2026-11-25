@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useParams } from "next/navigation"
+import { useParams, useSearchParams } from "next/navigation"
 import { BenchmarkDetail, comparisonRouteIdOf } from "@/components/benchmark-detail"
 import {
   fetchBenchmarkMetadata,
@@ -21,6 +21,8 @@ import { useComparisonIndex } from "@/lib/use-comparison-index"
  */
 export default function EmbedModelReportedMetrics() {
   const params = useParams()
+  const searchParams = useSearchParams()
+  const metricParam = searchParams.get("metric")
   const routeId = routeIdFromSegments(params.id)
   const [summary, setSummary] = useState<Awaited<ReturnType<typeof fetchModelSummary>> | null>(null)
   const [benchmarkCards, setBenchmarkCards] = useState<Record<string, BenchmarkCard>>({})
@@ -75,6 +77,7 @@ export default function EmbedModelReportedMetrics() {
       evalHierarchy={evalHierarchy}
       comparisonIndex={comparisonIndex}
       embedSurface="reported-metrics"
+      initialMetricKey={metricParam}
     />
   )
 }

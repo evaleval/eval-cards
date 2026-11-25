@@ -37,6 +37,7 @@ export interface BenchmarkEvaluation {
    *  column; absent on older snapshots, null for non-slice rows). */
   parent_benchmark_display_name?: string
   benchmark_leaf_name?: string
+  primary_metric_id?: string
   is_slice?: boolean
   benchmark_component_key?: string | null
   benchmark_component_name?: string | null

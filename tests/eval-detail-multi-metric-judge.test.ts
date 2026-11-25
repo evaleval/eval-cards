@@ -219,7 +219,7 @@ describe("EvalDetail multi-metric matrix — primary metric and judge cells", ()
     expect((html.match(/judged by GPT-4o/g) ?? []).length).toBe(4)
     // The alternate reading is named and valued inside the same tooltip —
     // it is the only place the pivot can carry it.
-    expect(html).toContain("Other judge readings, not ranked:")
+    expect(html).toContain("Other judge reports, not ranked:")
     expect(html).toContain("judged by Llama 3.1 405B Instruct Turbo: 0.21")
     expect(html).toContain("Judge model id: openai/gpt-4o-2024-05-13")
 

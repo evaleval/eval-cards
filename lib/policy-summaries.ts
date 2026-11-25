@@ -136,6 +136,21 @@ interface ModelPolicyInputs {
   benchmarkCount: number
   /** Categories actually reported, derived-tag form (snake_case). */
   reportedCategories: readonly string[]
+  /**
+   * When the model page is filtered to a single metric, supply scoped counts
+   * derived from the filtered readings so Summary view never mixes filtered
+   * benchmark counts with unfiltered card-wide totals or reproducibility gaps.
+   * Passing `reproducibilitySummary: null` explicitly marks filtered
+   * completeness as unknown (omits the reproducibility sentence rather than
+   * falsely claiming every score is complete).
+   */
+  scopedMetric?: {
+    totalResults: number
+    reproducibilitySummary: {
+      results_total: number
+      has_reproducibility_gap_count: number
+    } | null
+  }
 }
 
 export function buildModelPolicySummary({
@@ -146,17 +161,23 @@ export function buildModelPolicySummary({
   organizationNames,
   benchmarkCount,
   reportedCategories,
+  scopedMetric,
 }: ModelPolicyInputs): ModelPolicySummary {
-  const totalEvals = summary.total_evaluations
+  const isMetricScoped = scopedMetric != null
+  const totalEvals = isMetricScoped ? scopedMetric.totalResults : summary.total_evaluations
   // Denominator for the third-party share, counted from the same population as
   // the numerator so the ratio stays within 0–100%. Falls back to totalEvals
   // only if the caller passed nothing.
   const thirdPartyBase = reportedEvaluationCount > 0 ? reportedEvaluationCount : totalEvals
-  const repro = summary.reproducibility_summary
+  const repro = isMetricScoped
+    ? scopedMetric.reproducibilitySummary
+    : summary.reproducibility_summary
   const reproGap = repro?.has_reproducibility_gap_count ?? 0
-  const reproTotal = repro?.results_total ?? totalEvals
-  const provenance = summary.provenance_summary
-  const comparability = summary.comparability_summary
+  const reproTotal = isMetricScoped
+    ? (repro?.results_total ?? 0)
+    : (repro?.results_total ?? totalEvals)
+  const provenance = isMetricScoped ? undefined : summary.provenance_summary
+  const comparability = isMetricScoped ? undefined : summary.comparability_summary
 
   // ── 1. Scope ────────────────────────────────────────────────────────────
   const scopeSentence =

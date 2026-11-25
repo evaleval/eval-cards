@@ -49,10 +49,19 @@ import type { ModelSummaryCore } from "@/lib/benchmark-schema"
 import { lookupBenchmarkCard } from "@/lib/benchmark-metadata-utils"
 import {
   averageReadings,
+  formatReading,
   partsCountLabel,
   partsMeanLabel,
   type AverageableReading,
 } from "@/lib/headline-readings"
+import { MetricFilterBar, type MetricFilterItem } from "@/components/metric-filter-control"
+import {
+  buildModelMetricFilterOptions,
+  filterModelEntriesByMetric,
+  getComparisonMetricKey,
+  isStatedUnitlessReading,
+  replaceUrlQueryParam,
+} from "@/lib/metric-selection"
 import type { BenchmarkEvaluationCardData } from "@/components/benchmark-evaluation-card"
 import type {
   BenchmarkIndexEntry,
@@ -103,7 +112,7 @@ import {
   type PeerCaptionFragments,
   type SplitLabel,
 } from "@/lib/split-peers"
-import { type CSSProperties, Fragment, useState, useEffect, useMemo } from "react"
+import { type CSSProperties, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 interface BenchmarkDetailProps {
   summary: ModelSummaryCore
@@ -126,6 +135,10 @@ interface BenchmarkDetailProps {
    *  selection so the embed lands on the same metric the user saw on the
    *  page. */
   embedTargetEvalId?: string
+  /** Optional metric key pre-selected for histogram embeds (`?metric=`). */
+  embedTargetMetricKey?: string
+  /** Optional initial page-level metric filter key (`?metric=`). */
+  initialMetricKey?: string | null
 }
 
 interface BenchmarkVariant {
@@ -1381,18 +1394,22 @@ function slugifyEvalSummaryId(value: string) {
 function getEvalDetailHref(
   evaluation: BenchmarkEvaluation,
   result: EvaluationResult,
-  returnTo?: string
+  returnTo?: string,
+  activeMetricKey?: string | null,
 ) {
   const baseHref = evaluation.eval_summary_id
     ? `/evals/${routeIdToPath(evaluation.eval_summary_id)}`
     : `/evals/${slugifyEvalSummaryId(`${evaluation.benchmark || getResultBenchmarkName(evaluation, result)}__${result.evaluation_name}`)}`
 
-  if (!returnTo) {
-    return baseHref
+  const params = new URLSearchParams()
+  if (returnTo) {
+    params.set("from", returnTo)
   }
-
-  const params = new URLSearchParams({ from: returnTo })
-  return `${baseHref}?${params.toString()}`
+  if (activeMetricKey && evaluation.primary_metric_id !== activeMetricKey) {
+    params.set("metric", activeMetricKey)
+  }
+  const qs = params.toString()
+  return qs ? `${baseHref}?${qs}` : baseHref
 }
 
 function getEvalSummaryIdFromHref(href: string) {
@@ -1429,7 +1446,13 @@ function loadPeerRanks(): Promise<PeerRanksMap> {
   return peerRanksPromise
 }
 
-function formatResultDisplayScore(result: EvaluationResult) {
+function formatResultDisplayScore(
+  result: EvaluationResult,
+  evaluation?: BenchmarkEvaluation,
+) {
+  if (isStatedUnitlessReading(result, evaluation)) {
+    return formatReading(result.score_details.score, null)
+  }
   return formatRawScoreValue(result.score_details.score, result.metric_config.unit)
 }
 
@@ -1489,15 +1512,16 @@ function metricNameIfUnnamed(variant: BenchmarkVariant, labels: Array<string | n
 }
 
 function averageableReading(variant: BenchmarkVariant): AverageableReading {
-  const { result } = variant
+  const { result, evaluation } = variant
+  const unitlessSecondary = isStatedUnitlessReading(result, evaluation)
   return {
     metricKey: result.metric_key,
     lowerIsBetter: result.metric_config.lower_is_better,
     split: result.split,
-    unit: result.metric_config.unit,
+    unit: unitlessSecondary ? undefined : result.metric_config.unit,
     score: result.score_details.score,
-    scoreCanonical: result.score_canonical,
-    scaleConversion: result.scale_conversion,
+    scoreCanonical: unitlessSecondary ? undefined : result.score_canonical,
+    scaleConversion: unitlessSecondary ? undefined : result.scale_conversion,
   }
 }
 
@@ -1546,7 +1570,8 @@ function compareScoreDesc(a: number, b: number) {
 export function buildBenchmarkGroups(
   entries: Array<{ evaluation: BenchmarkEvaluation; result: EvaluationResult; category: EvalTag }>,
   benchmarkCards: Record<string, BenchmarkCard> | undefined,
-  returnTo?: string
+  returnTo?: string,
+  activeMetricKey?: string | null,
 ): BenchmarkGroup[] {
   const groups = new Map<string, BenchmarkGroup>()
 
@@ -1630,7 +1655,7 @@ export function buildBenchmarkGroups(
       ? lookupBenchmarkCard(benchmarkCards, rawBenchmarkName)
       : undefined
     const normalizedScore = normalizeScoreForDisplay(entry.result)
-    const displayScore = formatResultDisplayScore(entry.result)
+    const displayScore = formatResultDisplayScore(entry.result, entry.evaluation)
     const rankInfo = readingRank(entry.result)
     const rankPosition = rankInfo?.position ?? null
     const rankTotal = rankInfo?.total ?? null
@@ -1663,7 +1688,12 @@ export function buildBenchmarkGroups(
         key: groupKey,
         title,
         canonicalTitle,
-        evalDetailHref: getEvalDetailHref(entry.evaluation, entry.result, returnTo),
+        evalDetailHref: getEvalDetailHref(
+          entry.evaluation,
+          entry.result,
+          returnTo,
+          activeMetricKey,
+        ),
         category: entry.category,
         description: entry.result.metric_config.evaluation_description ?? "",
         scoreType: entry.result.metric_config.score_type ?? "continuous",
@@ -1800,7 +1830,12 @@ export function buildBenchmarkGroups(
                 scaleConversion: undefined,
               })),
             )?.mean ?? Number.NaN
-          group.avgDisplayScore = formatRawScoreValue(headline.mean, headline.unit ?? undefined)
+          const allPartsUnitless =
+            headline.parts.length > 0 &&
+            headline.parts.every((v) => isStatedUnitlessReading(v.result, v.evaluation))
+          group.avgDisplayScore = allPartsUnitless
+            ? formatReading(headline.mean, null)
+            : formatRawScoreValue(headline.mean, headline.unit ?? undefined)
           group.scoreNote = partsMeanLabel(headline.parts.length)
         } else {
           group.avgRawScore = Number.NaN
@@ -1844,6 +1879,9 @@ export function buildOverlapSummaryInputs(benchmarkGroups: BenchmarkGroup[]) {
           metricSummaryId: variant.result.metric_summary_id,
           split: variant.result.split ?? null,
           rank: readingRank(variant.result),
+          ...(isStatedUnitlessReading(variant.result, variant.evaluation)
+            ? { statedUnitless: true }
+            : {}),
         })
       }
       const gc = variant.result.generation_config ?? variant.evaluation.generation_config
@@ -1882,14 +1920,18 @@ export function buildOverlapSummaryInputs(benchmarkGroups: BenchmarkGroup[]) {
       metricName: getResultMetricName(variant.result),
       score: variant.result.score_details.score,
       unit: variant.result.metric_config.unit ?? null,
+      ...(isStatedUnitlessReading(variant.result, variant.evaluation)
+        ? { statedUnitless: true }
+        : {}),
       rank: readingRank(variant.result),
     }))
     if (headline.kind === "own") {
-      const { result } = headline.reading
+      const { result, evaluation } = headline.reading
       candidates.push({
         ...source,
         score: result.score_details.score,
         unit: result.metric_config.unit ?? null,
+        ...(isStatedUnitlessReading(result, evaluation) ? { statedUnitless: true } : {}),
         metricSummaryId: result.metric_summary_id ?? "",
         metricName: getResultMetricName(result),
         metricKey: result.metric_key ?? null,
@@ -2355,9 +2397,12 @@ export function BenchmarkDetail({
   comparisonIndex,
   embedSurface,
   embedTargetEvalId,
+  embedTargetMetricKey,
+  initialMetricKey,
 }: BenchmarkDetailProps) {
   const { mode } = useAudienceMode()
   const isResearchView = mode === "research"
+  const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
   const [benchmarkSearch, setBenchmarkSearch] = useState("")
@@ -2659,11 +2704,200 @@ export function BenchmarkDetail({
     [summary.evaluations_by_tag, hierarchyIndex]
   )
 
+  const modelMetricOptions = useMemo(
+    () => buildModelMetricFilterOptions(allCategoryResults),
+    [allCategoryResults],
+  )
+  const availableMetricKeySet = useMemo(
+    () => new Set(modelMetricOptions.map((opt) => opt.metricKey)),
+    [modelMetricOptions],
+  )
+  const urlMetricParam = embedTargetMetricKey?.trim() || searchParams.get("metric")?.trim() || null
+  const [rawSelectedMetricKey, setRawSelectedMetricKey] = useState<string | null>(
+    () => initialMetricKey?.trim() || urlMetricParam,
+  )
+  useEffect(() => {
+    if (initialMetricKey !== undefined) return
+    if (
+      !embedTargetMetricKey &&
+      typeof window !== "undefined" &&
+      window.location.pathname === pathname
+    ) {
+      const liveMetric = new URLSearchParams(window.location.search).get("metric")?.trim() || null
+      if (liveMetric !== urlMetricParam) return
+    }
+    setRawSelectedMetricKey(urlMetricParam)
+  }, [embedTargetMetricKey, initialMetricKey, pathname, urlMetricParam])
+
+  // Validate against this model/variant's actual reported metrics so switching
+  // model versions or opening an unknown ?metric= falls back cleanly to Main.
+  const effectiveMetricKey =
+    rawSelectedMetricKey && availableMetricKeySet.has(rawSelectedMetricKey)
+      ? rawSelectedMetricKey
+      : null
+  const activeMetricOption = useMemo(
+    () =>
+      effectiveMetricKey
+        ? modelMetricOptions.find((opt) => opt.metricKey === effectiveMetricKey) ?? null
+        : null,
+    [effectiveMetricKey, modelMetricOptions],
+  )
+  const metricFilterItems = useMemo<MetricFilterItem[]>(
+    () =>
+      modelMetricOptions.map((opt) => ({
+        key: opt.metricKey,
+        label: opt.label,
+        count: opt.evalCount,
+        direction: opt.direction,
+        badge: opt.leadEvalCount === 0 ? "non-primary" : null,
+      })),
+    [modelMetricOptions],
+  )
+
+  const handleSelectModelMetric = useCallback(
+    (nextKey: string | null) => {
+      const normalized = nextKey?.trim() || null
+      setRawSelectedMetricKey(normalized)
+      if (embedSurface) return
+      replaceUrlQueryParam(pathname, searchParams, "metric", normalized)
+    },
+    [embedSurface, pathname, searchParams],
+  )
+
+  const effectiveDetailHref = useMemo(() => {
+    const nextParams = new URLSearchParams(searchParams.toString())
+    if (effectiveMetricKey) {
+      nextParams.set("metric", effectiveMetricKey)
+    } else {
+      nextParams.delete("metric")
+    }
+    const qs = nextParams.toString()
+    return qs ? `${pathname}?${qs}` : pathname
+  }, [effectiveMetricKey, pathname, searchParams])
+
+  const baselineBenchmarkGroups = useMemo(
+    () => buildBenchmarkGroups(allCategoryResults, benchmarkCards, effectiveDetailHref),
+    [allCategoryResults, benchmarkCards, effectiveDetailHref],
+  )
+
+  const metricFilteredCategoryResults = useMemo(
+    () => filterModelEntriesByMetric(allCategoryResults, effectiveMetricKey),
+    [allCategoryResults, effectiveMetricKey],
+  )
+
+  const benchmarkGroups = useMemo(
+    () =>
+      effectiveMetricKey
+        ? buildBenchmarkGroups(
+            metricFilteredCategoryResults,
+            benchmarkCards,
+            effectiveDetailHref,
+            effectiveMetricKey,
+          )
+        : baselineBenchmarkGroups,
+    [
+      baselineBenchmarkGroups,
+      benchmarkCards,
+      effectiveDetailHref,
+      effectiveMetricKey,
+      metricFilteredCategoryResults,
+    ],
+  )
+
+  const scopedReportingStats = useMemo(() => {
+    if (!effectiveMetricKey) {
+      return {
+        ...reportingStats,
+        evaluationCount: allEvaluations.length,
+        resultCount: summary.total_evaluations,
+        reproducibilitySummary: summary.reproducibility_summary
+          ? {
+              results_total: summary.reproducibility_summary.results_total,
+              has_reproducibility_gap_count:
+                summary.reproducibility_summary.has_reproducibility_gap_count,
+            }
+          : null,
+      }
+    }
+    const organizations = new Set<string>()
+    const sourceTypes = new Set<string>()
+    const libraries = new Set<string>()
+    const seenEvals = new Set<string>()
+    const seenReadings = new Set<string>()
+    let missingGenerationConfigs = 0
+    let thirdPartyEvaluations = 0
+    let annotatedTotal = 0
+    let annotatedGapCount = 0
+
+    for (const { evaluation, result } of metricFilteredCategoryResults) {
+      if (isStderrMetricId(result.metric_summary_id)) continue
+      const evalKey =
+        evaluation.evaluation_id ||
+        evaluation.eval_summary_id ||
+        `${evaluation.benchmark ?? ""}::${evaluation.retrieved_timestamp ?? ""}`
+      if (!seenEvals.has(evalKey)) {
+        seenEvals.add(evalKey)
+        organizations.add(getOrganizationDisplayName(evaluation.source_metadata.source_organization_name))
+        sourceTypes.add(evaluation.source_metadata.source_type)
+        if (evaluation.eval_library?.name) {
+          libraries.add(formatEvalLibrary(evaluation.eval_library))
+        }
+        if (evaluation.source_metadata.evaluator_relationship === "third_party") {
+          thirdPartyEvaluations += 1
+        }
+      }
+      const readingKey = `${evalKey}::${result.metric_summary_id ?? result.metric_key ?? result.evaluation_name}`
+      if (!seenReadings.has(readingKey)) {
+        seenReadings.add(readingKey)
+        if (!result.generation_config) {
+          missingGenerationConfigs += 1
+        }
+        // Derive filtered reproducibility gaps from row-level annotations
+        // (same semantics as summary.reproducibility_summary), never from
+        // generation_config presence alone — a partial generation_config can
+        // still carry has_reproducibility_gap: true, and unannotated rows stay
+        // unknown rather than complete.
+        const hasGap = result.evalcards?.annotations?.reproducibility_gap?.has_reproducibility_gap
+        if (typeof hasGap === "boolean") {
+          annotatedTotal += 1
+          if (hasGap) {
+            annotatedGapCount += 1
+          }
+        }
+      }
+    }
+
+    return {
+      organizationNames: Array.from(organizations).sort((a, b) => a.localeCompare(b)),
+      organizationCount: organizations.size,
+      sourceTypeCount: sourceTypes.size,
+      libraryCount: libraries.size,
+      libraryList: Array.from(libraries).sort((a, b) => a.localeCompare(b)),
+      missingGenerationConfigs,
+      thirdPartyEvaluations,
+      evaluationCount: seenEvals.size,
+      resultCount: seenReadings.size,
+      reproducibilitySummary:
+        seenReadings.size > 0 && annotatedTotal === seenReadings.size
+          ? {
+              results_total: annotatedTotal,
+              has_reproducibility_gap_count: annotatedGapCount,
+            }
+          : null,
+    }
+  }, [
+    allEvaluations.length,
+    effectiveMetricKey,
+    metricFilteredCategoryResults,
+    reportingStats,
+    summary.reproducibility_summary,
+    summary.total_evaluations,
+  ])
+
   const policyHighlights = useMemo(() => {
-    const groups = buildBenchmarkGroups(allCategoryResults, benchmarkCards)
     const seenLabels = new Set<string>()
 
-    return groups
+    return benchmarkGroups
       .filter((group) => {
         const narrative = getPolicyBenchmarkNarrative(group.title)
 
@@ -2688,67 +2922,16 @@ export function BenchmarkDetail({
         level,
       }
     })
-  }, [allCategoryResults, benchmarkCards])
+  }, [benchmarkGroups])
 
-  const policySummary = useMemo(() => {
-    const benchmarkCount = new Set(
-      allCategoryResults.map((entry) => entry.evaluation.benchmark || entry.evaluation.benchmark_parent_name || entry.evaluation.eval_summary_id || getResultBenchmarkName(entry.evaluation, entry.result))
-    ).size
-    const allThirdParty =
-      allEvaluations.length > 0 && reportingStats.thirdPartyEvaluations === allEvaluations.length
-    const leadOrganization = reportingStats.organizationNames[0]
-    const modelScaleDescription = getModelScaleDescription(summary.model_info.additional_details?.params_billions)
-    const compactParamCount = formatParamsBillions(summary.model_info.additional_details?.params_billions)
-    const normalizedModelName = getModelDisplayName(summary.model_info.name)
-    const compactModelName = compactParamCount ? `${normalizedModelName} · ${compactParamCount}` : normalizedModelName
-
-    let testedByCopy = `Reported across ${benchmarkCount} standardized benchmark${benchmarkCount === 1 ? "" : "s"}.`
-    if (leadOrganization && reportingStats.organizationCount === 1) {
-      testedByCopy = allThirdParty
-        ? `Tested independently by ${leadOrganization} (a third party, distinct from the model's developer) using ${benchmarkCount} standardized benchmark${benchmarkCount === 1 ? "" : "s"}.`
-        : `Reported by ${leadOrganization} using ${benchmarkCount} standardized benchmark${benchmarkCount === 1 ? "" : "s"}.`
-    } else if (leadOrganization) {
-      testedByCopy = allThirdParty
-        ? `Tested by ${leadOrganization} and ${reportingStats.organizationCount - 1} other reporting organization${reportingStats.organizationCount - 1 === 1 ? "" : "s"} using ${benchmarkCount} standardized benchmark${benchmarkCount === 1 ? "" : "s"}.`
-        : `Reported by ${reportingStats.organizationCount} organizations using ${benchmarkCount} benchmark views.`
-    }
-
-    const reproducibilityCopy =
-      reproducibilityGapCount === 0
-        ? null
-        : reproducibilityGapCount === reproducibilityResultsTotal
-          ? "No reported score discloses every setup item that applies to it. Scores cannot be independently confirmed."
-          : `${reproducibilityGapCount} of ${reproducibilityResultsTotal} reported scores leave at least one setup item undisclosed, so they cannot be re-run as-is.`
-
-    const comparabilityCopy =
-      reproducibilityGapCount > 0
-        ? `${benchmarkCount > 0 ? `These results cover ${benchmarkCount} benchmark${benchmarkCount === 1 ? "" : "s"},` : "These results"} but undisclosed setup items mean apparent score gaps may partly reflect setup differences as well as capability.`
-        : "Shared benchmark coverage helps, but evaluator choices, benchmark mix, and model size can still limit direct apples-to-apples comparison."
-
-    const sizeCaveat =
-      modelScaleDescription
-        ? `${modelScaleDescription}. Comparisons against much smaller or larger systems should be interpreted with care.`
-        : null
-
-    return {
-      compactModelName,
-      modelScaleDescription,
-      testedByCopy,
-      reproducibilityCopy,
-      comparabilityCopy,
-      sizeCaveat,
-      independentlyVerified: allThirdParty || reportingStats.thirdPartyEvaluations > 0,
-      benchmarkCount,
-    }
-  }, [
-    allCategoryResults,
-    allEvaluations.length,
-    reportingStats,
-    reproducibilityGapCount,
-    reproducibilityResultsTotal,
-    summary.model_info.additional_details?.params_billions,
-    summary.model_info.name,
-  ])
+  const modelSizeCaveat = useMemo(() => {
+    const modelScaleDescription = getModelScaleDescription(
+      summary.model_info.additional_details?.params_billions,
+    )
+    return modelScaleDescription
+      ? `${modelScaleDescription}. Comparisons against much smaller or larger systems should be interpreted with care.`
+      : null
+  }, [summary.model_info.additional_details?.params_billions])
 
   /**
    * Structured plain-language summary used by <ModelPolicyOverview>.
@@ -2756,40 +2939,44 @@ export function BenchmarkDetail({
    * invoked at runtime, so the same input always produces the same prose.
    */
   const modelPolicySummary = useMemo(() => {
-    const reportedCategories = Array.from(
-      new Set(allCategoryResults.map((entry) => entry.category as unknown as string)),
-    )
-    const benchmarkCount = new Set(
-      allCategoryResults.map(
-        (entry) =>
-          entry.evaluation.benchmark ||
-          entry.evaluation.benchmark_parent_name ||
-          entry.evaluation.eval_summary_id ||
-          getResultBenchmarkName(entry.evaluation, entry.result),
-      ),
-    ).size
+    const reportedCategories = effectiveMetricKey
+      ? Array.from(new Set(benchmarkGroups.map((g) => g.category as unknown as string)))
+      : Array.from(
+          new Set(allCategoryResults.map((entry) => entry.category as unknown as string)),
+        )
+    const benchmarkCount = effectiveMetricKey
+      ? benchmarkGroups.length
+      : new Set(
+          allCategoryResults.map(
+            (entry) =>
+              entry.evaluation.benchmark ||
+              entry.evaluation.benchmark_parent_name ||
+              entry.evaluation.eval_summary_id ||
+              getResultBenchmarkName(entry.evaluation, entry.result),
+          ),
+        ).size
     return buildModelPolicySummary({
       summary,
-      thirdPartyEvaluations: reportingStats.thirdPartyEvaluations,
-      reportedEvaluationCount: allEvaluations.length,
-      organizationCount: reportingStats.organizationCount,
-      organizationNames: reportingStats.organizationNames,
+      thirdPartyEvaluations: scopedReportingStats.thirdPartyEvaluations,
+      reportedEvaluationCount: scopedReportingStats.evaluationCount,
+      organizationCount: scopedReportingStats.organizationCount,
+      organizationNames: scopedReportingStats.organizationNames,
       benchmarkCount,
       reportedCategories,
+      scopedMetric: effectiveMetricKey
+        ? {
+            totalResults: scopedReportingStats.resultCount,
+            reproducibilitySummary: scopedReportingStats.reproducibilitySummary,
+          }
+        : undefined,
     })
   }, [
     allCategoryResults,
-    allEvaluations.length,
-    reportingStats.thirdPartyEvaluations,
-    reportingStats.organizationCount,
-    reportingStats.organizationNames,
+    benchmarkGroups,
+    effectiveMetricKey,
+    scopedReportingStats,
     summary,
   ])
-
-  const benchmarkGroups = useMemo(
-    () => buildBenchmarkGroups(allCategoryResults, benchmarkCards, currentDetailHref),
-    [allCategoryResults, benchmarkCards, currentDetailHref]
-  )
 
   // Categories actually present in this model's benchmark groups, derived
   // from the curated tag bucketing in `allCategoryResults`. We no longer
@@ -3087,10 +3274,13 @@ export function BenchmarkDetail({
     return ranges
   }, [categoryCompositeSections])
 
-  const benchmarkGroupLookup = useMemo(
-    () => new Map(benchmarkGroups.map((group) => [group.key, group] as const)),
-    [benchmarkGroups]
-  )
+  const benchmarkGroupLookup = useMemo(() => {
+    const map = new Map(baselineBenchmarkGroups.map((group) => [group.key, group] as const))
+    for (const group of benchmarkGroups) {
+      map.set(group.key, group)
+    }
+    return map
+  }, [baselineBenchmarkGroups, benchmarkGroups])
   const activeBenchmarkGroup = activeBenchmarkGroupKey
     ? benchmarkGroupLookup.get(activeBenchmarkGroupKey) ?? null
     : null
@@ -3118,10 +3308,7 @@ export function BenchmarkDetail({
     })
   }
 
-  const overviewBenchmarkGroups =
-    selectedCategories.length > 0 || benchmarkSearch.trim()
-      ? filteredBenchmarkGroups
-      : benchmarkGroups
+  const overviewBenchmarkGroups = benchmarkGroups
 
   // Only groups with a rank of their own qualify for the "ranks high / low
   // in" summary.
@@ -3488,13 +3675,23 @@ export function BenchmarkDetail({
 
     const variantFor = (
       group: BenchmarkGroup,
-      metricSummaryId: string
-    ): BenchmarkVariant => {
-      return (
-        group.variants.find(
-          (v) => v.result.metric_summary_id === metricSummaryId
-        ) ?? group.variants[0]
+      metric: ComparisonMetricEntry,
+    ): BenchmarkVariant | null => {
+      const mKey = getComparisonMetricKey(metric)
+      const bySummaryId = group.variants.filter(
+        (v) => v.result.metric_summary_id === metric.metric_summary_id,
       )
+      if (bySummaryId.length > 0) {
+        return bySummaryId.find((v) => !v.setupLabel) ?? bySummaryId[0]
+      }
+      if (effectiveMetricKey != null) {
+        if (mKey && mKey === effectiveMetricKey) {
+          const byKey = group.variants.filter((v) => v.result.metric_key === mKey)
+          return byKey.find((v) => !v.setupLabel) ?? byKey[0] ?? null
+        }
+        return null
+      }
+      return group.variants[0] ?? null
     }
 
     const metricTabFor = (
@@ -3571,9 +3768,17 @@ export function BenchmarkDetail({
             const tabs = childEvalEntry.metrics
               .filter((metric) => !isStderrMetricId(metric.metric_summary_id))
               .map((metric) => {
+                const mKey = getComparisonMetricKey(metric)
+                const matched = vars.find(
+                  (v) => v.result.metric_summary_id === metric.metric_summary_id,
+                )
                 const variant =
-                  vars.find((v) => v.result.metric_summary_id === metric.metric_summary_id) ??
-                  vars[0]
+                  matched ??
+                  (effectiveMetricKey != null
+                    ? mKey && mKey === effectiveMetricKey
+                      ? vars.find((v) => v.result.metric_key === mKey) ?? null
+                      : null
+                    : vars[0])
                 if (!variant) return null
                 return metricTabFor(group, childEvalEntry, metric, variant, false)
               })
@@ -3612,9 +3817,14 @@ export function BenchmarkDetail({
             const tabs = evalEntry.metrics
               .filter((metric) => !isStderrMetricId(metric.metric_summary_id))
               .map((metric) => {
+                const mKey = getComparisonMetricKey(metric)
                 const metricVariants = viewBucket.variants.filter(
                   (variant) =>
-                    variant.result.metric_summary_id === metric.metric_summary_id,
+                    variant.result.metric_summary_id === metric.metric_summary_id ||
+                    (effectiveMetricKey != null &&
+                      mKey != null &&
+                      mKey === effectiveMetricKey &&
+                      variant.result.metric_key === mKey),
                 )
                 const variant =
                   metricVariants.find((candidate) => !candidate.setupLabel) ??
@@ -3708,7 +3918,7 @@ export function BenchmarkDetail({
           const tabs = r.evalEntry.metrics
             .filter((metric) => !isStderrMetricId(metric.metric_summary_id))
             .map((metric) => {
-              const variant = variantFor(r.group, metric.metric_summary_id)
+              const variant = variantFor(r.group, metric)
               if (!variant) return null
               return metricTabFor(
                 r.group,
@@ -3785,7 +3995,7 @@ export function BenchmarkDetail({
     }
 
     return units
-  }, [comparisonIndex, filteredBenchmarkGroups, hierarchyIndex, sourcePrefixFamily])
+  }, [comparisonIndex, effectiveMetricKey, evalHierarchy, filteredBenchmarkGroups, hierarchyIndex, sourcePrefixFamily])
 
   // Category-mode units: dedupe `plotboxUnits` by benchmark_index
   // canonical so that a benchmark reported by N evaluators (e.g. MMLU-Pro
@@ -4114,20 +4324,43 @@ export function BenchmarkDetail({
         return histIsPercent ? score * 100 : score / 100
       }
 
+      const activeMetricKey = getComparisonMetricKey(activeTab.metricEntry)
+      const isDefaultPlotTab =
+        effectiveMetricKey == null && activeTab.tabKey === activeView.tabs[0]?.tabKey
       const collected: Array<{ familyKey: string; familyName: string; score: number }> = []
       for (const siblingId of indexEntry.siblingEvalIds) {
         if (siblingId === activeTab.evalSummaryId) continue
         const siblingEval = comparisonIndex.evals[siblingId]
         if (!siblingEval || siblingEval.metrics.length === 0) continue
-        const matchByName = siblingEval.metrics.find(
-          (m) => m.metric_name?.toLowerCase().trim() === targetMetricName,
-        )
-        const matchByLocal = !matchByName && targetMetricLocal
-          ? siblingEval.metrics.find(
-              (m) => m.metric_summary_id?.split("%3A").pop()?.toLowerCase().trim() === targetMetricLocal,
-            )
-          : null
-        const siblingMetric = matchByName ?? matchByLocal ?? siblingEval.metrics[0]
+        const matchByKey = activeMetricKey
+          ? siblingEval.metrics.find((m) => getComparisonMetricKey(m) === activeMetricKey)
+          : undefined
+        const matchByName =
+          !matchByKey && effectiveMetricKey == null
+            ? siblingEval.metrics.find(
+                (m) => m.metric_name?.toLowerCase().trim() === targetMetricName,
+              )
+            : undefined
+        const matchByLocal =
+          !matchByKey && !matchByName && effectiveMetricKey == null && targetMetricLocal
+            ? siblingEval.metrics.find(
+                (m) =>
+                  m.metric_summary_id?.split("%3A").pop()?.toLowerCase().trim() ===
+                  targetMetricLocal,
+              )
+            : null
+        const siblingMetric =
+          matchByKey ??
+          matchByName ??
+          matchByLocal ??
+          (isDefaultPlotTab ? siblingEval.metrics[0] : undefined)
+        if (!siblingMetric) continue
+        if (
+          !isDefaultPlotTab &&
+          Boolean(siblingMetric.lower_is_better) !== activeHist.lowerIsBetter
+        ) {
+          continue
+        }
         let siblingCell: CanonicalScaleCell | null = null
         const byModelCell = byModel[siblingId]?.[siblingMetric.metric_summary_id]
         if (byModelCell != null && Number.isFinite(byModelCell.score)) {
@@ -4190,7 +4423,8 @@ export function BenchmarkDetail({
         const bAgg = isAggregator(b.familyKey) ? 1 : 0
         return aAgg - bAgg
       })
-      const ownScoreNum = activeTab.variant.result.score_details.score
+      const currentHistBarScore = activeHist.bars.find((b) => b.isCurrent)?.score
+      const ownScoreNum = currentHistBarScore ?? activeTab.variant.result.score_details.score
       const seenScores = new Set<string>(
         Number.isFinite(ownScoreNum) ? [ownScoreNum.toFixed(8)] : [],
       )
@@ -4203,7 +4437,9 @@ export function BenchmarkDetail({
       }
       return deduped
     })()
-    const ownScore = activeTab.variant.result.score_details.score
+    const ownScore =
+      activeHist.bars.find((b) => b.isCurrent)?.score ??
+      activeTab.variant.result.score_details.score
     const crossFamilyScores = [
       ...crossFamilyContribs.map((c) => c.score),
       ...(Number.isFinite(ownScore) ? [ownScore] : []),
@@ -4518,14 +4754,20 @@ export function BenchmarkDetail({
               rendering inside an embed iframe — otherwise the embedded
               histogram shows its own "embed this" button, which links
               back to itself. */}
-          {activeTab.evalSummaryId && !embedHistogramOnly && (
-            <EmbedButton
-              embedPath={`/embed/eval/histogram/${routeIdToPath(activeTab.evalSummaryId)}?model=${encodeURIComponent(routeIdToPath(summary.model_info.id))}`}
-              label="Histogram"
-              defaultHeight={360}
-              size="sm"
-            />
-          )}
+          {activeTab.evalSummaryId && !embedHistogramOnly && (() => {
+            const tabMetricKey = getComparisonMetricKey(activeTab.metricEntry)
+            const embedMetricParam =
+              effectiveMetricKey ??
+              (activeTab.tabKey !== activeView.tabs[0]?.tabKey ? tabMetricKey : null)
+            return (
+              <EmbedButton
+                embedPath={`/embed/eval/histogram/${routeIdToPath(activeTab.evalSummaryId)}?model=${encodeURIComponent(routeIdToPath(summary.model_info.id))}${embedMetricParam ? `&metric=${encodeURIComponent(embedMetricParam)}` : ""}`}
+                label="Histogram"
+                defaultHeight={360}
+                size="sm"
+              />
+            )
+          })()}
         </div>
 
         {/* View selector */}
@@ -4859,7 +5101,7 @@ export function BenchmarkDetail({
             // pre-opened via ?deepDive=, in a new tab so we don't navigate
             // the third-party host page.
             <a
-              href={`/models/${routeIdToPath(summary.model_info.id)}?deepDive=${encodeURIComponent(activeView.group.key)}`}
+              href={`/models/${routeIdToPath(summary.model_info.id)}?deepDive=${encodeURIComponent(activeView.group.key)}${effectiveMetricKey ? `&metric=${encodeURIComponent(effectiveMetricKey)}` : ""}`}
               target="_blank"
               rel="noopener noreferrer"
               className="font-mono text-[10px] uppercase tracking-[0.12em] text-[color:var(--fg-muted)] hover:text-[color:var(--accent)] transition-colors"
@@ -4905,26 +5147,45 @@ export function BenchmarkDetail({
   // raw plotboxUnits when no category match is found.
   const embedHistogramTarget = useMemo(() => {
     if (!embedHistogramOnly || !embedTargetEvalId) return null
+    const requestedMetric = embedTargetMetricKey?.trim() || null
     const search = (units: PlotboxUnit[]) => {
       for (const unit of units) {
         for (const view of unit.views) {
-          for (const tab of view.tabs) {
-            if (tab.evalSummaryId === embedTargetEvalId) {
-              return { unit, view, tab }
-            }
+          const evalTabs = view.tabs.filter((tab) => tab.evalSummaryId === embedTargetEvalId)
+          if (evalTabs.length === 0) continue
+          if (requestedMetric) {
+            const matchedTab = evalTabs.find(
+              (tab) =>
+                getComparisonMetricKey(tab.metricEntry) === requestedMetric ||
+                tab.metricSummaryId === requestedMetric,
+            )
+            if (matchedTab) return { unit, view, tab: matchedTab }
           }
+          return { unit, view, tab: evalTabs[0] }
         }
       }
       return null
     }
     return search(categoryPlotboxUnits) ?? search(plotboxUnits) ?? null
-  }, [embedHistogramOnly, embedTargetEvalId, categoryPlotboxUnits, plotboxUnits])
+  }, [
+    embedHistogramOnly,
+    embedTargetEvalId,
+    embedTargetMetricKey,
+    categoryPlotboxUnits,
+    plotboxUnits,
+  ])
 
-  // Drive the unit's view/metric selection to the matched tab so the
-  // initial render lands on the same metric the user saw on the page.
+  const appliedEmbedSeedRef = useRef<string | null>(null)
+
+  // Drive the unit's view/metric selection to the matched tab once per seed
+  // so the initial render lands on the requested metric while still allowing
+  // interactive tab switching inside the embed.
   useEffect(() => {
     if (!embedHistogramTarget) return
     const { unit, view, tab } = embedHistogramTarget
+    const seedKey = `${unit.unitKey}::${view.viewKey}::${tab.tabKey}`
+    if (appliedEmbedSeedRef.current === seedKey) return
+    appliedEmbedSeedRef.current = seedKey
     setActiveViewByUnit((prev) =>
       prev[unit.unitKey] === view.viewKey ? prev : { ...prev, [unit.unitKey]: view.viewKey },
     )
@@ -5062,18 +5323,31 @@ export function BenchmarkDetail({
       <section>
         {isResearchView ? (
           <div className="space-y-3 max-w-[64rem]">
-            <p className="text-[16px] leading-[1.7] text-[color:var(--fg)]">
-              <strong>{getModelDisplayName(summary.model_info.name)}</strong> reports{" "}
-              <strong>{summary.total_evaluations}</strong> result{summary.total_evaluations === 1 ? "" : "s"} across{" "}
-              <strong>{benchmarkGroups.length}</strong> benchmark{benchmarkGroups.length === 1 ? "" : "s"}, sourced from{" "}
-              <strong>{reportingStats.organizationCount}</strong> reporting organization{reportingStats.organizationCount === 1 ? "" : "s"} ({reportingStats.sourceTypeCount} source type{reportingStats.sourceTypeCount === 1 ? "" : "s"}).{" "}
-              {reportingStats.missingGenerationConfigs > 0
-                ? `${reportingStats.missingGenerationConfigs} entries are missing generation config, limiting cross-slice comparability.`
-                : "Generation configuration is present across the result set."}
-            </p>
+            {activeMetricOption ? (
+              <p className="text-[16px] leading-[1.7] text-[color:var(--fg)]">
+                <strong>{getModelDisplayName(summary.model_info.name)}</strong> reports{" "}
+                <strong>{activeMetricOption.label}</strong> across{" "}
+                <strong>{benchmarkGroups.length}</strong> of{" "}
+                <strong>{baselineBenchmarkGroups.length}</strong> benchmark{baselineBenchmarkGroups.length === 1 ? "" : "s"} ({scopedReportingStats.resultCount} report{scopedReportingStats.resultCount === 1 ? "" : "s"}), sourced from{" "}
+                <strong>{scopedReportingStats.organizationCount}</strong> reporting organization{scopedReportingStats.organizationCount === 1 ? "" : "s"} ({scopedReportingStats.sourceTypeCount} source type{scopedReportingStats.sourceTypeCount === 1 ? "" : "s"}).{" "}
+                {scopedReportingStats.missingGenerationConfigs > 0
+                  ? `${scopedReportingStats.missingGenerationConfigs} ${scopedReportingStats.missingGenerationConfigs === 1 ? "entry is" : "entries are"} missing generation config, limiting cross-slice comparability.`
+                  : "Generation configuration is present across the filtered result set."}
+              </p>
+            ) : (
+              <p className="text-[16px] leading-[1.7] text-[color:var(--fg)]">
+                <strong>{getModelDisplayName(summary.model_info.name)}</strong> reports{" "}
+                <strong>{summary.total_evaluations}</strong> result{summary.total_evaluations === 1 ? "" : "s"} across{" "}
+                <strong>{baselineBenchmarkGroups.length}</strong> benchmark{baselineBenchmarkGroups.length === 1 ? "" : "s"}, sourced from{" "}
+                <strong>{reportingStats.organizationCount}</strong> reporting organization{reportingStats.organizationCount === 1 ? "" : "s"} ({reportingStats.sourceTypeCount} source type{reportingStats.sourceTypeCount === 1 ? "" : "s"}).{" "}
+                {reportingStats.missingGenerationConfigs > 0
+                  ? `${reportingStats.missingGenerationConfigs} entries are missing generation config, limiting cross-slice comparability.`
+                  : "Generation configuration is present across the result set."}
+              </p>
+            )}
             {(setupDrivenBenchmarkCount > 0 || sliceDrivenBenchmarkCount > 0) && (
               <p className="text-[13px] leading-[1.7] text-[color:var(--fg-muted)]">
-                Of the reported benchmarks,{" "}
+                Of the {activeMetricOption ? "matching" : "reported"} benchmarks,{" "}
                 <span
                   className="text-[color:var(--fg)]"
                   title="The reporter recorded distinct setup variants (e.g. with vs. without chain-of-thought) for this benchmark"
@@ -5088,10 +5362,10 @@ export function BenchmarkDetail({
                   {sliceDrivenBenchmarkCount}
                 </span>{" "}
                 break out by slice.
-                {reportingStats.libraryList.length > 0 && (
+                {scopedReportingStats.libraryList.length > 0 && (
                   <>
                     {" "}Scores come from these evaluation harnesses:{" "}
-                    <span className="text-[color:var(--fg)]">{reportingStats.libraryList.join(", ")}</span>.
+                    <span className="text-[color:var(--fg)]">{scopedReportingStats.libraryList.join(", ")}</span>.
                   </>
                 )}
               </p>
@@ -5102,7 +5376,7 @@ export function BenchmarkDetail({
             <ModelPolicyOverview
               modelName={getModelDisplayName(summary.model_info.name)}
               policySummary={modelPolicySummary}
-              scaleNote={policySummary.sizeCaveat}
+              scaleNote={modelSizeCaveat}
             />
           </div>
         )}
@@ -5203,9 +5477,16 @@ export function BenchmarkDetail({
           <h2>
             <span className="font-mono text-[12px] tracking-[0.1em] text-[color:var(--accent)] mr-3">§2</span>
             Benchmark coverage
+            {activeMetricOption && (
+              <span className="ml-2 font-mono text-[12px] font-normal text-[color:var(--accent)]">
+                · {activeMetricOption.label}
+              </span>
+            )}
           </h2>
           <span className="font-mono text-[10px] uppercase tracking-[0.15em] text-[color:var(--fg-subtle)]">
-            {filteredBenchmarkGroups.length} shown · {benchmarkGroups.length} reported
+            {activeMetricOption
+              ? `${benchmarkGroups.length} of ${baselineBenchmarkGroups.length} ${baselineBenchmarkGroups.length === 1 ? "benchmark" : "benchmarks"} · ${activeMetricOption.label}`
+              : `${filteredBenchmarkGroups.length} shown · ${baselineBenchmarkGroups.length} reported`}
           </span>
         </div>
 
@@ -5316,6 +5597,11 @@ export function BenchmarkDetail({
             <h2>
               <span className="font-mono text-[12px] tracking-[0.1em] text-[color:var(--accent)] mr-3">§3</span>
               Who reports what
+              {activeMetricOption && (
+                <span className="ml-2 font-mono text-[12px] font-normal text-[color:var(--accent)]">
+                  · {activeMetricOption.label}
+                </span>
+              )}
             </h2>
             <span className="font-mono text-[10px] uppercase tracking-[0.15em] text-[color:var(--fg-subtle)]">
               {isResearchView ? "First-party · third-party · per category" : "Source of these scores"}
@@ -5352,6 +5638,11 @@ export function BenchmarkDetail({
             <h2>
               <span className="font-mono text-[12px] tracking-[0.1em] text-[color:var(--accent)] mr-3">§4</span>
               Reported metrics
+              {activeMetricOption && (
+                <span className="ml-2 font-mono text-[12px] font-normal text-[color:var(--accent)]">
+                  · {activeMetricOption.label}
+                </span>
+              )}
             </h2>
           )}
           <div className="flex items-center gap-3">
@@ -5362,7 +5653,7 @@ export function BenchmarkDetail({
             </span>
             {!embedReportedMetricsOnly && (
               <EmbedButton
-                embedPath={`/embed/model/reported-metrics/${routeIdToPath(summary.model_info.id)}`}
+                embedPath={`/embed/model/reported-metrics/${routeIdToPath(summary.model_info.id)}${effectiveMetricKey ? `?metric=${encodeURIComponent(effectiveMetricKey)}` : ""}`}
                 label="Reported metrics"
                 defaultHeight={680}
                 size="sm"
@@ -5421,6 +5712,27 @@ export function BenchmarkDetail({
           </p>
         )}
 
+        <MetricFilterBar
+          className="mb-5"
+          label="Metric"
+          items={metricFilterItems}
+          value={effectiveMetricKey}
+          onChange={handleSelectModelMetric}
+          defaultItem={{
+            label: "Main metric",
+            chipLabel: "Main",
+            sublabel: "default · 1 per benchmark",
+            count: baselineBenchmarkGroups.length,
+          }}
+          countNoun={{ singular: "benchmark", plural: "benchmarks" }}
+          searchPlaceholder="Search reported metrics…"
+          statusText={
+            activeMetricOption
+              ? `${benchmarkGroups.length} of ${baselineBenchmarkGroups.length} ${baselineBenchmarkGroups.length === 1 ? "benchmark" : "benchmarks"} report ${activeMetricOption.label}`
+              : `All ${baselineBenchmarkGroups.length} ${baselineBenchmarkGroups.length === 1 ? "benchmark" : "benchmarks"} · primary metric per benchmark`
+          }
+        />
+
         {/* SUMMARY VIEW — text-only list grouped by family, ranked
             best→worst, with the category pill bar so non-technical
             readers can filter without diving into Researcher view. */}
@@ -5463,7 +5775,8 @@ export function BenchmarkDetail({
                   ? benchmarkGroups
                   : benchmarkGroups.filter((g) => selectedCategories.includes(g.category))
               }
-              currentDetailHref={currentDetailHref}
+              currentDetailHref={effectiveDetailHref}
+              activeMetricKey={effectiveMetricKey}
               hierarchyIndex={hierarchyIndex}
               sourcePrefixFamily={sourcePrefixFamily}
             />
@@ -5603,11 +5916,24 @@ export function BenchmarkDetail({
           const visibleOverlaps = visibleOverlapsRows
           return visibleOverlaps.length === 0 ? (
             <div className="border border-dashed border-[color:var(--border-soft)] bg-[color:var(--bg-warm)] py-12 px-6 text-center font-mono text-[11px] uppercase tracking-[0.2em] text-[color:var(--fg-subtle)]">
-              {query
-                ? "No overlaps match your search"
-                : overlapsFilter === "multi"
-                  ? "No benchmarks with multiple sources. Switch to All to see single-source results."
-                  : "No benchmark results found for this model"}
+              <div>
+                {query
+                  ? "No overlaps match your search"
+                  : overlapsFilter === "multi"
+                    ? "No benchmarks with multiple sources. Switch to All to see single-source results."
+                    : "No benchmark results found for this model"}
+              </div>
+              {effectiveMetricKey && (
+                <div className="mt-4">
+                  <button
+                    type="button"
+                    onClick={() => handleSelectModelMetric(null)}
+                    className="btn-ec outline"
+                  >
+                    Reset to main metric
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div className="overflow-hidden border border-[color:var(--border-soft)]">
@@ -5622,11 +5948,17 @@ export function BenchmarkDetail({
                 const fmtNum = (v: number) =>
                   row.plainUnit
                     ? formatPlainUnitScore(v, row.plainUnit).split(" ")[0]
-                    : row.isPercentScale
-                      ? v.toFixed(1)
-                      : (v * 100).toFixed(1)
+                    : row.statedUnitless
+                      ? formatReading(v, null)
+                      : row.isPercentScale
+                        ? v.toFixed(1)
+                        : (v * 100).toFixed(1)
                 const fmt = (v: number) =>
-                  row.plainUnit ? formatPlainUnitScore(v, row.plainUnit) : `${fmtNum(v)}%`
+                  row.plainUnit
+                    ? formatPlainUnitScore(v, row.plainUnit)
+                    : row.statedUnitless
+                      ? formatReading(v, null)
+                      : `${fmtNum(v)}%`
                 const isSingle = row.appearances.length < 2
                 // A source that reports the benchmark only through its parts:
                 // their mean, labelled, or no number when they have none.
@@ -5636,7 +5968,12 @@ export function BenchmarkDetail({
                 const isLast = idx === visibleOverlaps.length - 1
                 const ciLabel = row.ci95
                   ? row.appearances.length === 2
-                    ? `±${(((row.ci95.high - row.ci95.low) / 2) || 0).toFixed(1)} (n=2, wide)`
+                    ? (() => {
+                        const halfWidth = (row.ci95.high - row.ci95.low) / 2 || 0
+                        return row.statedUnitless
+                          ? `±${formatReading(halfWidth, null)} (n=2, wide)`
+                          : `±${halfWidth.toFixed(1)} (n=2, wide)`
+                      })()
                     : `[${fmt(row.ci95.low)}, ${fmt(row.ci95.high)}]`
                   : "—"
                 const strongText = isSingle
@@ -5711,10 +6048,13 @@ export function BenchmarkDetail({
                           const notReported = (
                             <span className="text-[color:var(--fg-subtle)]">not reported</span>
                           )
+                          const metricLinkSuffix = effectiveMetricKey
+                            ? `&metric=${encodeURIComponent(effectiveMetricKey)}`
+                            : ""
                           const sourceNode =
                             app.sourceKind === "comparison-index" && app.evalSummaryId ? (
                               <Link
-                                href={`/evals/${routeIdToPath(app.evalSummaryId)}?from=${encodeURIComponent(currentDetailHref)}`}
+                                href={`/evals/${routeIdToPath(app.evalSummaryId)}?from=${encodeURIComponent(effectiveDetailHref)}${metricLinkSuffix}`}
                                 className="ec-tag outline hover:border-[color:var(--accent)] hover:text-[color:var(--accent)] transition-colors"
                                 style={{ fontSize: 10 }}
                                 title={`${app.familyName} · ${app.metricName} — view eval`}
@@ -5793,28 +6133,76 @@ export function BenchmarkDetail({
                                   </dd>
                                 </dl>
                               </div>
-                              {(app.parts ?? app.ownEvalParts) && (
-                                <ul className="px-1 pb-2">
-                                  {(app.parts ?? app.ownEvalParts)!.map((part) => (
-                                    <li
-                                      key={part.evalSummaryId}
-                                      className="grid grid-cols-[minmax(0,1.8fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(0,0.9fr)] items-baseline gap-3 py-1 text-[12px]"
-                                    >
-                                      <Link
-                                        href={`/evals/${routeIdToPath(part.evalSummaryId)}?from=${encodeURIComponent(currentDetailHref)}`}
-                                        className="truncate text-[color:var(--fg)] hover:text-[color:var(--accent)]"
-                                      >
-                                        {part.name}
-                                      </Link>
-                                      <span className="truncate text-[color:var(--fg-muted)]">{part.metricName}</span>
-                                      <span className="font-mono tabular-nums text-[color:var(--fg)]">{part.displayScore}</span>
-                                      <span className="font-mono tabular-nums text-[color:var(--fg-muted)]">
-                                        {part.rank ? `#${part.rank.position}/${part.rank.total}` : null}
-                                      </span>
-                                    </li>
-                                  ))}
-                                </ul>
-                              )}
+                              {(app.parts ?? app.ownEvalParts) && (() => {
+                                const partList = (app.parts ?? app.ownEvalParts)!
+                                const isPartsAverage = Boolean(app.parts)
+                                const partHeading = isPartsAverage
+                                  ? Number.isFinite(app.score)
+                                    ? `Component parts (${partList.length} · averaged into ${fmt(app.score)})`
+                                    : `Component parts (${partList.length})`
+                                  : `Component parts (${partList.length})`
+                                return (
+                                  <div
+                                    data-overlap-parts-panel=""
+                                    className="ml-3 mr-1 mb-2.5 mt-0.5 border border-[color:var(--border-soft)] border-l-2 border-l-[color:var(--border-strong)] bg-[color:var(--bg)] px-3 py-2"
+                                  >
+                                    <div className="mb-1.5 flex items-center justify-between gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-[color:var(--fg-subtle)]">
+                                      <span>{partHeading}</span>
+                                    </div>
+                                    <div className="hidden grid-cols-[minmax(0,2fr)_minmax(0,1.1fr)_minmax(0,0.8fr)_minmax(0,0.8fr)] items-center gap-3 border-b border-[color:var(--border-soft)] pb-1 font-mono text-[9.5px] uppercase tracking-[0.14em] text-[color:var(--fg-subtle)] sm:grid">
+                                      <div>Part</div>
+                                      <div>Metric</div>
+                                      <div className="text-right">Score</div>
+                                      <div className="text-right">Rank</div>
+                                    </div>
+                                    <ul className="divide-y divide-[color:var(--border-soft)]">
+                                      {partList.map((part) => (
+                                        <li
+                                          key={part.evalSummaryId}
+                                          className="py-1.5 text-[12px]"
+                                        >
+                                          {/* Wide layout: aligned with inner Part / Metric / Score / Rank headers */}
+                                          <div className="hidden grid-cols-[minmax(0,2fr)_minmax(0,1.1fr)_minmax(0,0.8fr)_minmax(0,0.8fr)] items-baseline gap-3 sm:grid">
+                                            <Link
+                                              href={`/evals/${routeIdToPath(part.evalSummaryId)}?from=${encodeURIComponent(effectiveDetailHref)}${metricLinkSuffix}`}
+                                              className="truncate text-[color:var(--fg)] underline-offset-2 hover:text-[color:var(--accent)] hover:underline"
+                                            >
+                                              {part.name}
+                                            </Link>
+                                            <span className="truncate font-mono text-[11px] text-[color:var(--fg-muted)]">
+                                              {part.metricName}
+                                            </span>
+                                            <span className="text-right font-mono tabular-nums text-[color:var(--fg)]">
+                                              {part.displayScore}
+                                            </span>
+                                            <span className="text-right font-mono text-[11px] tabular-nums text-[color:var(--fg-muted)]">
+                                              {part.rank ? `#${part.rank.position}/${part.rank.total}` : "—"}
+                                            </span>
+                                          </div>
+                                          {/* Narrow layout */}
+                                          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 sm:hidden">
+                                            <Link
+                                              href={`/evals/${routeIdToPath(part.evalSummaryId)}?from=${encodeURIComponent(effectiveDetailHref)}${metricLinkSuffix}`}
+                                              className="min-w-0 truncate text-[color:var(--fg)] hover:text-[color:var(--accent)]"
+                                            >
+                                              {part.name}
+                                            </Link>
+                                            <span className="shrink-0 font-mono tabular-nums text-[color:var(--fg)]">
+                                              {part.displayScore}
+                                            </span>
+                                            <div className="flex w-full items-center justify-between font-mono text-[10.5px] text-[color:var(--fg-muted)]">
+                                              <span className="truncate">{part.metricName}</span>
+                                              <span className="shrink-0 tabular-nums">
+                                                {part.rank ? `#${part.rank.position}/${part.rank.total}` : "—"}
+                                              </span>
+                                            </div>
+                                          </div>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )
+                              })()}
                               <RunProtocolSummary
                                 collectionId={app.collectionId}
                                 protocolCondition={app.protocolCondition}
@@ -5839,7 +6227,35 @@ export function BenchmarkDetail({
         })() : filteredBenchmarkGroups.length === 0 ||
         (benchmarkViewMode === "grid" && plotboxUnits.length === 0) ? (
           <div className="border border-dashed border-[color:var(--border-soft)] bg-[color:var(--bg-warm)] py-12 px-6 text-center font-mono text-[11px] uppercase tracking-[0.2em] text-[color:var(--fg-subtle)]">
-            No benchmarks match the current search or category filters.
+            {effectiveMetricKey ? (
+              <div className="space-y-4">
+                <div>
+                  {filteredBenchmarkGroups.length > 0 && benchmarkViewMode === "grid"
+                    ? `Peer distributions are not available for ${activeMetricOption?.label ?? effectiveMetricKey}, though ${filteredBenchmarkGroups.length} reported benchmark${filteredBenchmarkGroups.length === 1 ? " is" : "s are"} available.`
+                    : `No benchmarks report ${activeMetricOption?.label ?? effectiveMetricKey} under the current filters.`}
+                </div>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  {filteredBenchmarkGroups.length > 0 && benchmarkViewMode === "grid" && (
+                    <button
+                      type="button"
+                      onClick={() => setBenchmarkViewMode("list")}
+                      className="btn-ec outline"
+                    >
+                      Switch to Table view
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleSelectModelMetric(null)}
+                    className="btn-ec outline"
+                  >
+                    Reset to main metric
+                  </button>
+                </div>
+              </div>
+            ) : (
+              "No benchmarks match the current search or category filters."
+            )}
           </div>
         ) : benchmarkViewMode === "grid" && groupingMode === "source" ? (
           /* Hierarchy mode — section per family, one plotbox per composite
@@ -6413,6 +6829,8 @@ export function BenchmarkDetail({
               comparisonIndex={comparisonIndex}
               evalHierarchy={evalHierarchy}
               hierarchyIndex={hierarchyIndex}
+              activeMetricKey={effectiveMetricKey}
+              returnToHref={effectiveDetailHref}
             />
           )}
         </DialogContent>
@@ -6993,11 +7411,15 @@ export function BenchmarkDeepDiveDialogPanel({
   comparisonIndex,
   evalHierarchy,
   hierarchyIndex,
+  activeMetricKey,
+  returnToHref,
 }: {
   group: BenchmarkGroup
   comparisonIndex?: ComparisonIndex | null
   evalHierarchy?: EvalHierarchy | null
   hierarchyIndex?: Map<string, HierarchyEvalLocation> | null
+  activeMetricKey?: string | null
+  returnToHref?: string
 }) {
   const { mode } = useAudienceMode()
   const isResearchView = mode === "research"
@@ -7412,10 +7834,21 @@ export function BenchmarkDeepDiveDialogPanel({
             </p>
             <div className="border-t border-l border-[color:var(--border-soft)]">
               {crossFamilyAppearances.flatMap((entry) =>
-                entry.appearances.map((app) => (
+                entry.appearances.map((app) => {
+                  const siblingHasMetric = Boolean(
+                    activeMetricKey &&
+                      comparisonIndex?.evals[app.evalSummaryId]?.metrics.some(
+                        (m) => getComparisonMetricKey(m) === activeMetricKey,
+                      ),
+                  )
+                  const params = new URLSearchParams()
+                  if (returnToHref) params.set("from", returnToHref)
+                  if (activeMetricKey && siblingHasMetric) params.set("metric", activeMetricKey)
+                  const qs = params.toString()
+                  return (
                   <Link
                     key={`${entry.canonicalDisplayName}::${app.evalSummaryId}`}
-                    href={`/evals/${routeIdToPath(app.evalSummaryId)}`}
+                    href={`/evals/${routeIdToPath(app.evalSummaryId)}${qs ? `?${qs}` : ""}`}
                     className="flex items-center justify-between gap-4 border-r border-b border-[color:var(--border-soft)] px-3 py-2 transition-colors hover:bg-[color:var(--bg-warm)]"
                     style={{
                       background: app.isCurrent ? "var(--bg-warm)" : "var(--bg)",
@@ -7438,7 +7871,8 @@ export function BenchmarkDeepDiveDialogPanel({
                       Open <ArrowUpRight className="inline h-3 w-3 align-text-top" aria-hidden />
                     </span>
                   </Link>
-                )),
+                  )
+                }),
               )}
             </div>
           </section>
@@ -8104,11 +8538,13 @@ type EvaluatorMixData = {
 export function SummaryMetricsList({
   groups,
   currentDetailHref,
+  activeMetricKey,
   hierarchyIndex,
   sourcePrefixFamily,
 }: {
   groups: BenchmarkGroup[]
   currentDetailHref?: string
+  activeMetricKey?: string | null
   hierarchyIndex: Map<string, HierarchyEvalLocation> | null
   sourcePrefixFamily: Map<string, { key: string; displayName: string }>
 }) {
@@ -8189,7 +8625,12 @@ export function SummaryMetricsList({
             benchPath.toLowerCase() === sourceKey ? deriveBenchLabel(v, benchPath) : benchPath,
           ),
           evalSummaryId,
-          detailHref: getEvalDetailHref(v.evaluation, v.result, currentDetailHref),
+          detailHref: getEvalDetailHref(
+            v.evaluation,
+            v.result,
+            currentDetailHref,
+            activeMetricKey,
+          ),
           category: g.category,
           readings: [],
         }

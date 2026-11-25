@@ -48,4 +48,34 @@ describe("buildDistributionSeries — metric chip selection", () => {
     const labels = series!.map((s) => s.label)
     expect(new Set(labels).size).toBe(labels.length)
   })
+
+  it("never coerces null or empty-string matrix cells to 0 points", () => {
+    const summary = {
+      evaluation_id: "openeval%2Fharmbench",
+      evaluation_name: "HarmBench",
+      primary_metric_id: "attack-success-rate",
+      leaderboard_metrics: [
+        {
+          column_key: "attack-success-rate",
+          metric_id: "attack-success-rate",
+          metric_summary_id: "harmbench%3Aattack-success-rate",
+          display_name: "Attack Success Rate",
+          lower_is_better: true,
+          unit: "proportion",
+          scope: "root",
+        },
+      ],
+      leaderboard_rows: [
+        { model_info: { id: "a", name: "A" }, values: { "attack-success-rate": 0.2 } },
+        { model_info: { id: "b", name: "B" }, values: { "attack-success-rate": 0.4 } },
+        { model_info: { id: "c", name: "C" }, values: { "attack-success-rate": null } },
+        { model_info: { id: "d", name: "D" }, values: { "attack-success-rate": "" } },
+        { model_info: { id: "e", name: "E" }, values: { "attack-success-rate": undefined } },
+      ],
+    } as unknown as BenchmarkEvalSummary
+
+    // Only 2 finite scores exist — null/empty cells must NOT be coerced to 0
+    // to clear the >=3 point threshold.
+    expect(buildDistributionSeries(summary, null, ALL, ALL)).toBeNull()
+  })
 })

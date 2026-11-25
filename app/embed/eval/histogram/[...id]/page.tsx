@@ -32,6 +32,7 @@ export default function EmbedEvalHistogram() {
   const searchParams = useSearchParams()
   const evalId = routeIdFromSegments(params.id)
   const modelParam = searchParams.get("model") ?? ""
+  const metricParam = searchParams.get("metric")
   const modelRouteId = routeIdFromSegments(modelParam)
 
   const [summary, setSummary] = useState<Awaited<ReturnType<typeof fetchModelSummary>> | null>(null)
@@ -92,6 +93,7 @@ export default function EmbedEvalHistogram() {
       comparisonIndex={comparisonIndex}
       embedSurface="histogram"
       embedTargetEvalId={evalId}
+      embedTargetMetricKey={metricParam ?? undefined}
     />
   )
 }

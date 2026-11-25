@@ -26,6 +26,7 @@ import {
   type HierarchyEvalLocation,
 } from "@/lib/hierarchy-lookup"
 import { crossSuiteSiblingEvalIds } from "@/components/signals/benchmark-signals-strip"
+import { replaceUrlQueryParam } from "@/lib/metric-selection"
 import { useComparisonIndex } from "@/lib/use-comparison-index"
 
 function findBenchmarkSplitIds(hierarchy: EvalHierarchy | null, evalId: string): string[] {
@@ -70,9 +71,21 @@ export default function EvalDetailPage() {
   //
   // The curated study sidecar, where one exists, is richer and already on
   // the summary, so those pages never come here.
+  const returnTo = searchParams.get("from")
+  const metricParam = searchParams.get("metric")
   const crossSourceContextLoader = useMemo(() => {
     const benchmarkId = summary?.benchmark_id
-    const metricId = summary?.primary_metric_id
+    const requestedMetric = metricParam?.trim()
+    const matchedRootMetric = requestedMetric
+      ? (summary?.leaderboard_metrics ?? []).find(
+          (m) =>
+            m.scope !== "subtask" &&
+            (m.column_key === requestedMetric || m.metric_id === requestedMetric),
+        )
+      : undefined
+    const metricId = matchedRootMetric
+      ? (matchedRootMetric.metric_id || matchedRootMetric.column_key)
+      : summary?.primary_metric_id
     if (!summary || !benchmarkId || !metricId || summary.collection?.context) return undefined
     // Nothing to ask for when this benchmark has no sibling source, which
     // is most of them, or when the page reports one slice rather than the
@@ -92,15 +105,21 @@ export default function EvalDetailPage() {
         sourceLabel,
       })
     }
-  }, [summary])
+  }, [summary, metricParam])
 
-  const returnTo = searchParams.get("from")
+  const pathname = `/evals/${routeIdToPath(routeIdFromSegments(params.id as string | string[]))}`
+  const handleSelectMetric = useCallback(
+    (nextMetricId: string | null) => {
+      replaceUrlQueryParam(pathname, searchParams, "metric", nextMetricId)
+    },
+    [pathname, searchParams],
+  )
   // Single URL segment = merged all-sources benchmark page (spec F2);
   // two segments = per-source eval page (unchanged).
   const routeEvalId = routeIdFromSegments(params.id as string | string[])
   const isMergedRoute = isMergedEvalId(routeEvalId)
   const handleBack = useCallback(() => {
-    if (returnTo?.startsWith("/")) {
+    if (returnTo?.startsWith("/") && !returnTo.startsWith("//")) {
       router.push(returnTo)
       return
     }
@@ -129,10 +148,10 @@ export default function EvalDetailPage() {
         // The data is keyed by percent-encoded evaluation_ids (literal
         // `%2F` slug form, e.g. `llm-stats%2Fdrop`). The route is
         // catch-all so `params.id` arrives as a path segment array
-        // (`["llm-stats", "drop"]`) — join + re-encode for backend
-        // lookup. Every per-source evaluation_id in the snapshot uses
-        // `%2F`, so this is unambiguous.
-        const evalId = routeIdFromSegments(params.id as string | string[])
+        // (`["llm-stats", "drop"]`) — `routeEvalId` joins + re-encodes
+        // it into a stable string primitive so query-param updates do
+        // not re-trigger data loading when Next.js recreates `params.id`.
+        const evalId = routeEvalId
         const [found, evalHierarchy] = await Promise.all([
           fetchEvalSummary(evalId),
           fetchEvalHierarchy().catch((err) => {
@@ -170,7 +189,7 @@ export default function EvalDetailPage() {
       }
     }
     load()
-  }, [params.id, isMergedRoute])
+  }, [routeEvalId, isMergedRoute])
 
   // Cross-suite comparability reads the leaderboards of this page's
   // benchmark-index siblings. Not on the critical path for first paint, so
@@ -295,6 +314,8 @@ export default function EvalDetailPage() {
           comparisonIndex={comparisonIndex}
           activeSummary={activeSplitSummary ?? summary}
           crossSourceContextLoader={crossSourceContextLoader}
+          selectedMetricId={metricParam}
+          onSelectMetric={handleSelectMetric}
           splitConfig={
             splitOptions.length > 1
               ? {

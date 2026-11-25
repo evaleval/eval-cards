@@ -192,7 +192,7 @@ export function judgeCellSummary(
     )
   }
   if (others.length > 0) {
-    lines.push("Other judge readings, not ranked:")
+    lines.push("Other judge reports, not ranked:")
     for (const other of others) {
       const value =
         typeof other.score === "number" && Number.isFinite(other.score)
@@ -207,7 +207,7 @@ export function judgeCellSummary(
     // undisclosed-judge row): say so rather than showing nothing.
     label:
       headline?.label
-      ?? `${others.length} other judge reading${others.length === 1 ? "" : "s"}`,
+      ?? `${others.length} other judge report${others.length === 1 ? "" : "s"}`,
     tooltip: lines.join("\n"),
   }
 }
@@ -413,17 +413,23 @@ export interface ModelResultForBenchmark {
   /** The number the source published, before any canonical-scale
    *  conversion applied to `score`. */
   score_published?: number
+  /** Pipeline aggregation method that produced `score` (`single`, `median`,
+   *  `mean`, `weighted_mean`). Drives honest UI wording ("Median of N
+   *  readings" vs "Mean of N parts") instead of guessing "Avg". */
+  value_aggregation?: string | null
   aggregate_components?: Array<{
     evaluation_id: string
-    composite_benchmark_key: string
-    composite_benchmark_name: string
+    composite_benchmark_key?: string
+    composite_benchmark_name?: string
+    composite_slug?: string
+    composite_display_name?: string
     score: number
-    normalized_score: number
-    evaluation_timestamp: string
-    source_name?: string
-    source_type: SourceMetadata["source_type"]
-    source_organization_name: string
-    evaluator_relationship: SourceMetadata["evaluator_relationship"]
+    normalized_score?: number | null
+    evaluation_timestamp?: string | null
+    source_name?: string | null
+    source_type?: SourceMetadata["source_type"]
+    source_organization_name?: string | null
+    evaluator_relationship?: SourceMetadata["evaluator_relationship"]
   }>
 }
 

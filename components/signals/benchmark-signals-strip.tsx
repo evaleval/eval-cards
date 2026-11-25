@@ -96,6 +96,15 @@ interface DerivedSignal {
   breakdown: SignalBreakdown
 }
 
+export interface ActiveBenchmarkMetricOverride {
+  metricId: string
+  columnKey: string
+  label: string
+  lowerIsBetter: boolean | null
+  unit?: string | null
+  isPrimary: boolean
+}
+
 interface BenchmarkSignalsStripProps {
   summary: BenchmarkEvalSummary
   /** Used to find sibling appearances of the same canonical benchmark
@@ -103,6 +112,8 @@ interface BenchmarkSignalsStripProps {
   evalHierarchy?: EvalHierarchy | null
   /** Per-(eval, metric) leaderboards used to fetch sibling scores. */
   comparisonIndex?: ComparisonIndex | null
+  /** Active metric when viewing a multi-metric page filtered to a measure. */
+  activeMetric?: ActiveBenchmarkMetricOverride
 }
 
 /**
@@ -116,6 +127,7 @@ export function BenchmarkSignalsStrip({
   summary,
   evalHierarchy,
   comparisonIndex,
+  activeMetric,
 }: BenchmarkSignalsStripProps) {
   const [openSignal, setOpenSignal] = useState<SignalId | null>(null)
 
@@ -124,15 +136,18 @@ export function BenchmarkSignalsStrip({
   // on its own eval page) and so both want to look across the dataset
   // rather than within a single page.
   const crossSuite = useMemo(
-    () => buildCrossSuiteAggregate(summary, evalHierarchy, comparisonIndex),
-    [summary, evalHierarchy, comparisonIndex],
+    () => buildCrossSuiteAggregate(summary, evalHierarchy, comparisonIndex, activeMetric),
+    [summary, evalHierarchy, comparisonIndex, activeMetric],
   )
 
   const repro = useMemo(() => deriveReproducibility(summary), [summary])
   const comp = useMemo(() => deriveCompleteness(summary), [summary])
   const prov = useMemo(() => deriveProvenance(summary, crossSuite), [summary, crossSuite])
-  const cmp = useMemo(() => deriveComparability(summary, crossSuite), [summary, crossSuite])
-  const sat = useMemo(() => deriveSaturation(summary), [summary])
+  const cmp = useMemo(
+    () => deriveComparability(summary, crossSuite, activeMetric),
+    [summary, crossSuite, activeMetric],
+  )
+  const sat = useMemo(() => deriveSaturation(summary, activeMetric), [summary, activeMetric])
 
   const signals: Record<SignalId, DerivedSignal> = {
     reproducibility: repro,
@@ -741,6 +756,7 @@ export function buildCrossSuiteAggregate(
   summary: BenchmarkEvalSummary,
   hierarchy: EvalHierarchy | null | undefined,
   comparisonIndex: ComparisonIndex | null | undefined,
+  activeMetric?: ActiveBenchmarkMetricOverride,
 ): CrossSuiteAggregate | null {
   if (!hierarchy || !comparisonIndex) return null
 
@@ -770,14 +786,27 @@ export function buildCrossSuiteAggregate(
   }
   if (appearances.length < 2) return null
 
-  // Each source's reading of THIS page's metric (`primary_metric_id`). A
-  // source that does not report that metric measured something else: it
-  // is listed, never compared.
-  const pageMetricId = summary.primary_metric_id
+  // Each source's reading of THIS page's active metric (`primary_metric_id`
+  // unless filtered to another measure). A source that does not report that
+  // metric measured something else: it is listed, never compared.
+  const isNonPrimary = Boolean(activeMetric && !activeMetric.isPrimary)
+  const pageMetricId = isNonPrimary ? activeMetric!.metricId : summary.primary_metric_id
+  const thresholdConfig: BenchmarkEvalSummary["metric_config"] = isNonPrimary
+    ? {
+        evaluation_description: activeMetric!.label,
+        lower_is_better: activeMetric!.lowerIsBetter ?? false,
+        score_type: "continuous",
+        unit: activeMetric!.unit ?? undefined,
+        min_score: undefined,
+        max_score: undefined,
+      }
+    : summary.metric_config
   const metricByEval = new Map<string, ComparisonMetricEntry>()
   for (const app of appearances) {
     const metric = pageMetricId
-      ? comparisonIndex.evals[app.evalSummaryId]?.metrics.find((m) => m.metric_id === pageMetricId)
+      ? comparisonIndex.evals[app.evalSummaryId]?.metrics.find(
+          (m) => m.metric_id === pageMetricId || m.metric_key === pageMetricId,
+        )
       : undefined
     if (metric) metricByEval.set(app.evalSummaryId, metric)
   }
@@ -844,7 +873,7 @@ export function buildCrossSuiteAggregate(
     const scaled = tableScale
       ? { values: readings.map((r) => tableScale.values[tableIndex.get(r)!]), unit: tableScale.unit }
       : onOneScale(readings)
-    const threshold = scaled ? thresholdOnScale(scaled.unit, summary.metric_config) : null
+    const threshold = scaled ? thresholdOnScale(scaled.unit, thresholdConfig) : null
     const scoresByEval = new Map<string, number>()
     if (scaled) evalIds.forEach((id, i) => scoresByEval.set(id, scaled.values[i]))
     if (readings.length < 2 || !scaled || threshold == null) {
@@ -990,18 +1019,28 @@ function formatNotAssessableInputSummary(na: NotAssessableSummary): string {
 export function deriveComparability(
   summary: BenchmarkEvalSummary,
   cross: CrossSuiteAggregate | null,
+  activeMetric?: ActiveBenchmarkMetricOverride,
 ): DerivedSignal {
+  const isNonPrimary = Boolean(activeMetric && !activeMetric.isPrimary)
+  const scopedMetrics = activeMetric
+    ? summary.leaderboard_metrics?.filter((m) => m.column_key === activeMetric.columnKey)
+    : summary.leaderboard_metrics
   const na = summarizeNotAssessable({
-    leaderboardMetrics: summary.leaderboard_metrics,
+    leaderboardMetrics:
+      scopedMetrics && scopedMetrics.length > 0 ? scopedMetrics : summary.leaderboard_metrics,
     leaderboardRows: summary.leaderboard_rows,
-    modelResults: summary.model_results,
-    metricLabel: summary.metric_config?.evaluation_description || summary.evaluation_name,
+    modelResults: isNonPrimary ? [] : summary.model_results,
+    metricLabel: isNonPrimary
+      ? activeMetric!.label
+      : (summary.metric_config?.evaluation_description || summary.evaluation_name),
   })
 
   // Cross-suite is the meaningful comparison: the hierarchy keeps each
   // source on its own eval page, so within-page never has multiple
   // sources to compare against each other.
-  const metricName = summary.metric_config?.evaluation_description || summary.primary_metric_id || "this metric"
+  const metricName = isNonPrimary
+    ? activeMetric!.label
+    : (summary.metric_config?.evaluation_description || summary.primary_metric_id || "this metric")
   const notCompared = cross
     ? cross.appearances.length - cross.comparedEvalIds.size
     : 0
@@ -1010,7 +1049,7 @@ export function deriveComparability(
       ? [{ label: `Sources not reporting ${metricName} (not compared)`, value: notCompared.toString() }]
       : []),
     ...(c.notComparableCount > 0
-      ? [{ label: "Models whose readings are not one measurement (not compared)", value: c.notComparableCount.toString() }]
+      ? [{ label: "Models whose reports are not one measurement (not compared)", value: c.notComparableCount.toString() }]
       : []),
   ]
   if (cross && cross.comparedEvalIds.size >= 2 && cross.comparedCount > 0) {
@@ -1095,7 +1134,7 @@ export function deriveComparability(
       statUnit: "",
       headline:
         cross.notComparableCount > 0
-          ? "No model's readings across sources are one measurement."
+          ? "No model's reports across sources are one measurement."
           : "Sources don't share any models.",
       detail:
         cross.notComparableCount > 0
@@ -1545,13 +1584,36 @@ function hasSampleSizeField(results: ModelResultForBenchmark[]): boolean {
   })
 }
 
-export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
+export function deriveSaturation(
+  summary: BenchmarkEvalSummary,
+  activeMetric?: ActiveBenchmarkMetricOverride,
+): DerivedSignal {
   const triples = headlineResults(summary)
+  const isNonPrimary = Boolean(activeMetric && !activeMetric.isPrimary)
+  const effectiveMetricConfig: BenchmarkEvalSummary["metric_config"] = isNonPrimary
+    ? {
+        evaluation_description: activeMetric!.label,
+        lower_is_better: activeMetric!.lowerIsBetter ?? false,
+        score_type: "continuous",
+        unit: activeMetric!.unit ?? undefined,
+        min_score: undefined,
+        max_score: undefined,
+      }
+    : summary.metric_config
 
   const scored: { norm: number; reported: number }[] = []
-  for (const t of triples) {
-    const norm = normalizeScoreToFraction(t.score, summary.metric_config)
-    if (norm != null) scored.push({ norm, reported: t.score })
+  if (isNonPrimary) {
+    for (const row of summary.leaderboard_rows ?? []) {
+      const val = row.values[activeMetric!.columnKey]
+      if (typeof val !== "number" || !Number.isFinite(val)) continue
+      const norm = normalizeScoreToFraction(val, effectiveMetricConfig)
+      if (norm != null) scored.push({ norm, reported: val })
+    }
+  } else {
+    for (const t of triples) {
+      const norm = normalizeScoreToFraction(t.score, effectiveMetricConfig)
+      if (norm != null) scored.push({ norm, reported: t.score })
+    }
   }
 
   const formula =
@@ -1579,15 +1641,27 @@ export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
     )
   }
 
-  if (!saturationScaleIsKnown(summary.metric_config)) {
-    return notComputed("Not computed for this metric's scale.", describeUnknownScale(summary.metric_config))
+  if (isNonPrimary && activeMetric!.lowerIsBetter == null) {
+    return notComputed("Not computed for this metric's scale.", "no direction is declared")
+  }
+  if (isNonPrimary && !(activeMetric!.unit ?? "").trim()) {
+    return notComputed(
+      "Not computed for this metric's scale.",
+      "no unit or bounds are declared for this metric",
+    )
+  }
+  if (!saturationScaleIsKnown(effectiveMetricConfig)) {
+    return notComputed(
+      "Not computed for this metric's scale.",
+      describeUnknownScale(effectiveMetricConfig),
+    )
   }
   const top = scored.sort((x, y) => y.norm - x.norm).slice(0, SATURATION_TOP_N)
   const topRaw = top.map((x) => x.norm)
   if (topRaw.some((x) => x < -SATURATION_RANGE_TOLERANCE || x > 1 + SATURATION_RANGE_TOLERANCE)) {
     return notComputed(
       "Not computed for this metric's scale.",
-      describeOutOfRange(top.map((x) => x.reported), summary.metric_config),
+      describeOutOfRange(top.map((x) => x.reported), effectiveMetricConfig),
     )
   }
   const topScores = topRaw.map((x) => Math.min(1, Math.max(0, x)))
@@ -1620,10 +1694,10 @@ export function deriveSaturation(summary: BenchmarkEvalSummary): DerivedSignal {
       ? `${formatFixed3(used)} (reported ${formatReported(reported)})`
       : formatFixed3(used)
 
-  const bounds = finiteBounds(summary.metric_config)
+  const bounds = finiteBounds(effectiveMetricConfig)
   const scaleNote = bounds
     ? `declared bounds ${bounds.min} to ${bounds.max}${
-        summary.metric_config?.lower_is_better ? ", inverted (lower is better)" : ""
+        effectiveMetricConfig?.lower_is_better ? ", inverted (lower is better)" : ""
       }`
     : "no declared bounds; values above 1.5 read as percent"
 

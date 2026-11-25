@@ -2066,3 +2066,84 @@ describe("folded model id resolution (preflight bug A)", () => {
     })
   })
 })
+
+describe("pivotMultiMetricLeaderboardRows — atomic replacement metadata", () => {
+  it("clears stale verified, comparability, and judge metadata when a winning reading replaces a previous one", async () => {
+    const { pivotMultiMetricLeaderboardRows } = await import("@/lib/view-data")
+    const baseModel = {
+      model_info: { id: "org/m1", name: "Model 1", developer: "Org" },
+      model_route_id: "org%2Fm1",
+      evaluation_timestamp: "2026-05-01T00:00:00Z",
+      source_metadata: {
+        source_name: "OpenEval",
+        source_type: "leaderboard",
+        source_organization_name: "OpenEval",
+        evaluator_relationship: "third_party",
+      },
+      source_data: { dataset_name: "HarmBench" },
+    }
+    const assistedVerified = {
+      ...baseModel,
+      score: 0.95,
+      score_details: { score: 0.95 },
+      is_headline: true,
+      protocol_condition: JSON.stringify({ feedback: "answer_feedback" }),
+      judge_condition: "judge-a",
+      result: {
+        evaluation_name: "HarmBench",
+        evaluation_timestamp: "2026-05-01T00:00:00Z",
+        metric_config: { lower_is_better: false, score_type: "continuous" },
+        score_details: { score: 0.95 },
+        is_verified_evaluator: true,
+      },
+    }
+    const cleanUnverified = {
+      ...baseModel,
+      score: 0.81,
+      score_details: { score: 0.81 },
+      is_headline: true,
+      protocol_condition: undefined,
+      judge_condition: undefined,
+      result: {
+        evaluation_name: "HarmBench",
+        evaluation_timestamp: "2026-05-01T00:00:00Z",
+        metric_config: { lower_is_better: false, score_type: "continuous" },
+        score_details: { score: 0.81 },
+        is_verified_evaluator: false,
+      },
+    }
+    const altJudge = {
+      ...baseModel,
+      score: 0.77,
+      score_details: { score: 0.77 },
+      is_headline: false,
+      judge_condition: "judge-b",
+      result: {
+        evaluation_name: "HarmBench",
+        evaluation_timestamp: "2026-05-01T00:00:00Z",
+        metric_config: { lower_is_better: false, score_type: "continuous" },
+        score_details: { score: 0.77 },
+      },
+    }
+
+    const rows = pivotMultiMetricLeaderboardRows(
+      [{ column_key: "acc", metric_id: "acc", lower_is_better: false, scope: "root" }],
+      [assistedVerified as any, cleanUnverified as any, altJudge as any],
+      [
+        { metric_id: "acc", score_canonical: 0.95, comparability_status: "ok" },
+        { metric_id: "acc", score_canonical: 0.81, comparability_status: null },
+        { metric_id: "acc", score_canonical: 0.77, comparability_status: null },
+      ],
+      new Map([["org%2Fm1", cleanUnverified as any]]),
+    )
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].values).toEqual({ acc: 0.81 })
+    expect(rows[0].verified).toBeUndefined()
+    expect(rows[0].comparability_status_by_metric).toBeUndefined()
+    expect(rows[0].judge_condition_by_metric).toBeUndefined()
+    expect(rows[0].judge_alternates_by_metric).toEqual({
+      acc: [{ judge_condition: "judge-b", score: 0.77 }],
+    })
+  })
+})
